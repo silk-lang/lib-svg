@@ -1,0 +1,999 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "linear-template-and-cascade",
+      "input": "inputs/linear-template-and-cascade.svg",
+      "references": [
+        {
+          "path": "references/linear-template-and-cascade.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Template children use computed stop styles; object-bounding-box coordinates and coincident stops produce the literal half-width bands.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates",
+      "tolerance": {}
+    },
+    {
+      "id": "radial-focal-radius",
+      "input": "inputs/radial-focal-radius.svg",
+      "references": [
+        {
+          "path": "references/radial-focal-radius.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The half-offset boundary of concentric focal/end circles at radii 4 and 8 is radius 6; literal pixel-center samples specify its hard color transition.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradients",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-template-viewbox",
+      "input": "inputs/pattern-template-viewbox.svg",
+      "references": [
+        {
+          "path": "references/pattern-template-viewbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Pattern template children and viewBox scale a two-unit tile to four units; the pattern transform shifts repeated bands by one unit.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-context-and-paint-order",
+      "input": "inputs/marker-context-and-paint-order.svg",
+      "references": [
+        {
+          "path": "references/marker-context-and-paint-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Start reversal and reference-point placement orient the marker; context-fill comes from the marked path and paint-order places markers below its stroke.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#RenderingMarkers",
+      "tolerance": {}
+    },
+    {
+      "id": "non-scaling-stroke",
+      "input": "inputs/non-scaling-stroke.svg",
+      "references": [
+        {
+          "path": "references/non-scaling-stroke.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The transformed path retains a two-unit stroke in the host viewport instead of scaling stroke width with its geometry.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "binary-shape-rendering",
+      "input": "inputs/binary-shape-rendering.svg",
+      "references": [
+        {
+          "path": "references/binary-shape-rendering.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The documented no-antialiasing hint policy snaps coverage to binary values; all corner coverages exceed one half in this case.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#ShapeRendering",
+      "tolerance": {}
+    },
+    {
+      "id": "linear-rgb-interpolation-and-compositing",
+      "input": "inputs/linear-rgb-interpolation-and-compositing.svg",
+      "references": [
+        {
+          "path": "references/linear-rgb-interpolation-and-compositing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Half-linear-light black/white is sRGB 188, both for the gradient midpoint and source-over/group-opacity compositing; conversion occurs around arithmetic, not by reinterpreting linear bytes.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#ColorInterpolation",
+      "tolerance": {}
+    },
+    {
+      "id": "template-transform-cascade",
+      "input": "inputs/template-transform-cascade.svg",
+      "references": [
+        {
+          "path": "references/template-transform-cascade.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A template's gradientTransform enters the referencing gradient's presentation cascade; authored transform:none and transform:initial override it.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-subpath-roles",
+      "input": "inputs/marker-subpath-roles.svg",
+      "references": [
+        {
+          "path": "references/marker-subpath-roles.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Only the first and final vertices of the whole path use start/end markers; disconnected subpath boundaries use mid markers with their own tangents.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerStartProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-percentages-and-cycle",
+      "input": "inputs/marker-percentages-and-cycle.svg",
+      "references": [
+        {
+          "path": "references/marker-percentages-and-cycle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Marker viewBox does not establish an SVG percentage viewport: 25% is four parent user units. A recursive marker edge is ignored without dropping its ordinary content.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ElementsThatEstablishViewports",
+      "tolerance": {}
+    },
+    {
+      "id": "use-context-paint-coordinates",
+      "input": "inputs/use-context-paint-coordinates.svg",
+      "references": [
+        {
+          "path": "references/use-context-paint-coordinates.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Context paint retains the use host bounding box and paint coordinates, and resolves currentColor at that host; the child retains its own fill-opacity property.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#context-paint",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-overflow-visibility",
+      "input": "inputs/marker-overflow-visibility.svg",
+      "references": [
+        {
+          "path": "references/marker-overflow-visibility.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Default marker overflow clips its physical drawing surface; explicit visible overflow exposes the full child rectangle without leaking clipping to another marker.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#RenderingMarkers",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-linear-spreads",
+      "input": "inputs/gradient-linear-spreads.svg",
+      "references": [
+        {
+          "path": "references/gradient-linear-spreads.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Eight-unit vector with a midpoint step: explicit bands cover both negative and positive pad/repeat/reflect extensions.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#LinearGradientElementSpreadMethodAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-radial-spreads",
+      "input": "inputs/gradient-radial-spreads.svg",
+      "references": [
+        {
+          "path": "references/gradient-radial-spreads.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Concentric radii 2 and 6 give four-unit annuli; literal pixel-center ring membership covers all spreads including inside the focal circle.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientElementSpreadMethodAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-stop-order-alpha",
+      "input": "inputs/gradient-stop-order-alpha.svg",
+      "references": [
+        {
+          "path": "references/gradient-stop-order-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Offsets clamp to [0,1], the descending .2 stop moves to .5 and wins at pixel center x=6.5; stop color alpha multiplies stop-opacity.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-empty-single-degenerate",
+      "input": "inputs/gradient-empty-single-degenerate.svg",
+      "references": [
+        {
+          "path": "references/gradient-empty-single-degenerate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A valid empty server paints none rather than its URL fallback; one stop is solid even outside a radial cone; a zero linear vector uses the final stop including opacity.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#LinearGradientNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-cross-kind-templates",
+      "input": "inputs/gradient-cross-kind-templates.svg",
+      "references": [
+        {
+          "path": "references/gradient-cross-kind-templates.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Linear-radial-linear and radial-linear-radial chains retain distant same-kind coordinates; common units/spread/transform and cloned stops cross kinds, local stops replace them, and CSS translation overrides template translation.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-radius-ranges",
+      "input": "inputs/gradient-radius-ranges.svg",
+      "references": [
+        {
+          "path": "references/gradient-radius-ranges.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Negative literals are unspecified before template lookup; negative calc radii clamp to zero after expression selection and percentage evaluation, never fall back to template radii.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientElementRAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-radial-circle-boundaries",
+      "input": "inputs/gradient-radial-circle-boundaries.svg",
+      "references": [
+        {
+          "path": "references/gradient-radial-circle-boundaries.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent half-stop circles cover off-center fx/fy/fr, equal positive radii with distinct centers, and fr greater than r without focal-radius clamping.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-degenerate-circle-precedence",
+      "input": "inputs/gradient-degenerate-circle-precedence.svg",
+      "references": [
+        {
+          "path": "references/gradient-degenerate-circle-precedence.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Object-bbox zero dimensions suppress even one-stop paint; otherwise zero/one stops resolve before geometric distribution, while two-or-more-stop identical circles (including radius zero) paint nothing.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-exterior-focus-cone",
+      "input": "inputs/gradient-exterior-focus-cone.svg",
+      "references": [
+        {
+          "path": "references/gradient-exterior-focus-cone.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An exterior focal point is not moved to the end circle; literal cone-ray membership leaves pixels outside the cone transparent.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-tangent-limit",
+      "input": "inputs/gradient-tangent-limit.svg",
+      "references": [
+        {
+          "path": "references/gradient-tangent-limit.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "At internal tangency the exterior half-plane uses the terminal color for pad and the offset-weighted period average (one-quarter red, three-quarters blue) for repeat/reflect.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "gradient-bbox-and-user-units",
+      "input": "inputs/gradient-bbox-and-user-units.svg",
+      "references": [
+        {
+          "path": "references/gradient-bbox-and-user-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Zero-height object bounds suppress bbox stroke paint without activating URL fallback; userSpace percentages use the 24-unit SVG viewport, and normalized bbox radial circles map to an ellipse.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ObjectBoundingBox",
+      "tolerance": {}
+    },
+    {
+      "id": "vector-effect-hosts",
+      "input": "inputs/vector-effect-hosts.svg",
+      "references": [
+        {
+          "path": "references/vector-effect-hosts.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Nested viewport strokes retain outer viewport scaling; screen strokes exclude it. Root viewBox scaling affects the centerline, not host stroke width.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation",
+      "tolerance": {}
+    },
+    {
+      "id": "vector-effect-geometry-combinations",
+      "input": "inputs/vector-effect-geometry-combinations.svg",
+      "references": [
+        {
+          "path": "references/vector-effect-geometry-combinations.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "All seven non-stroke combinations use the pinned determinant/translation formulas, including reflection, own-transform fixed position, inherited container geometry and CSS singular suppression.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation",
+      "tolerance": {}
+    },
+    {
+      "id": "vector-effect-projective-strokes",
+      "input": "inputs/vector-effect-projective-strokes.svg",
+      "references": [
+        {
+          "path": "references/vector-effect-projective-strokes.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Projective centerlines are stroked in the host, including an eye-plane crossing whose visible ray has no artificial viewport cap.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation",
+      "tolerance": {}
+    },
+    {
+      "id": "vector-effect-host-dashes-and-paints",
+      "input": "inputs/vector-effect-host-dashes-and-paints.svg",
+      "references": [
+        {
+          "path": "references/vector-effect-host-dashes-and-paints.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Stroke width, dash lengths and offset use the host metric while the gradient retains the original shape-to-device paint coordinates.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-non-scaling-mixed-units",
+      "input": "inputs/marker-non-scaling-mixed-units.svg",
+      "references": [
+        {
+          "path": "references/marker-non-scaling-mixed-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Stroke-width markers use actual non-scaling host widths and independently mapped incoming/outgoing tangent bisectors; user-space markers retain source geometry scaling in the same path.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-raster-overflow-order",
+      "input": "inputs/pattern-raster-overflow-order.svg",
+      "references": [
+        {
+          "path": "references/pattern-raster-overflow-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "All nine overflow-visible translated pictures intersect the physical tile; row-major painting puts the blue corner after nine red alpha layers, including copies beyond adjacent neighbors (SVGWG issue 129).",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-raster-nested-stroke",
+      "input": "inputs/pattern-raster-nested-stroke.svg",
+      "references": [
+        {
+          "path": "references/pattern-raster-nested-stroke.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Nested image resources are prepared at device-aware resolution; gradient coordinates and resource-local non-scaling-stroke host maps follow both pattern placements without double-transforming the centerline (SVGWG issue 2448).",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-raster-overflow-gradient",
+      "input": "inputs/pattern-raster-overflow-gradient.svg",
+      "references": [
+        {
+          "path": "references/pattern-raster-overflow-gradient.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Gradient instance maps change with every translated overflow picture; the final row-major copy paints the red source interval, not the unplaced blue interval.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-raster-opacity-color",
+      "input": "inputs/pattern-raster-opacity-color.svg",
+      "references": [
+        {
+          "path": "references/pattern-raster-opacity-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The retained picture preserves isolated group opacity and linearRGB compositing; the referencing fill opacity then scales the premultiplied image exactly once.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#ColorInterpolation",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-raster-projective",
+      "input": "inputs/pattern-raster-projective.svg",
+      "references": [
+        {
+          "path": "references/pattern-raster-projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A finite projective pattern map repeats a complete colored tile with native projective image sampling and no transparent seams.",
+      "spec": "https://www.w3.org/TR/css-transforms-2/#3d-rendering",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-bbox-origin-content",
+      "input": "inputs/pattern-bbox-origin-content.svg",
+      "references": [
+        {
+          "path": "references/pattern-bbox-origin-content.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Object bbox origin belongs to the instance; bbox-content scales a quarter-width child into four-pixel stripes.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-mixed-units-origin",
+      "input": "inputs/pattern-mixed-units-origin.svg",
+      "references": [
+        {
+          "path": "references/pattern-mixed-units-origin.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Object tile units and user-space content keep tile x translation outside the child scale.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-template-percent-cascade",
+      "input": "inputs/pattern-template-percent-cascade.svg",
+      "references": [
+        {
+          "path": "references/pattern-template-percent-cascade.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Template children inherit referencing pattern styles; viewBox does not establish a new descendant percentage viewport.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-overflow-distant-alpha-order",
+      "input": "inputs/pattern-overflow-distant-alpha-order.svg",
+      "references": [
+        {
+          "path": "references/pattern-overflow-distant-alpha-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Overflow reaches three tiles away. Row-major copies composite the distant red layer before the local blue layer; group bounds must not crop either.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-nested-retained",
+      "input": "inputs/pattern-nested-retained.svg",
+      "references": [
+        {
+          "path": "references/pattern-nested-retained.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A nested retained pattern paints repeated two-pixel stripes without URL fallback.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-cycle-and-zero-fallback",
+      "input": "inputs/pattern-cycle-and-zero-fallback.svg",
+      "references": [
+        {
+          "path": "references/pattern-cycle-and-zero-fallback.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An active self-reference selects its URL fallback; a valid zero-width pattern suppresses paint rather than selecting its fallback.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-resource-local-nss",
+      "input": "inputs/pattern-resource-local-nss.svg",
+      "references": [
+        {
+          "path": "references/pattern-resource-local-nss.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Non-scaling stroke is resolved in the resource-local host before the pattern instance scales the retained picture.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-finite-projective-solid",
+      "input": "inputs/pattern-finite-projective-solid.svg",
+      "references": [
+        {
+          "path": "references/pattern-finite-projective-solid.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Finite projective paint mapping belongs to the pattern instance and leaves fully covered repeated tiles continuous.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-overflow-marker-bounds",
+      "input": "inputs/pattern-overflow-marker-bounds.svg",
+      "references": [
+        {
+          "path": "references/pattern-overflow-marker-bounds.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Painted pattern bounds include marker content three tiles outside the physical tile.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-use-context-boundary",
+      "input": "inputs/pattern-use-context-boundary.svg",
+      "references": [
+        {
+          "path": "references/pattern-use-context-boundary.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An unrelated pattern definition does not acquire the referencing use context; a use inside the pattern does establish context.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#context-paint",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-distances",
+      "input": "inputs/path-length-distances.svg",
+      "references": [
+        {
+          "path": "references/path-length-distances.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Author distances calibrate absolute dash components and offsets, not viewport percentages; invalid pathLength is unspecified and basic shapes share path calibration.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-zero",
+      "input": "inputs/path-length-zero.svg",
+      "references": [
+        {
+          "path": "references/path-length-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Zero author length is the infinite-scale limit: zero dashes stay zero, percentages stay finite, periodic offsets retain their phase, and pathLength is not inherited.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-host-space",
+      "input": "inputs/path-length-host-space.svg",
+      "references": [
+        {
+          "path": "references/path-length-host-space.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Calibration measures the actual stroke host for non-scaling strokes, shares no stale metric between differently mapped use instances, and totals all subpaths while restarting dash phase per subpath.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-clipped-eye-stroke",
+      "input": "inputs/pattern-clipped-eye-stroke.svg",
+      "references": [
+        {
+          "path": "references/pattern-clipped-eye-stroke.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A physical pattern tile clips an unbounded positive-w non-scaling stroke; finite tile clipping must not require unclipped resource bounds.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-zero-mixed",
+      "input": "inputs/path-length-zero-mixed.svg",
+      "references": [{"path": "references/path-length-zero-mixed.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "Infinite-scale modulo preserves percentage gaps, negative offsets, min/max branches and rational cancellation before replacing a terminal infinite interval.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-analytic-curves",
+      "input": "inputs/path-length-analytic-curves.svg",
+      "references": [{"path": "references/path-length-analytic-curves.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "Analytic circle and host-space ellipse metrics put quarter-period boundaries on symmetry axes independently specified by quarter arcs.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-legacy-clip-overflow",
+      "input": "inputs/pattern-legacy-clip-overflow.svg",
+      "references": [{"path": "references/pattern-legacy-clip-overflow.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "Legacy clip retains content outside the physical tile whose translated overflow copies fill the origin tile.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-negative-zero",
+      "input": "inputs/path-length-negative-zero.svg",
+      "references": [{"path": "references/path-length-negative-zero.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "A negative-zero divisor remains negative inside CSS math; the limiting max/min expression selects the one-percent dash, not two percent.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-empty-budget",
+      "input": "inputs/pattern-empty-budget.svg",
+      "references": [{"path": "references/pattern-empty-budget.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "A valid empty resource paints nothing without selecting fallback paint or allocating its otherwise excessive physical tile.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement",
+      "tolerance": {}
+    },
+    {
+      "id": "path-length-small-coordinate-space",
+      "input": "inputs/path-length-small-coordinate-space.svg",
+      "references": [{"path": "references/path-length-small-coordinate-space.svg", "relation": "=="}],
+      "status": "pass",
+      "reason": "Calibrated dashes remain accurate after nanounit geometry is magnified, while an exactly degenerate round-capped segment remains visible.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "stop-current-color",
+      "input": "inputs/stop-current-color.svg",
+      "references": [
+        {
+          "path": "references/stop-current-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "stop-color currentColor uses the stop's computed color, inherited from the gradient element, not the painted element.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopColorProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-attribute-not-presentation",
+      "input": "inputs/marker-attribute-not-presentation.svg",
+      "references": [
+        {
+          "path": "references/marker-attribute-not-presentation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The marker shorthand has no presentation attribute, so a marker attribute draws no markers.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerShorthand",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-bbox-viewbox-aspect",
+      "input": "inputs/pattern-bbox-viewbox-aspect.svg",
+      "references": [
+        {
+          "path": "references/pattern-bbox-viewbox-aspect.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A pattern viewBox is fitted with preserveAspectRatio to the tile region as it lies on the canvas, also for objectBoundingBox tiles.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "context-fill-pattern-use-bbox",
+      "input": "inputs/context-fill-pattern-use-bbox.svg",
+      "references": [
+        {
+          "path": "references/context-fill-pattern-use-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "context-fill uses the coordinate space and bounding box of the context element, here the use element, so the pattern is continuous across both rectangles.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#SpecifyingPaint",
+      "tolerance": {}
+    },
+    {
+      "id": "dash-pathlength-whole-ring",
+      "input": "inputs/dash-pathlength-whole-ring.svg",
+      "references": [
+        {
+          "path": "references/dash-pathlength-whole-ring.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "pathLength=\"1\" with stroke-dasharray=\"1\": one dash spans the closed curve and renders as the whole ring instead of failing on the seam boundary.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "dash-pathlength-open-arc-end",
+      "input": "inputs/dash-pathlength-open-arc-end.svg",
+      "references": [
+        {
+          "path": "references/dash-pathlength-open-arc-end.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "pathLength=\"1\" with stroke-dasharray=\"1\" on an open arc: the dash ends exactly at the path end and renders like a dash longer than the path.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "marker-antiparallel-bisector",
+      "input": "inputs/marker-antiparallel-bisector.svg",
+      "references": [
+        {
+          "path": "references/marker-antiparallel-bisector.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "At a 180-degree turn the auto orientation bisector points counterclockwise from the incoming direction, as browsers and WPT markers-orient-002 do (svgwg#333).",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "pattern-transform-empty-attribute",
+      "input": "inputs/pattern-transform-empty-attribute.svg",
+      "references": [
+        {
+          "path": "references/pattern-transform-empty-attribute.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A blank patternTransform is no transform list, so it does not block inheriting the template transform (WPT pattern-transform-empty-attr).",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElementPatternTransformAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "d-property",
+      "input": "inputs/d-property.svg",
+      "references": [
+        {
+          "path": "references/d-property.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The d property from a style attribute and from a style sheet replaces the d attribute; path() takes path data in a string.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#TheDProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "dash-pathlength-hidden",
+      "input": "inputs/dash-pathlength-hidden.svg",
+      "references": [
+        {
+          "path": "references/dash-pathlength-hidden.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A dash offset equal to pathLength, the hidden state of a line-drawing animation, leaves every subpath in one gap: no dash begins at the subpath length, so nothing is drawn, whatever the caps.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#StrokeDashing",
+      "tolerance": {}
+    },
+    {
+      "id": "mesh-bilinear-grid",
+      "input": "inputs/mesh-bilinear-grid.svg",
+      "references": [
+        {
+          "path": "references/mesh-bilinear-grid.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A two by two mesh shares edges and corner colours between neighbouring patches; straight edges written as l, L, c and C make each patch affine, so pixel centres take the bilinear corner interpolation exactly.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshStructure",
+      "tolerance": {}
+    },
+    {
+      "id": "mesh-bbox-template",
+      "input": "inputs/mesh-bbox-template.svg",
+      "references": [
+        {
+          "path": "references/mesh-bbox-template.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A meshgradient without children uses its template's rows; object-bounding-box path data are bbox fractions, and the referencing element's transform halves the mesh height. The rest of the rectangle is unpainted.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshGradientAttributes",
+      "tolerance": {}
+    },
+    {
+      "id": "mesh-bicubic",
+      "input": "inputs/mesh-bicubic.svg",
+      "references": [
+        {
+          "path": "references/mesh-bicubic.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "type=\"bicubic\" uses monotone corner derivatives along mesh rows and columns, zero cross derivatives and chord-scaled Hermite interpolation, clamped to [0, 1].",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshPatchPainting",
+      "tolerance": {}
+    },
+    {
+      "id": "mesh-in-error",
+      "input": "inputs/mesh-in-error.svg",
+      "references": [
+        {
+          "path": "references/mesh-in-error.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A row with fewer patches than the first, a stop path that is not c, C, l or L, and a patch with too few stops put the mesh in error; such meshes paint nothing.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshStructure",
+      "tolerance": {}
+    },
+    {
+      "id": "mesh-curved-seam",
+      "input": "inputs/mesh-curved-seam.svg",
+      "references": [
+        {
+          "path": "references/mesh-curved-seam.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Neighbouring patches meet along their shared edges, curved or not: a one-colour mesh paints every pixel it covers.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshPatchPainting",
+      "tolerance": {}
+    },
+    {
+      "id": "hatch-lines",
+      "input": "inputs/hatch-lines.svg",
+      "references": [
+        {
+          "path": "references/hatch-lines.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each hatchpath without d is a line along the strip at its offset, stroked with its own solid stroke; strips repeat every pitch from x.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchpathNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "hatch-rotate-template",
+      "input": "inputs/hatch-rotate-template.svg",
+      "references": [
+        {
+          "path": "references/hatch-rotate-template.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "href copies pitch and the hatchpath children; rotate turns the strips so they stack down the page from the origin (x, y).",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchElementAttributes",
+      "tolerance": {}
+    },
+    {
+      "id": "hatch-bbox-units",
+      "input": "inputs/hatch-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/hatch-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "x and pitch are bounding-box fractions (2 and 10 user units here) while hatchpath offsets and stroke widths stay in user units.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchElementAttributes",
+      "tolerance": {}
+    },
+    {
+      "id": "hatch-overflow",
+      "input": "inputs/hatch-overflow.svg",
+      "references": [
+        {
+          "path": "references/hatch-overflow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The UA style sheet makes hatch overflow hidden, clipping strokes to their strip; overflow visible draws the parts beyond it.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "hatch-paths",
+      "input": "inputs/hatch-paths.svg",
+      "references": [
+        {
+          "path": "references/hatch-paths.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A hatchpath d repeats down the strip by the y of its last point; without an initial moveto it starts at that point's x on the strip origin line and continues one subpath, joined with stroke-linejoin. Hatch path fills are ignored.",
+      "spec": "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchpathNotes",
+      "tolerance": {}
+    }
+  ]
+}

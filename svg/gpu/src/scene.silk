@@ -1,0 +1,107 @@
+//! SVG display lists on the GPU: [`record`] lowers a list into a `gpu_scene.Scene`
+//! (`svg_raster.lower` explains what runs on the CPU), and [`render`] draws it.
+import svg_core.scene { DisplayList, RenderError }
+import svg_raster.canvas { Surface, Canvas, NO_MASK }
+import svg_raster.lower { Lowering }
+import svg_raster.lower
+import gpu_scene.scene { Scene, MASK_ALPHA, MASK_LUMINANCE }
+import gpu_scene.scene as scenes
+import gpu_scene.renderer { SceneRenderer }
+import vector.strips { Coverage }
+import vector.pixmap { Rgba8 }
+import vector.paint { Gradient, ImagePattern }
+import vector.geometry_error { GeometryError }
+import webgpu.runtime { Device, GpuError }
+import webgpu.resources { Queue, TextureView }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+/// A `gpu_scene.Scene` as a lowering canvas.
+pub struct SceneCanvas<'a> {
+  pub scene: &'a mut Scene,
+}
+
+impl<'a> Surface for SceneCanvas<'a> {
+  effect fn solid(self: &mut Self, coverage: &Coverage, color: Rgba8, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    run self.scene.fill(coverage, color, opacity)
+  }
+
+  effect fn gradient(self: &mut Self, coverage: &Coverage, gradient: &Gradient, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    run self.scene.fillGradient(coverage, gradient, opacity)
+  }
+
+  effect fn image(
+    self: &mut Self,
+    coverage: &Coverage,
+    pattern: &ImagePattern<'_>,
+    opacity: u8,
+  ) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    run self.scene.fillImage(coverage, pattern, opacity)
+  }
+}
+
+fn sceneMask(mask: u32) -> u32 {
+  return if mask == NO_MASK {
+    scenes.NO_MASK
+  } else {
+    mask
+  }
+}
+
+impl<'a> Canvas for SceneCanvas<'a> {
+  effect fn pushLayer(self: &mut Self) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    run self.scene.pushLayer()
+  }
+
+  effect fn popLayer(self: &mut Self, mode: u8, opacity: u8, mask: u32) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    run self.scene.popLayer(mode, opacity, sceneMask(mask))
+  }
+
+  effect fn popMask(self: &mut Self, luminance: bool, clip: u32) -> u32
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    return run self.scene.popMask(
+      if luminance {
+        MASK_LUMINANCE
+      } else {
+        MASK_ALPHA
+      },
+      sceneMask(clip),
+    )
+  }
+}
+
+/// Replaces `scene` with `list` lowered into it, sized like the list.
+pub effect fn record(list: &DisplayList, scene: &mut Scene) -> Lowering
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  scene.* = Scene.make(list.width, list.height)
+  let mut canvas = SceneCanvas { scene: &mut scene.* }
+  return run lower.lower(list, &mut canvas)
+}
+
+/// Lowers `list` and draws it onto `target`, an RGBA8Unorm view of the list's size cleared
+/// to transparent first, then submits.
+pub effect fn render(
+  renderer: &mut SceneRenderer,
+  device: &Device,
+  queue: &Queue,
+  list: &DisplayList,
+  target: &TextureView,
+) -> Lowering
+  ! RenderError | GpuError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut scene = Scene.make(list.width, list.height)
+  let lowering = run record(list, &mut scene)
+  run renderer.render(device, queue, &scene, target, Rgba8.make(0, 0, 0, 0))
+  return lowering
+}

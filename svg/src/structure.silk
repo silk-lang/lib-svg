@@ -1,0 +1,1456 @@
+//! SVG source documents and bounded use-instance trees. XML is parsed once per
+//! resource; instances retain document-qualified source IDs and separate shadow links.
+import silk.text.string { String }
+import conditional { Config, qualifies, selectSwitchChild }
+import resources {
+  Resolver,
+  Response,
+  ResourceError,
+  ResourceKind,
+  Policy,
+  ProcessingMode,
+  Limits as ResourceLimits
+}
+import resources
+import compressed_document
+import url { Url, UrlError, percentDecode }
+import silk.xml.document {
+  XmlDocument,
+  XmlNodeId,
+  XmlNodeKind,
+  XmlAttribute,
+  XmlEncoding,
+  XmlError,
+  XmlReason,
+  XmlLimits,
+}
+import svg_css.tokens { equal, insensitive }
+import silk.collections.bytes { Bytes }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.ownership { Copy }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.core.order { Order, Ordering }
+import silk.num.u8
+import silk.num.usize
+
+pub struct DocumentId {
+  pub index: usize
+}
+
+pub struct SourceId {
+  pub document: DocumentId,
+  pub node: XmlNodeId
+}
+
+pub struct OccurrenceId {
+  pub index: usize
+}
+
+impl Copy for DocumentId {}
+
+impl Copy for SourceId {}
+
+impl Copy for OccurrenceId {}
+
+pub enum StructureError {
+  InvalidXml,
+  InvalidRoot,
+  TooLarge
+}
+
+pub struct Limits {
+  pub maxDocuments: usize,
+  pub maxOccurrences: usize,
+  pub maxReferenceDepth: usize,
+  /// Parent-edge depth across light and shadow trees; root zero, hard ceiling 256.
+  pub maxOccurrenceDepth: usize,
+  pub maxTotalBytes: usize,
+  /// Aggregate retained URL serialization bytes, including XML Base expansion.
+  pub maxUrlBytes: usize,
+  pub maxRequests: usize,
+}
+
+impl Copy for Limits {}
+
+impl Limits {
+  pub fn defaults() -> Limits {
+    return Limits {
+      maxDocuments: 32,
+      maxOccurrences: 1000000,
+      maxReferenceDepth: 64,
+      maxOccurrenceDepth: 256,
+      maxTotalBytes: 67108864,
+      maxUrlBytes: 67108864,
+      maxRequests: 128,
+    }
+  }
+}
+
+pub struct Options<'a> {
+  pub policy: Policy,
+  pub languages: &'a [&'a [u8]],
+  pub supportedExtensions: &'a [&'a [u8]],
+  /// Encoded fragment without '#'. The rendering layer applies document views.
+  pub fragment: Option<&'a [u8]>,
+  pub limits: Limits,
+}
+
+impl<'a> Options<'a> {
+  pub fn defaults() -> Options<'static> {
+    let empty: &'static [&'static [u8]] = &[]
+    return Options {
+      policy: Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+      languages: empty,
+      supportedExtensions: empty,
+      fragment: Option<&'static [u8]>.None,
+      limits: Limits.defaults(),
+    }
+  }
+}
+
+struct IdEntry {
+  key: u64,
+  node: XmlNodeId,
+  attribute: XmlAttribute
+}
+
+impl Copy for IdEntry {}
+
+impl Order for IdEntry {
+  fn compare(a: &Self, b: &Self) -> Ordering {
+    if a.key < b.key {
+      return Ordering.Less
+    }
+    if a.key > b.key {
+      return Ordering.Greater
+    }
+    if a.node.index < b.node.index {
+      return Ordering.Less
+    }
+    if a.node.index > b.node.index {
+      return Ordering.Greater
+    }
+    return Ordering.Equal
+  }
+}
+
+struct Reference {
+  url: Option<usize>,
+  // The URL is source-local; authorization and targets are occurrence-local.
+}
+
+impl Copy for Reference {}
+
+pub struct SourceDocument {
+  pub document: XmlDocument,
+  pub base: usize,
+  pub nodeBases: List<usize>,
+  pub policy: Policy,
+  ids: List<IdEntry>,
+  references: List<Reference>,
+  ordinaryScope: Option<usize>,
+}
+
+pub struct Occurrence {
+  pub source: SourceId,
+  pub parent: Option<OccurrenceId>,
+  pub firstChild: Option<OccurrenceId>,
+  pub nextSibling: Option<OccurrenceId>,
+  pub previousSibling: Option<OccurrenceId>,
+  pub shadow: Option<OccurrenceId>,
+  pub scope: usize,
+  pub shadowRoot: bool,
+  pub eligible: bool,
+  depth: usize,
+}
+
+impl Copy for Occurrence {}
+
+pub struct Scope {
+  pub host: Option<OccurrenceId>,
+  pub root: OccurrenceId,
+  pub document: DocumentId,
+  pub depth: usize,
+  pub policy: Policy,
+}
+
+impl Copy for Scope {}
+
+struct CachedDocument {
+  url: usize,
+  document: Option<DocumentId>
+}
+
+impl Copy for CachedDocument {}
+
+pub struct Graph {
+  pub documents: List<SourceDocument>,
+  pub urls: List<Url>,
+  pub occurrences: List<Occurrence>,
+  pub scopes: List<Scope>,
+  pub root: OccurrenceId,
+  pub limits: Limits,
+  cache: List<CachedDocument>,
+  totalBytes: usize,
+  urlBytes: usize,
+  requests: usize,
+  templates: HashMap<usize, SourceId>,
+  referenceTargets: HashMap<ReferenceKey, Option<SourceId>>,
+  lookup: HashMap<ScopedSource, OccurrenceId>,
+  indexed: usize,
+  expanded: usize,
+}
+
+struct ScopedSource {
+  scope: usize,
+  document: usize,
+  node: usize,
+}
+
+impl Copy for ScopedSource {}
+
+impl HashKey for ScopedSource {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.scope == b.scope && a.document == b.document && a.node == b.node
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    return Hash.combine(
+      Hash.combine(Hash.mix(seed, usize.toU64(value.scope)), usize.toU64(value.document)),
+      usize.toU64(value.node),
+    )
+  }
+}
+
+struct ReferenceKey {
+  request: usize,
+  mode: ProcessingMode,
+}
+
+impl Copy for ReferenceKey {}
+
+impl HashKey for ReferenceKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.request == b.request && a.mode == b.mode
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    let mode: u64 = match value.mode {
+      ProcessingMode.Static => 0
+      ProcessingMode.Animated => 1
+      ProcessingMode.SecureStatic => 2
+      ProcessingMode.SecureAnimated => 3
+    }
+    return Hash.combine(Hash.mix(seed, usize.toU64(value.request)), mode)
+  }
+}
+
+fn fingerprint(text: &[u8]) -> u64 {
+  let seed = Hash.seed(0)
+  let mut result = Hash.mix(&seed, usize.toU64(text.length))
+  let mut i: usize = 0
+  while i < text.length {
+    result = Hash.combine(result, u8.toU64(text[i]))
+    i = i + 1
+  }
+  return result
+}
+
+fn svg(document: &XmlDocument, node: XmlNodeId) -> bool {
+  return equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+    b"http://www.w3.org/2000/svg",
+  )
+}
+
+fn svgRoot(document: &XmlDocument) -> bool {
+  let root = XmlDocument.root(document)
+  return svg(document, root)
+    && equal(String.utf8Bytes(XmlDocument.localName(document, root)), b"svg")
+}
+
+fn validTarget(document: &XmlDocument, node: XmlNodeId) -> bool {
+  if svg(document, node) {
+    return true
+  }
+  if !equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+    b"http://www.w3.org/1999/xhtml",
+  ) {
+    return false
+  }
+  let name = String.utf8Bytes(XmlDocument.localName(document, node))
+  return equal(name, b"audio") || equal(name, b"video") || equal(name, b"canvas")
+    || equal(name, b"iframe")
+}
+
+impl Graph {
+  /// Aggregate encoded and expanded document bytes charged by this graph.
+  pub fn resourceBytes(self: &Self) -> usize {
+    return self.totalBytes
+  }
+
+  pub fn sourceDocument(self: &Self, source: SourceId) -> &XmlDocument {
+    return &self.documents.asSlice()[source.document.index].document
+  }
+
+  pub fn findId(self: &Self, documentId: DocumentId, decodedBytes: &[u8]) -> Option<SourceId> {
+    if documentId.index >= self.documents.length() || decodedBytes.length == 0 {
+      return Option<SourceId>.None
+    }
+    let source = &self.documents.asSlice()[documentId.index]
+    let key = fingerprint(decodedBytes)
+    let mut low: usize = 0
+    let mut high = source.ids.length()
+    while low < high {
+      let middle = low + (high - low) / 2
+      if source.ids.asSlice()[middle].key < key {
+        low = middle + 1
+      } else {
+        high = middle
+      }
+    }
+    while low < source.ids.length() && source.ids.asSlice()[low].key == key {
+      let entry = &source.ids.asSlice()[low]
+      if equal(
+        String.utf8Bytes(XmlDocument.attributeValue(&source.document, entry.attribute)),
+        decodedBytes,
+      ) {
+        return Option<SourceId>.Some { value: SourceId { document: documentId, node: entry.node } }
+      }
+      low = low + 1
+    }
+    return Option<SourceId>.None
+  }
+}
+
+effect fn resolved(base: &Url, input: &[u8]) -> Option<Url>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let result = run Effect.result(Url.resolve(base, input))
+  return match move result {
+    Result<Url, UrlError | OutOfMemoryError>.Success { value } => Option<Url>.Some {
+      value: move value
+    }
+    Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+      UrlError value => Option<Url>.None
+      OutOfMemoryError value => {
+        fail OutOfMemoryError {}
+      }
+    }
+  }
+}
+
+effect fn appendUrl(graph: &mut Graph, address: Url, limits: &Limits) -> usize
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = Url.bytes(&address).length
+  if bytes > limits.maxUrlBytes - graph.urlBytes {
+    fail StructureError.TooLarge
+  }
+  let index = graph.urls.length()
+  run graph.urls.append(move address)
+  graph.urlBytes = graph.urlBytes + bytes
+  return index
+}
+
+// XML Base and href resolution are source operations, never occurrence operations.
+effect fn addDocument(
+  graph: &mut Graph,
+  document: XmlDocument,
+  base: usize,
+  policy: Policy,
+  limits: &Limits,
+) -> DocumentId
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let id = DocumentId { index: graph.documents.length() }
+
+  // Each node records its base and reference.
+  let nodeCount = XmlDocument.nodes(&document).length
+  let mut source = SourceDocument {
+    document: move document,
+    base: base,
+    nodeBases: run List<usize>.makeWithCapacity(nodeCount),
+    policy: policy,
+    ids: List<IdEntry>.make(),
+    references: run List<Reference>.makeWithCapacity(nodeCount),
+    ordinaryScope: Option<usize>.None,
+  }
+  let mut i: usize = 0
+  while i < XmlDocument.nodes(&source.document).length {
+    let node = XmlNodeId { index: i }
+    let mut nodeBase = base
+    match &XmlDocument.nodes(&source.document)[i].parent {
+      Option<XmlNodeId>.Some { value } => {
+        nodeBase = source.nodeBases.asSlice()[value.index]
+      }
+      _ => {}
+    }
+    if XmlDocument.nodes(&source.document)[i].kind == XmlNodeKind.Element {
+      match (XmlDocument.attribute(
+        &source.document,
+        node,
+        "http://www.w3.org/XML/1998/namespace",
+        "base",
+      )
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => {
+          let address = run resolved(&graph.urls.asSlice()[nodeBase], value)
+          match move address {
+            Option<Url>.Some { value: resolvedAddress } => {
+              nodeBase = run appendUrl(&mut graph.*, move resolvedAddress, limits)
+            }
+            _ => {}
+          }
+        }
+        _ => {}
+      }
+      let attrs = XmlDocument.attributes(&source.document, node)
+      let mut a: usize = 0
+      while a < attrs.length {
+        let attr = attrs[a]
+        let name = String.utf8Bytes(XmlDocument.attributeLocalName(&source.document, attr))
+        let ns = String.utf8Bytes(XmlDocument.attributeNamespaceUri(&source.document, attr))
+        if XmlDocument.attributeIsId(&source.document, attr)
+          || (equal(name, b"id")
+            && (ns.length == 0 || equal(ns, b"http://www.w3.org/XML/1998/namespace"))) {
+          run source.ids.append(
+            IdEntry {
+              key: fingerprint(
+                String.utf8Bytes(XmlDocument.attributeValue(&source.document, attr)),
+              ),
+              node: node,
+              attribute: attr,
+            },
+          )
+        }
+        a = a + 1
+      }
+    }
+    run source.nodeBases.append(nodeBase)
+    let mut reference = Reference { url: Option<usize>.None }
+    let name = String.utf8Bytes(XmlDocument.localName(&source.document, node))
+    if svg(&source.document, node)
+      && (equal(name, b"use") || paintServer(name) || equal(name, b"feImage")) {
+      let href = match (XmlDocument.attribute(&source.document, node, "", "href")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => Option<&[u8]>.Some { value: value }
+        _ => (XmlDocument.attribute(&source.document, node, "http://www.w3.org/1999/xlink", "href")
+          |> Option<string>.map<&[u8]>(String.utf8Bytes))
+      }
+      match href {
+        // feImage references an element like use only through a fragment; other URLs
+        // are images (Filter Effects 1 #feImageElement), loaded with the image assets.
+        Option<&[u8]>.Some { value } => {
+          if !equal(name, b"feImage") || elementReference(value) {
+            let address = run resolved(&graph.urls.asSlice()[nodeBase], value)
+            match move address {
+              Option<Url>.Some { value: resolvedAddress } => {
+                let url = run appendUrl(&mut graph.*, move resolvedAddress, limits)
+                reference.url = Option<usize>.Some { value: url }
+              }
+              _ => {}
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+    run source.references.append(reference)
+    i = i + 1
+  }
+  run source.ids.sort()
+  run graph.documents.append(move source)
+  return id
+}
+
+// Parser limits are independent of occurrence expansion: every source has the XML
+// parser's 16 MiB input, one-million-node and 256-XML-depth bounds.
+effect fn parseDocument(data: &[u8], remaining: usize, expanded: &mut usize) -> XmlDocument
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let limits = XmlLimits.make()
+  let maximum = if remaining < limits.maxInputBytes {
+    remaining
+  } else {
+    limits.maxInputBytes
+  }
+  let decoded = run compressed_document.expand(data, maximum)
+  let xml = match &decoded {
+    Option<Bytes>.Some { value } => {
+      expanded.* = Bytes.length(&value)
+      Bytes.asSlice(&value)
+    }
+    _ => data
+  }
+  let parsed = run Effect.result(XmlDocument.parseWithLimits(xml, &limits))
+  return match move parsed {
+    Result<XmlDocument, XmlError | OutOfMemoryError>.Success { value } => move value
+    Result<XmlDocument, XmlError | OutOfMemoryError>.Failure { error } => match move error {
+      XmlError value => {
+        if value.reason == XmlReason.Limit {
+          fail StructureError.TooLarge
+        }
+        fail StructureError.InvalidXml
+      }
+      OutOfMemoryError value => {
+        fail OutOfMemoryError {}
+      }
+    }
+  }
+}
+
+// XML's mandatory UTF-8/UTF-16 recognition remains authoritative. Unsupported or
+// contradictory transport labels are rejected, rather than silently ignored.
+fn charsetMatches(document: &XmlDocument, charset: &[u8]) -> bool {
+  if insensitive(charset, b"utf-8") || insensitive(charset, b"utf8") {
+    return XmlDocument.encoding(document) == XmlEncoding.Utf8
+  }
+  if insensitive(charset, b"utf-16") {
+    return XmlDocument.encoding(document) == XmlEncoding.Utf16Le
+      || XmlDocument.encoding(document) == XmlEncoding.Utf16Be
+  }
+  if insensitive(charset, b"utf-16le") {
+    return XmlDocument.encoding(document) == XmlEncoding.Utf16Le
+  }
+  if insensitive(charset, b"utf-16be") {
+    return XmlDocument.encoding(document) == XmlEncoding.Utf16Be
+  }
+  return false
+}
+
+effect fn responseDocument(
+  bytes: &Bytes,
+  mediaType: &Option<Bytes>,
+  charset: &Option<Bytes>,
+  request: &Url,
+  remaining: usize,
+  expanded: &mut usize,
+) -> Option<XmlDocument>
+  ! StructureError | ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  match &mediaType.* {
+    Option<Bytes>.Some { value } => {
+      if !insensitive(Bytes.asSlice(&value), b"image/svg+xml") {
+        return Option<XmlDocument>.None
+      }
+    }
+    _ => {}
+  }
+  let data = equal(Url.scheme(request), b"data")
+  let mut dataCharset: Option<Bytes> = Option<Bytes>.None
+  if data {
+    let metadata = run resources.inspectData(request)
+    if !metadata.matchesMediaType(b"image/svg+xml") {
+      return Option<XmlDocument>.None
+    }
+    dataCharset = run metadata.decodedCharset()
+  }
+  let document = run parseDocument(Bytes.asSlice(bytes), remaining, &mut expanded.*)
+  if !svgRoot(&document) {
+    return Option<XmlDocument>.None
+  }
+  match &charset.* {
+    Option<Bytes>.Some { value } => {
+      if !charsetMatches(&document, Bytes.asSlice(&value)) {
+        return Option<XmlDocument>.None
+      }
+    }
+    _ => {}
+  }
+  match &dataCharset {
+    Option<Bytes>.Some { value } => {
+      if !charsetMatches(&document, Bytes.asSlice(&value)) {
+        return Option<XmlDocument>.None
+      }
+    }
+    _ => {}
+  }
+  return Option<XmlDocument>.Some { value: move document }
+}
+
+// SVG2 #UseElementHrefAttribute forbids cross-origin HTTP(S) use requests.
+// The origin is always the including main document's URL, never XML Base or a
+// referenced source's URL. Url already canonicalizes hosts and default ports.
+// Data URLs remain local resources. File URLs deliberately retain the host
+// FileSystem access policy; this does not claim that file URLs share an origin.
+// Other host-defined schemes likewise retain their resolver's access policy.
+fn permittedOrigin(including: &Url, address: &Url) -> bool {
+  let scheme = Url.scheme(address)
+  if !equal(scheme, b"http") && !equal(scheme, b"https") {
+    return true
+  }
+  if !equal(Url.scheme(including), scheme) || !equal(Url.host(including), Url.host(address)) {
+    return false
+  }
+  let includingPort = Url.port(including)
+  let requestedPort = Url.port(address)
+  return match includingPort {
+    Option<usize>.Some { value } => match requestedPort {
+      Option<usize>.Some { value: other } => value == other
+      _ => false
+    }
+    Option<usize>.None => match requestedPort {
+      Option<usize>.None => true
+      _ => false
+    }
+  }
+}
+
+effect fn externalDocument(
+  graph: &mut Graph,
+  request: usize,
+  consumerPolicy: Policy,
+  limits: &Limits,
+) -> Option<DocumentId>
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut policy = consumerPolicy
+  let address = &graph.urls.asSlice()[request]
+
+  // Authorization precedes cache lookup, even for redirect aliases or main-document entries.
+  if policy.mode.isSecure() && !equal(Url.scheme(address), b"data") {
+    return Option<DocumentId>.None
+  }
+  let includingBase = graph.documents.asSlice()[0].base
+  if !permittedOrigin(&graph.urls.asSlice()[includingBase], address) {
+    return Option<DocumentId>.None
+  }
+  let mut i: usize = 0
+  while i < graph.cache.length() {
+    let entry = &graph.cache.asSlice()[i]
+    if equal(Url.withoutFragment(address), Url.withoutFragment(&graph.urls.asSlice()[entry.url])) {
+      return entry.document
+    }
+    i = i + 1
+  }
+  if graph.requests >= limits.maxRequests {
+    fail StructureError.TooLarge
+  }
+  graph.requests = graph.requests + 1
+  let remaining = limits.maxTotalBytes - graph.totalBytes
+  if policy.limits.maxResourceBytes > remaining {
+    policy.limits.maxResourceBytes = remaining
+  }
+  let fetched = run Effect.result(
+    resources.fetchWithPolicy(address, ResourceKind.Document, &policy),
+  )
+  let mut response = match move fetched {
+    Result<Response, ResourceError | OutOfMemoryError>.Success { value } => move value
+    Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match move error {
+      ResourceError value => {
+        if value == ResourceError.TooLarge {
+          fail StructureError.TooLarge
+        }
+        if value != ResourceError.BlockedLocation {
+          run graph.cache.append(CachedDocument { url: request, document: Option<DocumentId>.None })
+        }
+        return Option<DocumentId>.None
+      }
+      OutOfMemoryError value => {
+        fail OutOfMemoryError {}
+      }
+    }
+  }
+  graph.totalBytes = graph.totalBytes + Bytes.length(&response.bytes)
+  let mut base = request
+  match move response.finalUrl {
+    Option<Url>.Some { value } => {
+      if !permittedOrigin(&graph.urls.asSlice()[includingBase], &value) {
+        run graph.cache.append(CachedDocument { url: request, document: Option<DocumentId>.None })
+        return Option<DocumentId>.None
+      }
+      base = run appendUrl(&mut graph.*, move value, limits)
+    }
+    _ => {}
+  }
+
+  // A redirect can land on a resource already parsed under another request alias.
+  i = 0
+  while i < graph.cache.length() {
+    let entry = &graph.cache.asSlice()[i]
+    if equal(
+      Url.withoutFragment(&graph.urls.asSlice()[base]),
+      Url.withoutFragment(&graph.urls.asSlice()[entry.url]),
+    ) {
+      let mut target = entry.document
+      match &response.mediaType {
+        Option<Bytes>.Some { value } => {
+          if !insensitive(Bytes.asSlice(&value), b"image/svg+xml") {
+            target = Option<DocumentId>.None
+          }
+        }
+        _ => {}
+      }
+      match target {
+        Option<DocumentId>.Some { value: documentId } => match &response.charset {
+          Option<Bytes>.Some { value } => {
+            if !charsetMatches(
+              &graph.documents.asSlice()[documentId.index].document,
+              Bytes.asSlice(&value),
+            ) {
+              target = Option<DocumentId>.None
+            }
+          }
+          _ => {}
+        }
+        _ => {}
+      }
+      run graph.cache.append(CachedDocument { url: request, document: target })
+      return target
+    }
+    i = i + 1
+  }
+  let mut expandedBytes: usize = 0
+  let parsed = run Effect.result(
+    responseDocument(
+      &response.bytes,
+      &response.mediaType,
+      &response.charset,
+      &graph.urls.asSlice()[request],
+      limits.maxTotalBytes - graph.totalBytes,
+      &mut expandedBytes,
+    ),
+  )
+  graph.totalBytes = graph.totalBytes + expandedBytes
+  let document = match move parsed {
+    Result<Option<XmlDocument>, StructureError | ResourceError | OutOfMemoryError>.Success {
+      value
+    } => move value
+    Result<Option<XmlDocument>, StructureError | ResourceError | OutOfMemoryError>.Failure {
+      error
+    } => match move error {
+      StructureError value => {
+        if value == StructureError.TooLarge {
+          fail StructureError.TooLarge
+        }
+        Option<XmlDocument>.None
+      }
+      ResourceError value => {
+        if value == ResourceError.TooLarge {
+          fail StructureError.TooLarge
+        }
+        Option<XmlDocument>.None
+      }
+      OutOfMemoryError value => {
+        fail OutOfMemoryError {}
+      }
+    }
+  }
+  let mut target: Option<DocumentId> = Option<DocumentId>.None
+  match move document {
+    Option<XmlDocument>.Some { value } => {
+      if graph.documents.length() >= limits.maxDocuments {
+        fail StructureError.TooLarge
+      }
+      let secure = Policy { mode: ProcessingMode.SecureStatic, limits: consumerPolicy.limits }
+      let id = run addDocument(&mut graph.*, move value, base, secure, limits)
+      target = Option<DocumentId>.Some { value: id }
+    }
+    _ => {}
+  }
+  run graph.cache.append(CachedDocument { url: request, document: target })
+  if base != request {
+    run graph.cache.append(CachedDocument { url: base, document: target })
+  }
+  return target
+}
+
+effect fn referenceTarget(
+  graph: &mut Graph,
+  source: SourceId,
+  policy: Policy,
+  limits: &Limits,
+) -> Option<SourceId>
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let request = match graph.documents.asSlice()[source.document.index].references.asSlice()[source.node.index].url {
+    Option<usize>.Some { value } => value
+    _ => {
+      return Option<SourceId>.None
+    }
+  }
+
+  // A source reference has a stable base and URL. Scope modes remain distinct:
+  // secure denial neither poisons nor authorizes an including-document clone.
+  let key = ReferenceKey { request: request, mode: policy.mode }
+  let cached: Option<Option<SourceId>> = graph.referenceTargets.get(key)
+  if let Option<Option<SourceId>>.Some { value } = cached {
+    return value
+  }
+  let target = run addressTarget(&mut graph.*, source.document, request, policy, limits)
+  drop run graph.referenceTargets.insert(key, target)
+  return target
+}
+
+effect fn addressTarget(
+  graph: &mut Graph,
+  document: DocumentId,
+  request: usize,
+  policy: Policy,
+  limits: &Limits,
+) -> Option<SourceId>
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let base = graph.documents.asSlice()[document.index].base
+  let mut targetDocument = Option<DocumentId>.Some { value: document }
+  if !equal(
+    Url.withoutFragment(&graph.urls.asSlice()[request]),
+    Url.withoutFragment(&graph.urls.asSlice()[base]),
+  ) {
+    // Requested and final aliases of this source still denote the same document.
+    let mut same = false
+    let mut i: usize = 0
+    while i < graph.cache.length() {
+      let entry = &graph.cache.asSlice()[i]
+      match entry.document {
+        Option<DocumentId>.Some { value } => {
+          if value.index == document.index
+            && equal(
+              Url.withoutFragment(&graph.urls.asSlice()[request]),
+              Url.withoutFragment(&graph.urls.asSlice()[entry.url]),
+            ) {
+            same = true
+          }
+        }
+        _ => {}
+      }
+      i = i + 1
+    }
+    if !same {
+      targetDocument = run externalDocument(&mut graph.*, request, policy, limits)
+    }
+  }
+  let mut target: Option<SourceId> = Option<SourceId>.None
+  match targetDocument {
+    Option<DocumentId>.Some { value: documentId } => {
+      let fragment = Url.fragment(&graph.urls.asSlice()[request])
+      match fragment {
+        Option<&[u8]>.Some { value } => {
+          if value.length == 0 {
+            target = Option<SourceId>.Some {
+              value: SourceId {
+                document: documentId,
+                node: XmlDocument.root(&graph.documents.asSlice()[documentId.index].document),
+              }
+            }
+          } else {
+            let decoded = run Effect.result(percentDecode(value))
+            match move decoded {
+              Result<Bytes, UrlError | OutOfMemoryError>.Success { value: bytes } => {
+                target = graph.findId(documentId, Bytes.asSlice(&bytes))
+              }
+              Result<Bytes, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+                UrlError invalid => {}
+                OutOfMemoryError exhausted => {
+                  fail move exhausted
+                }
+              }
+            }
+          }
+        }
+        _ => {
+          target = Option<SourceId>.Some {
+            value: SourceId {
+              document: documentId,
+              node: XmlDocument.root(&graph.documents.asSlice()[documentId.index].document),
+            }
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+  match target {
+    Option<SourceId>.Some { value } => {
+      if !validTarget(graph.sourceDocument(value), value.node) {
+        target = Option<SourceId>.None
+      }
+    }
+    _ => {}
+  }
+  return target
+}
+
+fn active(graph: &Graph, host: OccurrenceId, target: SourceId) -> bool {
+  let mut cursor = Option<OccurrenceId>.Some { value: host }
+  while true {
+    match cursor {
+      Option<OccurrenceId>.Some { value } => {
+        let occurrence = &graph.occurrences.asSlice()[value.index]
+        if occurrence.source.document.index == target.document.index
+          && occurrence.source.node.index == target.node.index {
+          return true
+        }
+        cursor = occurrence.parent
+      }
+      _ => {
+        return false
+      }
+    }
+  }
+}
+
+effect fn appendOccurrence(
+  graph: &mut Graph,
+  source: SourceId,
+  parent: Option<OccurrenceId>,
+  scope: usize,
+  shadowRoot: bool,
+  eligible: bool,
+  limits: &Limits,
+) -> OccurrenceId
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  if graph.occurrences.length() >= limits.maxOccurrences {
+    fail StructureError.TooLarge
+  }
+  let mut depth: usize = 0
+  match parent {
+    Option<OccurrenceId>.Some { value } => {
+      let parentDepth = graph.occurrences.asSlice()[value.index].depth
+      if parentDepth >= limits.maxOccurrenceDepth || parentDepth >= 256 {
+        fail StructureError.TooLarge
+      }
+      depth = parentDepth + 1
+    }
+    _ => {}
+  }
+  let id = OccurrenceId { index: graph.occurrences.length() }
+  run graph.occurrences.append(
+    Occurrence {
+      source: source,
+      parent: parent,
+      firstChild: Option<OccurrenceId>.None,
+      nextSibling: Option<OccurrenceId>.None,
+      previousSibling: Option<OccurrenceId>.None,
+      shadow: Option<OccurrenceId>.None,
+      scope: scope,
+      shadowRoot: shadowRoot,
+      eligible: eligible,
+      depth: depth,
+    },
+  )
+  return id
+}
+
+/// Builds a parent-before-child arena without recursive traversal. Conditional
+/// processing is recorded, never used to prune source or shadow tree construction.
+pub effect fn build(data: &[u8], base: &Url, options: &Options<'_>) -> Graph
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  if data.length > options.limits.maxTotalBytes || options.limits.maxDocuments == 0 {
+    fail StructureError.TooLarge
+  }
+  let mut expandedBytes: usize = 0
+  let document = run parseDocument(
+    data,
+    options.limits.maxTotalBytes - data.length,
+    &mut expandedBytes,
+  )
+  return run buildDocument(move document, base, data.length + expandedBytes, options)
+}
+
+/// Parse a fetched SVG response using the same MIME, charset, compression and
+/// XML checks as external SVG references. Redirect URLs supply the document base;
+/// callers retain the request's fragment separately for view selection.
+pub effect fn buildResponse(response: &Response, request: &Url, options: &Options<'_>) -> Graph
+  ! StructureError | ResourceError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let count = Bytes.length(&response.bytes)
+  if count > options.limits.maxTotalBytes || options.limits.maxDocuments == 0 {
+    fail StructureError.TooLarge
+  }
+  let mut expanded: usize = 0
+  let parsed = run responseDocument(
+    &response.bytes,
+    &response.mediaType,
+    &response.charset,
+    request,
+    options.limits.maxTotalBytes - count,
+    &mut expanded,
+  )
+  let document = match move parsed {
+    Option<XmlDocument>.Some { value } => move value
+    _ => {
+      fail StructureError.InvalidRoot
+    }
+  }
+  let base = match &response.finalUrl {
+    Option<Url>.Some { value } => &value
+    _ => request
+  }
+  return run buildDocument(move document, base, count + expanded, options)
+}
+
+effect fn buildDocument(
+  document: XmlDocument,
+  base: &Url,
+  totalBytes: usize,
+  options: &Options<'_>,
+) -> Graph
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  if !svgRoot(&document) {
+    fail StructureError.InvalidRoot
+  }
+  let mut graph = Graph {
+    documents: List<SourceDocument>.make(),
+    urls: List<Url>.make(),
+    occurrences: List<Occurrence>.make(),
+    scopes: List<Scope>.make(),
+    root: OccurrenceId { index: 0 },
+    limits: options.limits,
+    cache: List<CachedDocument>.make(),
+    totalBytes: totalBytes,
+    urlBytes: 0,
+    requests: 0,
+    templates: HashMap<usize, SourceId>.make(Hash.seed(0)),
+    referenceTargets: HashMap<ReferenceKey, Option<SourceId>>.make(Hash.seed(0)),
+    lookup: HashMap<ScopedSource, OccurrenceId>.make(Hash.seed(0)),
+    indexed: 0,
+    expanded: 0,
+  }
+  if Url.bytes(base).length > options.limits.maxUrlBytes {
+    fail StructureError.TooLarge
+  }
+  let address = run Url.clone(base)
+  let baseIndex = run appendUrl(&mut graph, move address, &options.limits)
+  let documentId = run addDocument(
+    &mut graph,
+    move document,
+    baseIndex,
+    options.policy,
+    &options.limits,
+  )
+  run graph.cache.append(
+    CachedDocument { url: 0, document: Option<DocumentId>.Some { value: documentId } },
+  )
+  run ordinaryRoot(&mut graph, documentId, 0, options)
+  run expand(&mut graph, options)
+  return move graph
+}
+
+/// Whether an feImage href names an element (it has a fragment) rather than an image.
+pub fn elementReference(href: &[u8]) -> bool {
+  let mut i: usize = 0
+  while i < href.length {
+    if href[i] == 35 {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+// Elements whose href names a template of attributes and children: paint servers and
+// (Filter Effects 1 #element-attrdef-filter-href) filters.
+fn paintServer(name: &[u8]) -> bool {
+  return equal(name, b"linearGradient") || equal(name, b"radialGradient") || equal(name, b"pattern")
+    || equal(name, b"meshgradient")
+    || equal(name, b"hatch")
+    || equal(name, b"filter")
+}
+
+fn compatible(graph: &Graph, host: SourceId, target: SourceId) -> bool {
+  let document = graph.sourceDocument(target)
+  if !svg(document, target.node) {
+    return false
+  }
+  let name = String.utf8Bytes(XmlDocument.localName(document, target.node))
+  let hostName = String.utf8Bytes(XmlDocument.localName(graph.sourceDocument(host), host.node))
+  return if equal(hostName, b"pattern") || equal(hostName, b"filter")
+    || equal(hostName, b"meshgradient")
+    || equal(hostName, b"hatch") {
+    equal(name, hostName)
+  } else {
+    equal(name, b"linearGradient") || equal(name, b"radialGradient")
+  }
+}
+
+fn hasContent(graph: &Graph, source: SourceId) -> bool {
+  let document = graph.sourceDocument(source)
+  let mut child = XmlDocument.firstChild(document, source.node)
+  while let Option<XmlNodeId>.Some { value } = child {
+    if XmlDocument.nodes(document)[value.index].kind == XmlNodeKind.Element {
+      let name = String.utf8Bytes(XmlDocument.localName(document, value))
+      if !svg(document, value)
+        || !(equal(name, b"desc") || equal(name, b"title") || equal(name, b"metadata")) {
+        return true
+      }
+    }
+    child = XmlDocument.nextSibling(document, value)
+  }
+  return false
+}
+
+effect fn ordinaryRoot(
+  graph: &mut Graph,
+  document: DocumentId,
+  depth: usize,
+  options: &Options<'_>,
+) -> ()
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  if graph.documents.asSlice()[document.index].ordinaryScope.isSome() {
+    return
+  }
+  let scope = graph.scopes.length()
+  let source = SourceId {
+    document: document,
+    node: XmlDocument.root(&graph.documents.asSlice()[document.index].document),
+  }
+  let config = Config {
+    languages: options.languages,
+    supportedExtensions: options.supportedExtensions,
+  }
+  let eligible = qualifies(graph.sourceDocument(source), source.node, &config)
+
+  // The ordinary tree has an occurrence per element, at most one per node.
+  let nodeCount = XmlDocument.nodes(graph.sourceDocument(source)).length
+  run graph.occurrences.reserve(nodeCount)
+  let root = run appendOccurrence(
+    &mut graph.*,
+    source,
+    Option<OccurrenceId>.None,
+    scope,
+    false,
+    eligible,
+    &options.limits,
+  )
+  let policy = graph.documents.asSlice()[document.index].policy
+  run graph.scopes.append(
+    Scope {
+      host: Option<OccurrenceId>.None,
+      root: root,
+      document: document,
+      depth: depth,
+      policy: policy,
+    },
+  )
+  let mut documents = graph.documents.asMutSlice()
+  documents[document.index].ordinaryScope = Option<usize>.some(scope)
+}
+
+effect fn children(
+  graph: &mut Graph,
+  host: OccurrenceId,
+  source: SourceId,
+  scope: usize,
+  shadow: bool,
+  options: &Options<'_>,
+) -> Option<OccurrenceId>
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let config = Config {
+    languages: options.languages,
+    supportedExtensions: options.supportedExtensions,
+  }
+  let switch = svg(graph.sourceDocument(source), source.node)
+    && equal(
+      String.utf8Bytes(XmlDocument.localName(graph.sourceDocument(source), source.node)),
+      b"switch",
+    )
+  let selected = if switch {
+    selectSwitchChild(graph.sourceDocument(source), source.node, &config)
+  } else {
+    Option<XmlNodeId>.None
+  }
+  let mut child = XmlDocument.firstChild(graph.sourceDocument(source), source.node)
+  let mut first = Option<OccurrenceId>.None
+  let mut previous = Option<OccurrenceId>.None
+  while let Option<XmlNodeId>.Some { value: node } = child {
+    child = XmlDocument.nextSibling(graph.sourceDocument(source), node)
+    if XmlDocument.nodes(graph.sourceDocument(source))[node.index].kind == XmlNodeKind.Element {
+      let mut eligible = qualifies(graph.sourceDocument(source), node, &config)
+      if switch {
+        eligible = eligible
+          && match &selected {
+            Option<XmlNodeId>.Some { value } => value.index == node.index
+            _ => false
+          }
+      }
+      let id = run appendOccurrence(
+        &mut graph.*,
+        SourceId { document: source.document, node: node },
+        Option<OccurrenceId>.some(host),
+        scope,
+        shadow,
+        eligible,
+        &options.limits,
+      )
+      let mut entries = graph.occurrences.asMutSlice()
+      entries[id.index].previousSibling = previous
+      match previous {
+        Option<OccurrenceId>.Some { value } => {
+          entries[value.index].nextSibling = Option<OccurrenceId>.some(id)
+        }
+        _ => {
+          first = Option<OccurrenceId>.some(id)
+        }
+      }
+      previous = Option<OccurrenceId>.some(id)
+    }
+  }
+  return first
+}
+
+// Raw reference closure precedes all style computation, including :host matching.
+pub effect fn expand(graph: &mut Graph, options: &Options<'_>) -> ()
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  while graph.expanded < graph.occurrences.length() {
+    let index = graph.expanded
+    let previousDocuments = graph.documents.length()
+    let host = OccurrenceId { index: index }
+    let occurrence = graph.occurrences.asSlice()[index]
+    let scope = graph.scopes.asSlice()[occurrence.scope]
+    let source = occurrence.source
+    let light = run children(&mut graph.*, host, source, occurrence.scope, false, options)
+    let mut entries = graph.occurrences.asMutSlice()
+    entries[index].firstChild = light
+    drop entries
+    let isPaint = svg(graph.sourceDocument(source), source.node)
+      && paintServer(
+        String.utf8Bytes(XmlDocument.localName(graph.sourceDocument(source), source.node)),
+      )
+    let target = run referenceTarget(&mut graph.*, source, scope.policy, &options.limits)
+    if let Option<SourceId>.Some { value } = target {
+      if !active(&graph.*, host, value) && (!isPaint || compatible(&graph.*, source, value)) {
+        if scope.depth >= options.limits.maxReferenceDepth {
+          fail StructureError.TooLarge
+        }
+        if isPaint {
+          let ignored = run graph.templates.insert(index, value)
+          drop ignored
+        }
+        let mut content = Option<SourceId>.some(value)
+        if isPaint {
+          let needsContent = !hasContent(&graph.*, source)
+          content = Option<SourceId>.None
+          let mut chain = List<SourceId>.make()
+          run chain.append(source)
+          let mut current = value
+          let mut contentDepth = usize.MAX
+          while true {
+            let mut cycleStart = usize.MAX
+            let mut j: usize = 0
+            while j < chain.length() {
+              let seen = chain.asSlice()[j]
+              if seen.document.index == current.document.index
+                && seen.node.index == current.node.index {
+                cycleStart = j
+              }
+              j = j + 1
+            }
+            if cycleStart != usize.MAX {
+              // Only references that lead back to their own source are invalid.
+              // An incoming edge may still use the cycle entry's own attributes
+              // and children, but not content beyond its invalid href.
+              if cycleStart == 0 {
+                let ignored = graph.templates.remove(index)
+                drop ignored
+              }
+              if contentDepth > cycleStart {
+                content = Option<SourceId>.None
+              }
+              break
+            }
+            if chain.length() > options.limits.maxReferenceDepth - scope.depth {
+              fail StructureError.TooLarge
+            }
+            if needsContent && content.isNone() && hasContent(&graph.*, current) {
+              content = Option<SourceId>.some(current)
+              contentDepth = chain.length()
+            }
+            run chain.append(current)
+
+            // A referenced external template is processed securely; only the
+            // children subsequently cloned into the host regain its policy.
+            let policy = if current.document.index == source.document.index {
+              scope.policy
+            } else {
+              graph.documents.asSlice()[current.document.index].policy
+            }
+            let next = run referenceTarget(&mut graph.*, current, policy, &options.limits)
+            match next {
+              Option<SourceId>.Some { value: nextSource } => {
+                if !compatible(&graph.*, current, nextSource) {
+                  break
+                }
+                current = nextSource
+              }
+              _ => {
+                break
+              }
+            }
+          }
+        }
+        if let Option<SourceId>.Some { value: contentSource } = content {
+          let inner = graph.scopes.length()
+          let shadow = if isPaint {
+            run children(&mut graph.*, host, contentSource, inner, true, options)
+          } else {
+            let config = Config {
+              languages: options.languages,
+              supportedExtensions: options.supportedExtensions,
+            }
+            let eligible = qualifies(
+              graph.sourceDocument(contentSource),
+              contentSource.node,
+              &config,
+            )
+            let instance = run appendOccurrence(
+              &mut graph.*,
+              contentSource,
+              Option<OccurrenceId>.some(host),
+              inner,
+              true,
+              eligible,
+              &options.limits,
+            )
+            Option<OccurrenceId>.Some { value: instance }
+          }
+          if let Option<OccurrenceId>.Some { value: root } = shadow {
+            run graph.scopes.append(
+              Scope {
+                host: Option<OccurrenceId>.some(host),
+                root: root,
+                document: contentSource.document,
+                depth: scope.depth + 1,
+                policy: scope.policy,
+              },
+            )
+            let mut entries = graph.occurrences.asMutSlice()
+            entries[index].shadow = shadow
+          }
+        }
+      }
+    }
+
+    // External source definitions have their own ordinary ancestor/style context.
+    let mut document = previousDocuments
+    while document < graph.documents.length() {
+      if graph.documents.asSlice()[document].ordinaryScope.isNone() {
+        if scope.depth >= options.limits.maxReferenceDepth {
+          fail StructureError.TooLarge
+        }
+        run ordinaryRoot(&mut graph.*, DocumentId { index: document }, scope.depth + 1, options)
+      }
+      document = document + 1
+    }
+    graph.expanded = index + 1
+  }
+}
+
+impl Graph {
+  pub fn templateSource(self: &Self, node: OccurrenceId) -> Option<SourceId> {
+    return self.templates.get(node.index)
+  }
+
+  // Built only when a resolved resource needs occurrence identity; each new entry
+  // is indexed once, never rescanned for each URL on a shape.
+  pub effect fn occurrence(self: &mut Self, consumer: OccurrenceId, source: SourceId) -> Option<
+    OccurrenceId
+  >
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    while self.indexed < self.occurrences.length() {
+      let i = self.indexed
+      let entry = self.occurrences.asSlice()[i]
+      let ignored = run self.lookup.insert(
+        ScopedSource {
+          scope: entry.scope,
+          document: entry.source.document.index,
+          node: entry.source.node.index,
+        },
+        OccurrenceId { index: i },
+      )
+      drop ignored
+      self.indexed = i + 1
+    }
+    let scope = self.occurrences.asSlice()[consumer.index].scope
+    let found: Option<OccurrenceId> = self.lookup.get(
+      ScopedSource { scope: scope, document: source.document.index, node: source.node.index },
+    )
+    if found.isSome() {
+      return found
+    }
+    let ordinary = match self.documents.asSlice()[source.document.index].ordinaryScope {
+      Option<usize>.Some { value } => value
+      _ => {
+        return Option<OccurrenceId>.None
+      }
+    }
+    return self.lookup.get(
+      ScopedSource { scope: ordinary, document: source.document.index, node: source.node.index },
+    )
+  }
+}
+
+pub effect fn resolveResource(
+  graph: &mut Graph,
+  consumer: OccurrenceId,
+  declarationDocument: Option<&Url>,
+  declarationBase: Option<&Url>,
+  reference: &[u8],
+  options: &Options<'_>,
+) -> Option<OccurrenceId>
+  ! StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let occurrence = graph.occurrences.asSlice()[consumer.index]
+  let scope = graph.scopes.asSlice()[occurrence.scope]
+  let sourceDocument = &graph.documents.asSlice()[occurrence.source.document.index]
+  let documentBase = match &declarationDocument {
+    Option<&Url>.Some { value } => value
+    _ => &graph.urls.asSlice()[sourceDocument.base]
+  }
+  let urlBase = match &declarationBase {
+    Option<&Url>.Some { value } => value
+    _ => &graph.urls.asSlice()[sourceDocument.nodeBases.asSlice()[occurrence.source.node.index]]
+  }
+  let base = if reference.length > 0 && reference[0] == 35 {
+    documentBase
+  } else {
+    urlBase
+  }
+  let address = run resolved(base, reference)
+
+  // Fragment-only URLs retain the declaring source document, even when inherited.
+  let mut document = occurrence.source.document
+  let mut i: usize = 0
+  while i < graph.documents.length() {
+    if equal(
+      Url.withoutFragment(documentBase),
+      Url.withoutFragment(&graph.urls.asSlice()[graph.documents.asSlice()[i].base]),
+    ) {
+      document = DocumentId { index: i }
+      break
+    }
+    i = i + 1
+  }
+  let request = match move address {
+    Option<Url>.Some { value } => run appendUrl(&mut graph.*, move value, &options.limits)
+    _ => {
+      return Option<OccurrenceId>.None
+    }
+  }
+  let target = run addressTarget(&mut graph.*, document, request, scope.policy, &options.limits)
+  if let Option<SourceId>.Some { value } = target {
+    if graph.documents.asSlice()[value.document.index].ordinaryScope.isNone() {
+      if scope.depth >= options.limits.maxReferenceDepth {
+        fail StructureError.TooLarge
+      }
+      run ordinaryRoot(&mut graph.*, value.document, scope.depth + 1, options)
+    }
+    run expand(&mut graph.*, options)
+    return run graph.occurrence(consumer, value)
+  }
+  return Option<OccurrenceId>.None
+}

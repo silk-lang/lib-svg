@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "inset",
+      "input": "inputs/inset.svg",
+      "references": [
+        {
+          "path": "references/inset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS inset clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "circle",
+      "input": "inputs/circle.svg",
+      "references": [
+        {
+          "path": "references/circle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS circle clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "ellipse",
+      "input": "inputs/ellipse.svg",
+      "references": [
+        {
+          "path": "references/ellipse.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS ellipse clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "polygon",
+      "input": "inputs/polygon.svg",
+      "references": [
+        {
+          "path": "references/polygon.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS polygon clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "path",
+      "input": "inputs/path.svg",
+      "references": [
+        {
+          "path": "references/path.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS path clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "path-evenodd",
+      "input": "inputs/path-evenodd.svg",
+      "references": [
+        {
+          "path": "references/path-evenodd.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS path-evenodd clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "rounded-inset",
+      "input": "inputs/rounded-inset.svg",
+      "references": [
+        {
+          "path": "references/rounded-inset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "CSS rounded-inset clipping is equivalent to independently constructed SVG geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "fill-box",
+      "input": "inputs/fill-box.svg",
+      "references": [
+        {
+          "path": "references/fill-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The fill-box clipping reference uses the specified geometry bounds.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "stroke-box",
+      "input": "inputs/stroke-box.svg",
+      "references": [
+        {
+          "path": "references/stroke-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The stroke-box clipping reference uses the specified geometry bounds.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "view-box",
+      "input": "inputs/view-box.svg",
+      "references": [
+        {
+          "path": "references/view-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The view-box clipping reference uses the specified geometry bounds.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    }
+  ]
+}

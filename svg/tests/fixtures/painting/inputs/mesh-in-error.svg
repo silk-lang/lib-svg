@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="32">
+<defs>
+<meshgradient id="ragged" gradientUnits="userSpaceOnUse" x="2" y="2">
+  <meshrow><meshpatch>
+    <stop path="l 8,0" stop-color="red"/><stop path="l 0,8" stop-color="red"/>
+    <stop path="l -8,0" stop-color="red"/><stop path="l" stop-color="red"/>
+  </meshpatch><meshpatch>
+    <stop path="l 8,0"/><stop path="l 0,8" stop-color="red"/><stop path="l" stop-color="red"/>
+  </meshpatch></meshrow>
+  <meshrow><meshpatch>
+    <stop path="l 0,8"/><stop path="l -8,0" stop-color="red"/><stop path="l" stop-color="red"/>
+  </meshpatch></meshrow>
+</meshgradient>
+<meshgradient id="moveto" gradientUnits="userSpaceOnUse" x="22" y="2">
+  <meshrow><meshpatch>
+    <stop path="m 8,0" stop-color="red"/><stop path="l 0,8" stop-color="red"/>
+    <stop path="l -8,0" stop-color="red"/><stop path="l" stop-color="red"/>
+  </meshpatch></meshrow>
+</meshgradient>
+<meshgradient id="short" gradientUnits="userSpaceOnUse" x="2" y="22">
+  <meshrow><meshpatch>
+    <stop path="l 8,0" stop-color="red"/><stop path="l 0,8" stop-color="red"/>
+  </meshpatch></meshrow>
+</meshgradient>
+</defs>
+<rect x="2" y="2" width="16" height="16" fill="url(#ragged)"/>
+<rect x="22" y="2" width="8" height="8" fill="url(#moveto)"/>
+<rect x="2" y="22" width="8" height="8" fill="url(#short)"/>
+</svg>

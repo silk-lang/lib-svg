@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <!-- CSS Transforms 2 §4.2 and SVG2 CR2018 pservers §14.4. -->
+  <defs>
+    <pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4"
+      style="transform:matrix3d(1,0,0,-.01,0,1,0,0,0,0,1,0,0,0,0,1)">
+      <rect width="4" height="4" fill="#206080"/>
+    </pattern>
+  </defs>
+  <rect width="32" height="16" fill="url(#p)"/>
+</svg>

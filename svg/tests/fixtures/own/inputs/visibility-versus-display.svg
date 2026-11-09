@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">
+<g visibility="hidden"><rect width="64" height="48" fill="red"/><rect x="8" y="8" width="16" height="24" visibility="visible" fill="#208040"/></g>
+<g display="none"><rect x="32" y="8" width="24" height="24" display="inline" visibility="visible" fill="red"/></g>
+</svg>

@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><mask id="a" mask-type="alpha"><rect width="8" height="8" opacity="0.25098039215686274"/></mask><mask id="b" mask-type="alpha"><rect width="8" height="8" opacity="0.5019607843137255"/></mask><rect width="8" height="8" style="mask-image:url(#a),url(#b);mask-composite:intersect"/></svg>

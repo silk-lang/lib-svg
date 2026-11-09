@@ -1,0 +1,1098 @@
+//! Mesh gradients (2016 CR pservers.html #MeshGradients): Coons patches whose corner
+//! colours are interpolated over the unit square, rasterized once per use into an image
+//! paint at the paint's device resolution.
+import silk.text.string { String }
+import scene { Paint, Color, PaintInstance, RenderError, ImageSampling }
+import structure { Graph, OccurrenceId }
+import document_styles { StyledGraph }
+import paint_metadata { Metadata, CoordinateUnits, MeshGradientMetadata }
+import used_paints { Store }
+import used_paints
+import used_transforms
+import image_assets { Asset, ColorMetadata }
+import mapping { Mapping }
+import silk.xml.document { XmlDocument }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.dimensions { ExprId }
+import svg_geometry.geometry { Rect, Point, Transform }
+import svg_geometry.transforms { Matrix }
+import svg_geometry.numeric { Cursor }
+import svg_geometry.math
+import svg_image.image { Image, ImageError }
+import svg_image.png { Metadata as PngMetadata, Chromaticities }
+import vector.geometry_error { GeometryError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+import silk.num.u32
+
+/// Mesh image pixels at most: larger meshes are rasterized at a lower resolution.
+const MAX_PIXELS: f64 = 4194304.0
+
+/// Grid cells per patch side at most.
+const MAX_CELLS: f64 = 64.0
+
+/// One Coons patch. `points` run clockwise from the top-left corner: each edge is a
+/// cubic from points[3e] through points[3e + 1] and points[3e + 2] to the next corner,
+/// top, right, bottom and left in turn. `colors` are the corners in the same order.
+pub struct Patch {
+  pub points: [Point; 12],
+  pub colors: [Color; 4],
+}
+
+impl Copy for Patch {}
+
+/// Patches in row-major order; every row has `columns` patches.
+pub struct Mesh {
+  pub patches: List<Patch>,
+  pub columns: usize,
+  pub bicubic: bool,
+}
+
+fn black() -> Color {
+  return Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+}
+
+fn firstChild(graph: &Graph, node: OccurrenceId) -> Option<OccurrenceId> {
+  let occurrence = &graph.occurrences.asSlice()[node.index]
+  return match &occurrence.shadow {
+    Option<OccurrenceId>.Some { value } => Option<OccurrenceId>.some(value)
+    _ => occurrence.firstChild
+  }
+}
+
+fn named(graph: &Graph, node: OccurrenceId, name: &[u8]) -> bool {
+  let source = graph.occurrences.asSlice()[node.index].source
+  let document = graph.sourceDocument(source)
+  return equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)),
+    b"http://www.w3.org/2000/svg",
+  )
+    && equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), name)
+}
+
+fn lerp(a: Point, b: Point, t: f64) -> Point {
+  return Point.new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+fn pair(cursor: &mut Cursor<'_>, separated: bool) -> Option<Point> {
+  cursor.separator(separated)
+  let x = match &cursor.number() {
+    Option<f64>.Some { value } => value
+    _ => {
+      return Option<Point>.None
+    }
+  }
+  cursor.separator(true)
+  return match &cursor.number() {
+    Option<f64>.Some { value } => Option<Point>.some(Point.new(x, value))
+    _ => Option<Point>.None
+  }
+}
+
+/// The edge a stop's `path` describes from `start` (#MeshStructure): one c, C, l or L
+/// command. The last stop of a patch omits its final point, which is `closing`; a
+/// redundant final point is accepted and ignored. Lines become cubics.
+pub fn edge(data: &[u8], start: Point, closing: Option<Point>) -> Option<[Point; 3]> {
+  let mut cursor = Cursor.make(data)
+  cursor.space()
+  if cursor.at >= data.length {
+    return Option<[Point; 3]>.None
+  }
+  let command = data[cursor.at]
+  cursor.at = cursor.at + 1
+  let lower = command | 32
+  if lower != 99 && lower != 108 {
+    return Option<[Point; 3]>.None
+  }
+  let relative = command == lower
+  let total: usize = if lower == 99 {
+    3
+  } else {
+    1
+  }
+  let needed = if closing.isSome() {
+    total - 1
+  } else {
+    total
+  }
+  let mut points = [start; 3]
+  let mut i: usize = 0
+  while i < needed {
+    let pair = match &pair(&mut cursor, i > 0) {
+      Option<Point>.Some { value } => value
+      _ => {
+        return Option<[Point; 3]>.None
+      }
+    }
+    points[i] = if relative {
+      Point.new(start.x + pair.x, start.y + pair.y)
+    } else {
+      pair
+    }
+    i = i + 1
+  }
+  cursor.space()
+  if cursor.at != data.length && closing.isSome() {
+    drop pair(&mut cursor, needed > 0)
+    cursor.space()
+  }
+  if cursor.at != data.length {
+    return Option<[Point; 3]>.None
+  }
+  let end = match &closing {
+    Option<Point>.Some { value } => value
+    _ => points[total - 1]
+  }
+  if lower == 108 {
+    return Option<[Point; 3]>.some([lerp(start, end, 1.0 / 3.0), lerp(start, end, 2.0 / 3.0), end])
+  }
+  return Option<[Point; 3]>.some([points[0], points[1], end])
+}
+
+fn bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: f64) -> Point {
+  let s = 1.0 - t
+  let a = s * s * s
+  let b = 3.0 * s * s * t
+  let c = 3.0 * s * t * t
+  let d = t * t * t
+  return Point.new(
+    a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+    a * p0.y + b * p1.y + c * p2.y + d * p3.y,
+  )
+}
+
+/// The Coons surface S = SC + SD − SB at (u, v) (#MeshPatchPainting).
+pub fn surface(patch: &Patch, u: f64, v: f64) -> Point {
+  let p = &patch.points
+  let c1 = bezier(p[0], p[1], p[2], p[3], u)
+  let c2 = bezier(p[9], p[8], p[7], p[6], u)
+  let d1 = bezier(p[0], p[11], p[10], p[9], v)
+  let d2 = bezier(p[3], p[4], p[5], p[6], v)
+  let su = 1.0 - u
+  let sv = 1.0 - v
+  let bx = sv * (su * p[0].x + u * p[3].x) + v * (su * p[9].x + u * p[6].x)
+  let by = sv * (su * p[0].y + u * p[3].y) + v * (su * p[9].y + u * p[6].y)
+  return Point.new(
+    sv * c1.x + v * c2.x + su * d1.x + u * d2.x - bx,
+    sv * c1.y + v * c2.y + su * d1.y + u * d2.y - by,
+  )
+}
+
+fn channel(color: Color, k: usize) -> f64 {
+  return if k == 0 {
+    color.r
+  } else if k == 1 {
+    color.g
+  } else if k == 2 {
+    color.b
+  } else {
+    color.a
+  }
+}
+
+/// Corner colours interpolated bilinearly over the unit square.
+pub fn bilinear(patch: &Patch, u: f64, v: f64) -> Color {
+  let c = &patch.colors
+  let w0 = (1.0 - u) * (1.0 - v)
+  let w1 = u * (1.0 - v)
+  let w2 = u * v
+  let w3 = (1.0 - u) * v
+  return Color {
+    r: w0 * c[0].r + w1 * c[1].r + w2 * c[2].r + w3 * c[3].r,
+    g: w0 * c[0].g + w1 * c[1].g + w2 * c[2].g + w3 * c[3].g,
+    b: w0 * c[0].b + w1 * c[1].b + w2 * c[2].b + w3 * c[3].b,
+    a: w0 * c[0].a + w1 * c[1].a + w2 * c[2].a + w3 * c[3].a,
+  }
+}
+
+/// Per-corner colour derivatives with respect to u and v, for bicubic patches.
+pub struct Slopes {
+  pub u: [[f64; 4]; 4],
+  pub v: [[f64; 4]; 4],
+}
+
+impl Copy for Slopes {}
+
+fn h0(t: f64) -> f64 {
+  return 2.0 * t * t * t - 3.0 * t * t + 1.0
+}
+
+fn h1(t: f64) -> f64 {
+  return t * t * t - 2.0 * t * t + t
+}
+
+fn h2(t: f64) -> f64 {
+  return 3.0 * t * t - 2.0 * t * t * t
+}
+
+fn h3(t: f64) -> f64 {
+  return t * t * t - t * t
+}
+
+/// Bicubic Hermite interpolation of the corner colours with zero cross derivatives.
+pub fn bicubic(patch: &Patch, slopes: &Slopes, u: f64, v: f64) -> Color {
+  let c = &patch.colors
+  let mut out = [0.0; 4]
+  let a0 = h0(u)
+  let a1 = h1(u)
+  let a2 = h2(u)
+  let a3 = h3(u)
+  let b0 = h0(v)
+  let b1 = h1(v)
+  let b2 = h2(v)
+  let b3 = h3(v)
+  let mut k: usize = 0
+  while k < 4 {
+    let value = b0 * (a0 * channel(c[0], k) + a2 * channel(c[1], k))
+      + b2 * (a0 * channel(c[3], k) + a2 * channel(c[2], k))
+      + b0 * (a1 * slopes.u[0][k] + a3 * slopes.u[1][k])
+      + b2 * (a1 * slopes.u[3][k] + a3 * slopes.u[2][k])
+      + b1 * (a0 * slopes.v[0][k] + a2 * slopes.v[1][k])
+      + b3 * (a0 * slopes.v[3][k] + a2 * slopes.v[2][k])
+    out[k] = f64.min(1.0, f64.max(0.0, value))
+    k = k + 1
+  }
+  return Color { r: out[0], g: out[1], b: out[2], a: out[3] }
+}
+
+fn distance(a: Point, b: Point) -> f64 {
+  return math.hypot(b.x - a.x, b.y - a.y)
+}
+
+/// The monotone derivatives (#MeshPatchPainting) of one channel along a line of mesh
+/// corners, per unit of distance.
+effect fn monotone(points: &[Point], values: &[f64], out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let n = points.length - 1
+  let mut secants = List<f64>.make()
+  let mut k: usize = 0
+  while k < n {
+    let length = distance(points[k], points[k + 1])
+    run secants.append(
+      if length == 0.0 {
+        0.0
+      } else {
+        (values[k + 1] - values[k]) / length
+      },
+    )
+    k = k + 1
+  }
+  let delta = secants.asSlice()
+  let start = out.length()
+  k = 0
+  while k <= n {
+    run out.append(0.0)
+    k = k + 1
+  }
+  let result = out.asMutSlice()
+  if n == 1 {
+    result[start] = delta[0]
+    result[start + 1] = delta[0]
+    return
+  }
+  k = 1
+  while k < n {
+    let before = delta[k - 1]
+    let after = delta[k]
+    let mut d = (before + after) / 2.0
+    if before * after < 0.0 {
+      d = 0.0
+    } else {
+      if f64.abs(d) > f64.abs(3.0 * before) {
+        d = 3.0 * before
+      }
+      if f64.abs(d) > f64.abs(3.0 * after) {
+        d = 3.0 * after
+      }
+    }
+    result[start + k] = d
+    k = k + 1
+  }
+  result[start] = 2.0 * delta[0] - result[start + 1]
+  result[start + n] = 2.0 * delta[n - 1] - result[start + n - 1]
+}
+
+fn cornerPoint(mesh: &Mesh, row: usize, column: usize) -> Point {
+  let rows = mesh.patches.length() / mesh.columns
+  let r = if row < rows {
+    row
+  } else {
+    rows - 1
+  }
+  let c = if column < mesh.columns {
+    column
+  } else {
+    mesh.columns - 1
+  }
+  let patch = &mesh.patches.asSlice()[r * mesh.columns + c]
+  let corner: usize = if row > r {
+    if column > c {
+      2
+    } else {
+      3
+    }
+  } else if column > c {
+    1
+  } else {
+    0
+  }
+  return patch.points[corner * 3]
+}
+
+fn cornerColor(mesh: &Mesh, row: usize, column: usize) -> Color {
+  let rows = mesh.patches.length() / mesh.columns
+  let r = if row < rows {
+    row
+  } else {
+    rows - 1
+  }
+  let c = if column < mesh.columns {
+    column
+  } else {
+    mesh.columns - 1
+  }
+  let patch = &mesh.patches.asSlice()[r * mesh.columns + c]
+  let corner: usize = if row > r {
+    if column > c {
+      2
+    } else {
+      3
+    }
+  } else if column > c {
+    1
+  } else {
+    0
+  }
+  return patch.colors[corner]
+}
+
+/// Bicubic slopes for every patch, in patch order.
+pub effect fn slopes(mesh: &Mesh) -> List<Slopes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let columns = mesh.columns
+  let rows = mesh.patches.length() / columns
+  let width = columns + 1
+
+  // Derivatives per unit length along rows (du) and columns (dv), per corner and channel.
+  let mut du = List<f64>.make()
+  let mut dv = List<f64>.make()
+  run du.reserve((rows + 1) * width * 4)
+  run dv.reserve((rows + 1) * width * 4)
+  let mut k: usize = 0
+  let mut line = List<Point>.make()
+  let mut values = List<f64>.make()
+  let mut along = List<f64>.make()
+  let mut i: usize = 0
+  while i < (rows + 1) * width * 4 {
+    run du.append(0.0)
+    run dv.append(0.0)
+    i = i + 1
+  }
+  while k < 4 {
+    let mut r: usize = 0
+    while r <= rows {
+      line.truncate(0)
+      values.truncate(0)
+      along.truncate(0)
+      let mut c: usize = 0
+      while c <= columns {
+        run line.append(cornerPoint(mesh, r, c))
+        run values.append(channel(cornerColor(mesh, r, c), k))
+        c = c + 1
+      }
+      run monotone(line.asSlice(), values.asSlice(), &mut along)
+      c = 0
+      while c <= columns {
+        let slots = du.asMutSlice()
+        slots[(r * width + c) * 4 + k] = along.asSlice()[c]
+        c = c + 1
+      }
+      r = r + 1
+    }
+    let mut c: usize = 0
+    while c <= columns {
+      line.truncate(0)
+      values.truncate(0)
+      along.truncate(0)
+      r = 0
+      while r <= rows {
+        run line.append(cornerPoint(mesh, r, c))
+        run values.append(channel(cornerColor(mesh, r, c), k))
+        r = r + 1
+      }
+      run monotone(line.asSlice(), values.asSlice(), &mut along)
+      r = 0
+      while r <= rows {
+        let slots = dv.asMutSlice()
+        slots[(r * width + c) * 4 + k] = along.asSlice()[r]
+        r = r + 1
+      }
+      c = c + 1
+    }
+    k = k + 1
+  }
+  let mut result = List<Slopes>.make()
+  let mut index: usize = 0
+  while index < mesh.patches.length() {
+    let r = index / columns
+    let c = index % columns
+    let patch = &mesh.patches.asSlice()[index]
+    let p = &patch.points
+
+    // Per-unit-length derivatives scale to the unit square by the chord of the edge
+    // they run along.
+    let top = distance(p[0], p[3])
+    let bottom = distance(p[9], p[6])
+    let left = distance(p[0], p[9])
+    let right = distance(p[3], p[6])
+    let corners = [r * width + c, r * width + c + 1, (r + 1) * width + c + 1, (r + 1) * width + c]
+    let mut slope = Slopes { u: [[0.0; 4]; 4], v: [[0.0; 4]; 4] }
+    let mut corner: usize = 0
+    while corner < 4 {
+      let uScale = if corner < 2 {
+        top
+      } else {
+        bottom
+      }
+      let vScale = if corner == 0 || corner == 3 {
+        left
+      } else {
+        right
+      }
+      let mut channelIndex: usize = 0
+      while channelIndex < 4 {
+        let at = corners[corner] * 4 + channelIndex
+        slope.u[corner][channelIndex] = du.asSlice()[at] * uScale
+        slope.v[corner][channelIndex] = dv.asSlice()[at] * vScale
+        channelIndex = channelIndex + 1
+      }
+      corner = corner + 1
+    }
+    run result.append(slope)
+    index = index + 1
+  }
+  return move result
+}
+
+/// The patches of a mesh gradient occurrence in mesh coordinates, or None when the mesh
+/// is in error: a row whose patch count differs from the first row's, a patch with too
+/// few stops, or an invalid stop path.
+pub effect fn patches(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  start: Point,
+  bicubic: bool,
+  limits: &Limits,
+) -> Option<Mesh>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut list = List<Patch>.make()
+  let mut columns: usize = 0
+  let mut row: usize = 0
+  let mut rowChild = firstChild(graph, node)
+  while true {
+    let rowNode = match &rowChild {
+      Option<OccurrenceId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    rowChild = graph.occurrences.asSlice()[rowNode.index].nextSibling
+    if !named(graph, rowNode, b"meshrow") {
+      continue
+    }
+    let mut column: usize = 0
+    let mut patchChild = firstChild(graph, rowNode)
+    while true {
+      let patchNode = match &patchChild {
+        Option<OccurrenceId>.Some { value } => value
+        _ => {
+          break
+        }
+      }
+      patchChild = graph.occurrences.asSlice()[patchNode.index].nextSibling
+      if !named(graph, patchNode, b"meshpatch") {
+        continue
+      }
+      if row > 0 && column >= columns {
+        return Option<Mesh>.None
+      }
+      let mut patch = Patch { points: [start; 12], colors: [black(); 4] }
+      let mut known = [false; 4]
+      if column > 0 {
+        let left = list.asSlice()[list.length() - 1]
+        patch.points[0] = left.points[3]
+        patch.points[11] = left.points[4]
+        patch.points[10] = left.points[5]
+        patch.points[9] = left.points[6]
+        patch.colors[0] = left.colors[1]
+        patch.colors[3] = left.colors[2]
+        known[3] = true
+      }
+      if row > 0 {
+        let above = list.asSlice()[(row - 1) * columns + column]
+        patch.points[0] = above.points[9]
+        patch.points[1] = above.points[8]
+        patch.points[2] = above.points[7]
+        patch.points[3] = above.points[6]
+        patch.colors[0] = above.colors[3]
+        patch.colors[1] = above.colors[2]
+        known[0] = true
+      }
+      let mut last: usize = 3
+      while known[last] {
+        last = last - 1
+      }
+      let mut side: usize = 0
+      while known[side] {
+        side = side + 1
+      }
+      let mut stopChild = firstChild(graph, patchNode)
+      let mut complete = false
+      while true {
+        let stopNode = match &stopChild {
+          Option<OccurrenceId>.Some { value } => value
+          _ => {
+            break
+          }
+        }
+        stopChild = graph.occurrences.asSlice()[stopNode.index].nextSibling
+        if !named(graph, stopNode, b"stop") {
+          continue
+        }
+        let begin = patch.points[side * 3]
+        let closing = if side == last {
+          Option<Point>.some(patch.points[((side + 1) % 4) * 3])
+        } else {
+          Option<Point>.None
+        }
+        let source = graph.occurrences.asSlice()[stopNode.index].source
+        let document = graph.sourceDocument(source)
+        let data = match (XmlDocument.attribute(document, source.node, "", "path")
+          |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+          Option<&[u8]>.Some { value } => value
+          _ => {
+            return Option<Mesh>.None
+          }
+        }
+        let points = match &edge(data, begin, closing) {
+          Option<[Point; 3]>.Some { value } => value
+          _ => {
+            return Option<Mesh>.None
+          }
+        }
+        patch.points[side * 3 + 1] = points[0]
+        patch.points[side * 3 + 2] = points[1]
+        patch.points[((side + 1) % 4) * 3] = points[2]
+
+        // The stop's colour belongs to its edge's initial corner, unless a previous
+        // patch already defined that corner.
+        let defined = (side == 0 && (row > 0 || column > 0)) || (side == 1 && row > 0)
+          || (side == 3 && column > 0)
+        if !defined {
+          let style = run used_paints.styleId(&styles.*, stopNode)
+          patch.colors[side] = run used_paints.stopColor(&styles.catalog.engine, style)
+        }
+        if side == last {
+          complete = true
+          break
+        }
+        side = side + 1
+        while known[side] {
+          side = side + 1
+        }
+      }
+      if !complete {
+        return Option<Mesh>.None
+      }
+      run list.append(patch)
+      column = column + 1
+    }
+    if row == 0 {
+      columns = column
+    } else if column != columns {
+      return Option<Mesh>.None
+    }
+    if column == 0 {
+      // An empty first row gives nothing to tile.
+      return Option<Mesh>.None
+    }
+    row = row + 1
+  }
+  if list.length() == 0 {
+    return Option<Mesh>.None
+  }
+  return Option<Mesh>.some(Mesh { patches: move list, columns: columns, bicubic: bicubic })
+}
+
+struct Vertex {
+  x: f64,
+  y: f64,
+  u: f64,
+  v: f64,
+}
+
+impl Copy for Vertex {}
+
+fn cross(a: Vertex, b: Vertex, x: f64, y: f64) -> f64 {
+  return (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+}
+
+fn unit(value: f64) -> u8 {
+  return f64.toU8(f64.min(1.0, f64.max(0.0, value)) * 255.0 + 0.5)
+}
+
+/// Writes the patch colour at every pixel centre the triangle covers. Coverage is
+/// inclusive, so pixel centres on a shared edge take the later triangle's colour.
+fn triangle(
+  pixels: &mut [u8],
+  width: usize,
+  height: usize,
+  a: Vertex,
+  b: Vertex,
+  c: Vertex,
+  patch: &Patch,
+  slope: Option<Slopes>,
+) -> () {
+  let area = cross(a, b, c.x, c.y)
+  if area == 0.0 || !f64.isFinite(area) {
+    return
+  }
+  let xMin = f64.max(0.0, f64.floor(f64.min(a.x, f64.min(b.x, c.x)) - 0.5))
+  let yMin = f64.max(0.0, f64.floor(f64.min(a.y, f64.min(b.y, c.y)) - 0.5))
+  let xMax = f64.min(usize.toF64(width), f64.ceil(f64.max(a.x, f64.max(b.x, c.x)) + 0.5))
+  let yMax = f64.min(usize.toF64(height), f64.ceil(f64.max(a.y, f64.max(b.y, c.y)) + 0.5))
+  if xMin >= xMax || yMin >= yMax {
+    return
+  }
+  let x0 = f64.toUsize(xMin)
+  let x1 = f64.toUsize(xMax)
+  let mut py = f64.toUsize(yMin)
+  let y1 = f64.toUsize(yMax)
+  while py < y1 {
+    let y = usize.toF64(py) + 0.5
+    let mut px = x0
+    while px < x1 {
+      let x = usize.toF64(px) + 0.5
+      let wa = cross(b, c, x, y) / area
+      let wb = cross(c, a, x, y) / area
+      let wc = cross(a, b, x, y) / area
+      if wa >= -1e-12 && wb >= -1e-12 && wc >= -1e-12 {
+        let u = f64.min(1.0, f64.max(0.0, wa * a.u + wb * b.u + wc * c.u))
+        let v = f64.min(1.0, f64.max(0.0, wa * a.v + wb * b.v + wc * c.v))
+        let color = match &slope {
+          Option<Slopes>.Some { value } => bicubic(patch, &value, u, v)
+          _ => bilinear(patch, u, v)
+        }
+        let alpha = f64.min(1.0, f64.max(0.0, color.a))
+        let at = (py * width + px) * 4
+        pixels[at] = unit(color.r * alpha)
+        pixels[at + 1] = unit(color.g * alpha)
+        pixels[at + 2] = unit(color.b * alpha)
+        pixels[at + 3] = unit(alpha)
+      }
+      px = px + 1
+    }
+    py = py + 1
+  }
+}
+
+/// Image pixels per mesh unit along each mesh axis.
+fn scales(map: &Mapping) -> [f64; 2] {
+  return match &map.* {
+    Mapping.Affine { value } => [math.hypot(value.xx, value.yx), math.hypot(value.xy, value.yy)]
+    Mapping.Projective { value } => [
+      math.hypot(value.xx, value.yx) / f64.abs(value.ww),
+      math.hypot(value.xy, value.yy) / f64.abs(value.ww),
+    ]
+  }
+}
+
+effect fn imageLimit(error: ImageError) -> Image
+  ! RenderError {
+  fail RenderError.TooLarge
+}
+
+pub struct Raster {
+  pub image: Image,
+  /// Image pixel space to mesh coordinates.
+  pub placement: Transform,
+}
+
+/// Rasterizes a mesh for a mesh-to-device map: one image pixel per device pixel
+/// where the budget allows, aligned to the device pixel grid when the map is an
+/// axis-aligned scale and translation.
+pub effect fn rasterize(mesh: &Mesh, map: &Mapping) -> Option<Raster>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let scale = scales(map)
+  let mut sx = scale[0]
+  let mut sy = scale[1]
+  if !(f64.isFinite(sx) && f64.isFinite(sy)) || sx == 0.0 || sy == 0.0 {
+    return Option<Raster>.None
+  }
+  let count = mesh.patches.length()
+  if count == 0 || mesh.columns == 0 {
+    return Option<Raster>.None
+  }
+  let rows = count / mesh.columns
+
+  // Grid cells along u per mesh column and along v per mesh row: patches sharing an
+  // edge split it at the same parameters, so their triangles meet without gaps.
+  let mut across = List<usize>.make()
+  let mut down = List<usize>.make()
+  let mut c: usize = 0
+  while c < mesh.columns {
+    run across.append(1)
+    c = c + 1
+  }
+  let mut r: usize = 0
+  while r < rows {
+    run down.append(1)
+    r = r + 1
+  }
+  let mut index: usize = 0
+  while index < count {
+    let patch = &mesh.patches.asSlice()[index]
+    let mut lengths = [0.0; 4]
+    let mut e: usize = 0
+    while e < 4 {
+      let mut i: usize = 0
+      while i < 3 {
+        let a = patch.points[e * 3 + i]
+        let b = patch.points[(e * 3 + i + 1) % 12]
+        lengths[e] = lengths[e] + math.hypot((b.x - a.x) * sx, (b.y - a.y) * sy)
+        i = i + 1
+      }
+      e = e + 1
+    }
+    let nu = f64.toUsize(
+      f64.min(MAX_CELLS, f64.max(1.0, f64.ceil(f64.max(lengths[0], lengths[2]) / 4.0))),
+    )
+    let nv = f64.toUsize(
+      f64.min(MAX_CELLS, f64.max(1.0, f64.ceil(f64.max(lengths[1], lengths[3]) / 4.0))),
+    )
+    let columnSlots = across.asMutSlice()
+    let column = index % mesh.columns
+    if nu > columnSlots[column] {
+      columnSlots[column] = nu
+    }
+    let rowSlots = down.asMutSlice()
+    let row = index / mesh.columns
+    if nv > rowSlots[row] {
+      rowSlots[row] = nv
+    }
+    index = index + 1
+  }
+  let mut grid = List<Point>.make()
+  let mut xMin = f64.INFINITY
+  let mut yMin = f64.INFINITY
+  let mut xMax = -f64.INFINITY
+  let mut yMax = -f64.INFINITY
+  index = 0
+  while index < count {
+    let patch = &mesh.patches.asSlice()[index]
+    let nu = across.asSlice()[index % mesh.columns]
+    let nv = down.asSlice()[index / mesh.columns]
+    let mut j: usize = 0
+    while j <= nv {
+      let v = usize.toF64(j) / usize.toF64(nv)
+      let mut k: usize = 0
+      while k <= nu {
+        let point = surface(patch, usize.toF64(k) / usize.toF64(nu), v)
+        if !(f64.isFinite(point.x) && f64.isFinite(point.y)) {
+          fail RenderError.InvalidGeometry
+        }
+        xMin = f64.min(xMin, point.x)
+        yMin = f64.min(yMin, point.y)
+        xMax = f64.max(xMax, point.x)
+        yMax = f64.max(yMax, point.y)
+        run grid.append(point)
+        k = k + 1
+      }
+      j = j + 1
+    }
+    index = index + 1
+  }
+  let mut spanX = (xMax - xMin) * sx + 2.0
+  let mut spanY = (yMax - yMin) * sy + 2.0
+  if spanX * spanY > MAX_PIXELS {
+    let reduce = f64.sqrt(MAX_PIXELS / (spanX * spanY))
+    sx = sx * reduce
+    sy = sy * reduce
+    spanX = (xMax - xMin) * sx + 2.0
+    spanY = (yMax - yMin) * sy + 2.0
+  }
+
+  // One transparent pixel of margin around the mesh: image paints clamp at their edge.
+  let mut originX = xMin - 1.0 / sx
+  let mut originY = yMin - 1.0 / sy
+  match &map.* {
+    Mapping.Affine { value } => {
+      if value.yx == 0.0 && value.xy == 0.0 && value.xx == sx && value.yy == sy {
+        originX = (f64.floor(value.xx * xMin + value.dx) - 1.0 - value.dx) / value.xx
+        originY = (f64.floor(value.yy * yMin + value.dy) - 1.0 - value.dy) / value.yy
+      }
+    }
+    _ => {}
+  }
+  let width = f64.ceil((xMax - originX) * sx) + 1.0
+  let height = f64.ceil((yMax - originY) * sy) + 1.0
+  if !(width >= 1.0 && height >= 1.0 && width * height <= MAX_PIXELS * 2.0) {
+    return Option<Raster>.None
+  }
+  let w = f64.toUsize(width)
+  let h = f64.toUsize(height)
+  let mut image = run Effect.catch<ImageError>(
+    Image.make(f64.toU32(width), f64.toU32(height)),
+    imageLimit,
+  )
+  let bicubicSlopes = if mesh.bicubic {
+    run slopes(mesh)
+  } else {
+    List<Slopes>.make()
+  }
+  let mut offset: usize = 0
+  index = 0
+  while index < count {
+    let patch = &mesh.patches.asSlice()[index]
+    let nu = across.asSlice()[index % mesh.columns]
+    let nv = down.asSlice()[index / mesh.columns]
+    let slope = if mesh.bicubic {
+      Option<Slopes>.some(bicubicSlopes.asSlice()[index])
+    } else {
+      Option<Slopes>.None
+    }
+    let mut j: usize = 0
+    while j < nv {
+      let mut k: usize = 0
+      while k < nu {
+        let at = offset + j * (nu + 1) + k
+        let corners = [at, at + 1, at + nu + 2, at + nu + 1]
+        let mut vertices = [Vertex { x: 0.0, y: 0.0, u: 0.0, v: 0.0 }; 4]
+        let mut q: usize = 0
+        while q < 4 {
+          let point = grid.asSlice()[corners[q]]
+          let du: usize = if q == 1 || q == 2 {
+            1
+          } else {
+            0
+          }
+          let dv: usize = if q >= 2 {
+            1
+          } else {
+            0
+          }
+          vertices[q] = Vertex {
+            x: (point.x - originX) * sx,
+            y: (point.y - originY) * sy,
+            u: usize.toF64(k + du) / usize.toF64(nu),
+            v: usize.toF64(j + dv) / usize.toF64(nv),
+          }
+          q = q + 1
+        }
+        triangle(image.dataMut(), w, h, vertices[0], vertices[1], vertices[2], patch, slope)
+        triangle(image.dataMut(), w, h, vertices[0], vertices[2], vertices[3], patch, slope)
+        k = k + 1
+      }
+      j = j + 1
+    }
+    offset = offset + (nu + 1) * (nv + 1)
+    index = index + 1
+  }
+  return Option<Raster>.some(
+    Raster {
+      image: move image,
+      placement: Transform.new(1.0 / sx, 0.0, 0.0, 1.0 / sy, originX, originY),
+    },
+  )
+}
+
+// #PaintServerTemplates: x, y, gradientUnits and type come from the first element of
+// the template chain that specifies them.
+effect fn merged(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> Option<MeshGradientMetadata>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut data = MeshGradientMetadata {
+    units: Option<CoordinateUnits>.None,
+    x: Option<ExprId>.None,
+    y: Option<ExprId>.None,
+    bicubic: Option<bool>.None,
+  }
+  let mut current = Option<OccurrenceId>.some(node)
+  let mut count: usize = 0
+  let mut found = false
+  while let Option<OccurrenceId>.Some { value: target } = &current {
+    if count >= graph.occurrences.length() {
+      fail RenderError.TooLarge
+    }
+    count = count + 1
+    let index = match &(run used_paints.metadataIndex(
+      &mut store.*,
+      graph,
+      &mut styles.*,
+      target,
+      limits,
+    )) {
+      Option<usize>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    match &store.metadata.asSlice()[index] {
+      Metadata.MeshGradient { value } => {
+        found = true
+        if data.units.isNone() {
+          data.units = value.units
+        }
+        if data.x.isNone() {
+          data.x = value.x
+        }
+        if data.y.isNone() {
+          data.y = value.y
+        }
+        if data.bicubic.isNone() {
+          data.bicubic = value.bicubic
+        }
+      }
+      _ => {
+        break
+      }
+    }
+    current = styles.template(target)
+  }
+  return if found {
+    Option<MeshGradientMetadata>.some(data)
+  } else {
+    Option<MeshGradientMetadata>.None
+  }
+}
+
+/// The paint for a `meshgradient` occurrence, or None when `node` is not one.
+pub effect fn paint(
+  store: &mut Store,
+  assets: &mut List<Asset>,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  viewport: Rect,
+  bounds: Rect,
+  transform: &Mapping,
+  limits: &Limits,
+) -> Option<Paint>
+  ! CssError | RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  if !named(graph, node, b"meshgradient") {
+    return Option<Paint>.None
+  }
+  let data = match &(run merged(&mut store.*, graph, &mut styles.*, node, limits)) {
+    Option<MeshGradientMetadata>.Some { value } => value
+    _ => {
+      return Option<Paint>.None
+    }
+  }
+  let objectUnits = match &data.units {
+    Option<CoordinateUnits>.Some { value } => value == CoordinateUnits.ObjectBoundingBox
+    _ => true
+  }
+  if objectUnits && (bounds.width() == 0.0 || bounds.height() == 0.0) {
+    return Option<Paint>.some(Paint.None)
+  }
+  let reference = if objectUnits {
+    Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  } else {
+    viewport
+  }
+  let style = run used_paints.styleId(&styles.*, node)
+  let x = run used_paints.number(&mut styles.catalog.engine, style, data.x, reference.width(), 0.0)
+  let y = run used_paints.number(&mut styles.catalog.engine, style, data.y, reference.height(), 0.0)
+  let bicubic = match &data.bicubic {
+    Option<bool>.Some { value } => value
+    _ => false
+  }
+  let mesh = match move run patches(
+    &mut store.*,
+    graph,
+    &mut styles.*,
+    node,
+    Point.new(x, y),
+    bicubic,
+    limits,
+  ) {
+    Option<Mesh>.Some { value } => move value
+    _ => {
+      return Option<Paint>.some(Paint.None)
+    }
+  }
+  let fillReference = if objectUnits {
+    reference
+  } else {
+    bounds
+  }
+  let local = match &used_transforms.element(
+    &styles.catalog.engine,
+    style,
+    reference,
+    fillReference,
+    fillReference,
+  ) {
+    Option<Matrix>.Some { value } => run Mapping.fromMatrix(&value)
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let coordinateMap = if objectUnits {
+    Mapping.Affine {
+      value: Transform.new(bounds.width(), 0.0, 0.0, bounds.height(), bounds.xMin, bounds.yMin),
+    }
+  } else {
+    Mapping.identity()
+  }
+  let meshMap = run transform.compose(&(run coordinateMap.compose(&local)))
+  let raster = match move run rasterize(&mesh, &meshMap) {
+    Option<Raster>.Some { value } => move value
+    _ => {
+      return Option<Paint>.some(Paint.None)
+    }
+  }
+  let placement = Mapping.Affine { value: raster.placement }
+  let image = assets.length()
+  run assets.append(
+    Asset {
+      image: move raster.image,
+      color: ColorMetadata.Png {
+        value: PngMetadata {
+          gamma: Option<u32>.None,
+          chromaticities: Option<Chromaticities>.None,
+          srgbIntent: Option<u8>.None,
+          iccProfile: Bytes.make(),
+        },
+      },
+    },
+  )
+  let index = store.paints.length()
+  run store.paints.append(
+    PaintInstance.Image {
+      image: image,
+      transform: run meshMap.compose(&placement),
+      sampling: ImageSampling.Smooth,
+    },
+  )
+  return Option<Paint>.some(Paint.Server { index: index })
+}

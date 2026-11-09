@@ -1,0 +1,304 @@
+//! Text on a path (SVG 2 #TextOnAPath): the path as a polyline measured by distance.
+import svg_geometry.geometry { Path, Point, Segment, Transform }
+import svg_geometry.arcs { ArcIter }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+/// Curves become this many chords each, uniform in their parameter.
+const CHORDS: usize = 64
+
+/// One straight piece of the flattened path, starting `distance` along it.
+struct Piece {
+  from: Point,
+  to: Point,
+  distance: f64,
+  length: f64,
+}
+
+impl Copy for Piece {}
+
+/// A `textPath` element's characters `[start, end)` and the path they follow, in the text
+/// element's user space. An invalid reference renders none of its characters.
+pub struct OnPath {
+  pub start: usize,
+  pub end: usize,
+  pub valid: bool,
+  /// startOffset in user units along the path.
+  pub offset: f64,
+  /// Whether the path is a single closed subpath, which text wraps around.
+  pub closed: bool,
+  pub length: f64,
+  /// The path's end point, where characters after the element continue.
+  pub last: Point,
+  pieces: List<Piece>,
+}
+
+/// A point along the path and the unit tangent there.
+pub struct Frame {
+  pub point: Point,
+  pub tangentX: f64,
+  pub tangentY: f64,
+}
+
+impl Copy for Frame {}
+
+/// startOffset before the path is measured.
+pub union Offset {
+  Length { pub value: f64 },
+  Fraction { pub value: f64 },
+}
+
+impl Copy for Offset {}
+
+effect fn chord(points: &mut List<List<Point>>, to: Point) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = List<List<Point>>.length(&points.*)
+  let subpaths = List<List<Point>>.asMutSlice(&mut points)
+  run List<Point>.append(&mut subpaths[count - 1], to)
+}
+
+fn quadratic(from: Point, control: Point, to: Point, t: f64) -> Point {
+  let mt = 1.0 - t
+  return Point.new(
+    mt * mt * from.x + 2.0 * mt * t * control.x + t * t * to.x,
+    mt * mt * from.y + 2.0 * mt * t * control.y + t * t * to.y,
+  )
+}
+
+fn cubic(from: Point, first: Point, second: Point, to: Point, t: f64) -> Point {
+  let mt = 1.0 - t
+  return Point.new(
+    mt * mt * mt * from.x + 3.0 * mt * mt * t * first.x + 3.0 * mt * t * t * second.x
+      + t * t * t * to.x,
+    mt * mt * mt * from.y + 3.0 * mt * mt * t * first.y + 3.0 * mt * t * t * second.y
+      + t * t * t * to.y,
+  )
+}
+
+effect fn curve(points: &mut List<List<Point>>, segment: Segment, from: Point) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut k: usize = 1
+  while k <= CHORDS {
+    let t = usize.toF64(k) / usize.toF64(CHORDS)
+    let at = match segment {
+      Segment.QuadraticTo { control, to } => if k == CHORDS {
+        to
+      } else {
+        quadratic(from, control, to, t)
+      }
+      Segment.CubicTo { control1, control2, to } => if k == CHORDS {
+        to
+      } else {
+        cubic(from, control1, control2, to, t)
+      }
+      _ => from
+    }
+    run chord(&mut points, at)
+    k = k + 1
+  }
+}
+
+/// `path` flattened to polylines, one per subpath, with curves as chords; a closed subpath
+/// repeats its first point and is marked in `closes`.
+pub effect fn polylines(path: &Path, closes: &mut List<bool>) -> List<List<Point>>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut subpaths = List<List<Point>>.make()
+  let mut current = Point.new(0.0, 0.0)
+  let mut first = current
+  let segments = path.segments()
+  let mut index: usize = 0
+  while index < segments.length {
+    let segment = segments[index]
+    let open = List<List<Point>>.length(&subpaths) > 0
+    match segment {
+      Segment.MoveTo { to } => {
+        run List<List<Point>>.append(&mut subpaths, List<Point>.make())
+        run List<bool>.append(&mut closes, false)
+        run chord(&mut subpaths, to)
+        current = to
+        first = to
+      }
+      Segment.Close => {
+        if open {
+          run chord(&mut subpaths, first)
+          let marks = List<bool>.asMutSlice(&mut closes)
+          marks[marks.length - 1] = true
+        }
+        current = first
+      }
+      _ => {
+        if !open {
+          run List<List<Point>>.append(&mut subpaths, List<Point>.make())
+          run List<bool>.append(&mut closes, false)
+          run chord(&mut subpaths, current)
+          first = current
+        }
+        match segment {
+          Segment.LineTo { to } => {
+            run chord(&mut subpaths, to)
+            current = to
+          }
+          Segment.QuadraticTo { control, to } => {
+            run curve(&mut subpaths, segment, current)
+            current = to
+          }
+          Segment.CubicTo { control1, control2, to } => {
+            run curve(&mut subpaths, segment, current)
+            current = to
+          }
+          Segment.ArcTo { arc } => {
+            let mut arcs = ArcIter.make(current, arc, 0.01)
+            let mut from = current
+            while let Option<Segment>.Some { value: piece } = arcs.next() {
+              match piece {
+                Segment.LineTo { to } => {
+                  run chord(&mut subpaths, to)
+                  from = to
+                }
+                Segment.QuadraticTo { control, to } => {
+                  run curve(&mut subpaths, piece, from)
+                  from = to
+                }
+                Segment.CubicTo { control1, control2, to } => {
+                  run curve(&mut subpaths, piece, from)
+                  from = to
+                }
+                _ => {}
+              }
+            }
+            current = arc.to
+          }
+          _ => {}
+        }
+      }
+    }
+    index = index + 1
+  }
+  return move subpaths
+}
+
+impl OnPath {
+  /// Measures `path` after `transform` (the referenced element's own transform, a
+  /// supplemental one in the text's user space); `reverse` is side="right". `pathLength`
+  /// calibrates a length offset (#PathLengthAttribute).
+  pub effect fn make(
+    path: &Path,
+    transform: Transform,
+    reverse: bool,
+    start: usize,
+    end: usize,
+    offset: Offset,
+    pathLength: Option<f64>,
+  ) -> OnPath
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let mut closes = List<bool>.make()
+    let subpaths = run polylines(path, &mut closes)
+
+    let count = List<List<Point>>.length(&subpaths)
+    let mut pieces = List<Piece>.make()
+    let mut length = 0.0
+    let mut last = Point.new(0.0, 0.0)
+    let mut s: usize = 0
+    while s < count {
+      let which = if reverse {
+        count - 1 - s
+      } else {
+        s
+      }
+      let points = List<Point>.asSlice(&List<List<Point>>.asSlice(&subpaths)[which])
+      let mut k: usize = 1
+      while k < points.length {
+        let from = transform
+          * (if reverse {
+            points[points.length - k]
+          } else {
+            points[k - 1]
+          })
+        let to = transform
+          * (if reverse {
+            points[points.length - 1 - k]
+          } else {
+            points[k]
+          })
+        let dx = to.x - from.x
+        let dy = to.y - from.y
+        let size = f64.sqrt(dx * dx + dy * dy)
+        if size > 0.0 {
+          run List<Piece>.append(
+            &mut pieces,
+            Piece { from: from, to: to, distance: length, length: size },
+          )
+          length = length + size
+        }
+        k = k + 1
+      }
+      if points.length > 0 {
+        last = transform
+          * (if reverse {
+            points[0]
+          } else {
+            points[points.length - 1]
+          })
+      }
+      s = s + 1
+    }
+    let closed = count == 1 && List<bool>.get(&closes, 0)
+    let used = match offset {
+      Offset.Length { value } => match pathLength {
+        // pathLength="0" scales by infinity: zero stays zero, other distances
+        // become infinite (paths.html#PathLengthAttribute).
+        Option<f64>.Some { value: authored } => if authored > 0.0 {
+          value * (length / authored)
+        } else if value == 0.0 {
+          0.0
+        } else if value > 0.0 {
+          f64.fromBits(9218868437227405312)
+        } else {
+          -f64.fromBits(9218868437227405312)
+        }
+        _ => value
+      }
+
+      // pathLength does not scale a percentage, which is of the measured length,
+      // even for pathLength="0" (paths.html#PathLengthAttribute).
+      Offset.Fraction { value } => value * length
+    }
+    return OnPath {
+      start: start,
+      end: end,
+      valid: List<Piece>.length(&pieces) > 0,
+      offset: used,
+      closed: closed,
+      length: length,
+      last: last,
+      pieces: move pieces,
+    }
+  }
+
+  /// The point and tangent `distance` along the path, which must be in [0, length].
+  pub fn at(self: &Self, distance: f64) -> Frame {
+    let pieces = List<Piece>.asSlice(&self.pieces)
+    let mut index: usize = 0
+    while index + 1 < pieces.length && distance >= pieces[index + 1].distance {
+      index = index + 1
+    }
+    let piece = pieces[index]
+    let fraction = (distance - piece.distance) / piece.length
+    return Frame {
+      point: Point.new(
+        piece.from.x + (piece.to.x - piece.from.x) * fraction,
+        piece.from.y + (piece.to.y - piece.from.y) * fraction,
+      ),
+      tangentX: (piece.to.x - piece.from.x) / piece.length,
+      tangentY: (piece.to.y - piece.from.y) / piece.length,
+    }
+  }
+}

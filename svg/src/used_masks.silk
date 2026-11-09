@@ -1,0 +1,217 @@
+//! Mask-region and content coordinates from non-CSS mask attributes.
+import silk.text.string { String }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.values { Value }
+import svg_css.effect_values { EffectValue, Image }
+import svg_css.properties { Property }
+import svg_css.dimensions { Dimension, ExprId }
+import svg_css.dimensions
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.value_cursor { Cursor }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_geometry.geometry { Rect, Transform, checkedRect, isEmptyRect, isValidRect }
+import used_paints
+import silk.core.option { Option }
+import silk.collections.slice { Slice }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+
+pub struct Layout {
+  pub region: Rect,
+  pub content: Transform,
+  pub user: Rect,
+}
+
+impl Copy for Layout {}
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  let bytes = match &(document.attribute(node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+  let mut start: usize = 0
+  let mut end = bytes.length
+  while start < end && whitespace(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && whitespace(bytes[end - 1]) {
+    end = end - 1
+  }
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+fn whitespace(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+/// A length attribute resolved against `basis`; `initial` when absent or invalid.
+pub effect fn coordinate(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  name: string,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  basis: f64,
+  initial: f64,
+  limits: &Limits,
+) -> f64
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = attribute(document, node, name)
+  if bytes.length == 0 {
+    return initial
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let expression = run dimensions.parse(
+    &mut engine.values.numerics,
+    &input,
+    &mut cursor,
+    Dimension.LengthPercentage,
+    true,
+  )
+  if !cursor.done(&input) {
+    return initial
+  }
+  return run used_paints.number(&mut engine.*, style, expression, basis, initial)
+}
+
+// https://www.w3.org/TR/css-masking-1/#MaskElement
+pub effect fn resolve(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  viewport: Rect,
+  bounds: Rect,
+  limits: &Limits,
+) -> Option<Layout>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let objectRegion = !equal(attribute(document, node, "maskUnits"), b"userSpaceOnUse")
+  let objectContent = equal(attribute(document, node, "maskContentUnits"), b"objectBoundingBox")
+  if !isValidRect(viewport) || !isValidRect(bounds) {
+    fail RenderError.InvalidGeometry
+  }
+  if (objectRegion || objectContent) && isEmptyRect(bounds) {
+    return Option<Layout>.None
+  }
+  let basis = if objectRegion {
+    Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  } else {
+    viewport
+  }
+  let x = run coordinate(
+    document,
+    node,
+    "x",
+    &mut engine.*,
+    style,
+    basis.width(),
+    -0.1 * basis.width(),
+    limits,
+  )
+  let y = run coordinate(
+    document,
+    node,
+    "y",
+    &mut engine.*,
+    style,
+    basis.height(),
+    -0.1 * basis.height(),
+    limits,
+  )
+  let width = run coordinate(
+    document,
+    node,
+    "width",
+    &mut engine.*,
+    style,
+    basis.width(),
+    1.2 * basis.width(),
+    limits,
+  )
+  let height = run coordinate(
+    document,
+    node,
+    "height",
+    &mut engine.*,
+    style,
+    basis.height(),
+    1.2 * basis.height(),
+    limits,
+  )
+  if width <= 0.0 || height <= 0.0 {
+    return Option<Layout>.None
+  }
+  let region = match &checkedRect(
+    if objectRegion {
+      bounds.xMin + x * bounds.width()
+    } else {
+      x
+    },
+    if objectRegion {
+      bounds.yMin + y * bounds.height()
+    } else {
+      y
+    },
+    if objectRegion {
+      width * bounds.width()
+    } else {
+      width
+    },
+    if objectRegion {
+      height * bounds.height()
+    } else {
+      height
+    },
+  ) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  if !f64.isFinite(region.width()) || !f64.isFinite(region.height()) {
+    fail RenderError.InvalidGeometry
+  }
+  return Option<Layout>.some(
+    Layout {
+      region: region,
+      content: if objectContent {
+        Transform.new(bounds.width(), 0.0, 0.0, bounds.height(), bounds.xMin, bounds.yMin)
+      } else {
+        Transform.identity()
+      },
+      // Content percentages keep the nearest SVG viewport even in bbox units
+      // (SVG 2 coords.html#ObjectBoundingBoxUnits).
+      user: viewport,
+    },
+  )
+}
+
+// https://www.w3.org/TR/css-masking-1/#the-mask-image
+pub fn present(engine: &Engine<'_>, style: StyleId) -> bool {
+  return match &engine.get(style, Property.MaskImage) {
+    Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
+      Value.Effect { value } => match &value {
+        EffectValue.Masks { layers, resetBorder } => if layers.length() == 1 {
+          match &layers.asSlice()[0].image {
+            Image.None => false
+            _ => true
+          }
+        } else {
+          layers.length() > 1
+        }
+        _ => false
+      }
+      _ => false
+    }
+    _ => false
+  }
+}

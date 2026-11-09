@@ -1,0 +1,20 @@
+//! Document resolution and backend-neutral retained SVG data.
+import scene
+import resolve
+import animation
+import css_animations
+import color_profiles
+import url
+import resources
+import resources_native
+import style_tree
+import stylesheets
+import used_transforms
+import used_style
+import used_geometry
+import document_styles
+import font_metrics
+import vector_path
+import font_types.lib as font_types
+import read_fonts.lib as read_fonts
+import harfrust.lib as harfrust

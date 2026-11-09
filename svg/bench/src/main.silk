@@ -1,0 +1,238 @@
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+//! Stage wall time excludes file I/O, PNG encoding, checksums and output destruction.
+//! Parse means parse + record, not the lower-level resolve-only API. Every retained
+//! result is rendered after timing so recording and geometry cannot become dead work.
+import svg_render.lib { RenderOptions, RenderError, DisplayList }
+import svg_render.lib as renderer
+import svg_render.environment { Environment }
+import svg_render.native_environment { NativeHost, NativeHostError }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, Limits as ResourceLimits, ResourceError }
+import svg_core.resources_native { FileSystem as NativeFileSystem }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.text.string { String, InvalidUtf8 }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.filesystem_machine { MachineFileSystem }
+import silk.system.monotonic_clock { MonotonicClock }
+import silk.system.monotonic_clock_native { OsMonotonicClock }
+import silk.system.system_clock { Instant, SystemClock }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter, StderrWriter }
+import silk.text.format { Format, ParseError }
+import silk.num.u8
+import silk.num.u32
+import silk.num.u64
+
+fn nanos(start: &Instant, end: &Instant) -> i64 {
+  return (SystemClock.seconds(end) - SystemClock.seconds(start)) * 1000000000
+    + SystemClock.nanoseconds(end)
+    - SystemClock.nanoseconds(start)
+}
+
+fn checksum(pixels: &[u8]) -> u64 {
+  let mut hash: u64 = 14695981039346656037
+  let mut index: usize = 0
+  while index < pixels.length {
+    hash = u64.wrappingMultiply(hash ^ u8.toU64(pixels[index]), 1099511628211)
+    index = index + 1
+  }
+  return hash
+}
+
+struct Measurement {
+  elapsed: i64,
+  checksum: u64,
+  width: u32,
+  height: u32
+}
+
+effect fn iteration(
+  mode: string,
+  data: &[u8],
+  retained: &DisplayList,
+  options: &RenderOptions,
+  environment: &Environment<'_, '_>,
+) -> Measurement
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator | &mut MonotonicClock | &mut Resolver {
+  let start = run MonotonicClock.now()
+  if mode == "parse" {
+    let tree = run renderer.parse(data, options, environment)
+    let list = run renderer.record(move tree)
+    let end = run MonotonicClock.now()
+
+    // Deep consumption is outside the hot path, including for parse-only samples.
+    let image = run renderer.renderDisplayList(&list)
+    return Measurement {
+      elapsed: nanos(&start, &end),
+      checksum: checksum(image.data()),
+      width: image.width(),
+      height: image.height(),
+    }
+  }
+
+  // Both implementations allocate a fresh zeroed destination for every measured render.
+  let image = if mode == "render" {
+    run renderer.renderDisplayList(retained)
+  } else {
+    run renderer.render(data, options, environment)
+  }
+  let end = run MonotonicClock.now()
+  return Measurement {
+    elapsed: nanos(&start, &end),
+    checksum: checksum(image.data()),
+    width: image.width(),
+    height: image.height(),
+  }
+}
+
+effect fn process() -> i32
+  ! HostInputError
+    | FileError
+    | OutOfMemoryError
+    | WriterError
+    | RenderError
+    | NativeHostError
+    | UrlError
+    | ResourceError
+  ? &mut HostInput | &mut Allocator | &mut MonotonicClock {
+  let mut args = List<String>.make()
+  let count = run HostInput.argumentCount()
+  let mut index: usize = 1
+  while index < count {
+    if let Option<Bytes>.Some { value: raw } = run HostInput.argument(index) {
+      if let Result<String, InvalidUtf8>.Success { value: text } = move String.fromBytes(move raw) {
+        run args.append(move text)
+      } else {
+        return 2
+      }
+    } else {
+      return 2
+    }
+    index = index + 1
+  }
+  let values = args.asSlice()
+  let mut writer = StdoutWriter.make()
+  if values.length == 1 && String.view(&values[0]) == "--version" {
+    run Writer.writeString("svg_bench protocol 1; parse=parse+record; fresh pixmap per render\n")
+      |> Effect.provideMut<Writer>(&mut writer)
+    return 0
+  }
+  if values.length != 4 {
+    run Writer.writeString("usage: svg_bench parse|render|end-to-end FILE ITERATIONS WARMUP\n")
+      |> Effect.provideMut<Writer>(&mut writer)
+    return 2
+  }
+  let mode = String.view(&values[0])
+  if mode != "parse" && mode != "render" && mode != "end-to-end" {
+    return 2
+  }
+  let iterations = u32.parse(String.view(&values[2])) |> Result<u32, ParseError>.unwrapOr(0)
+  let warmup = u32.parse(String.view(&values[3])) |> Result<u32, ParseError>.unwrapOr(100001)
+  if iterations == 0 || iterations > 100000 || warmup > 10000 {
+    return 2
+  }
+  let cwd = run HostInput.workingDirectory()
+  let base = run hostPath(Bytes.asSlice(&cwd))
+  let file = String.view(&values[1])
+  let path = run resolveFile(&base, file)
+  let mut files = run MachineFileSystem.make()
+  let input = run FileSystem.readFile(&path) |> Effect.provideMut<FileSystem>(&mut files)
+  let data = Bytes.asSlice(&input)
+  let options = RenderOptions.make()
+  let address = run Url.fromFilePath(Path.rawBytes(&path))
+  let parent = run Path.parent(&path)
+  let directory = match &parent {
+    Option<Path>.Some { value } => Path.rawBytes(&value)
+    _ => {
+      return 2
+    }
+  }
+  let mut resolver = run NativeFileSystem.make(directory, ResourceLimits.defaults())
+  let host = run NativeHost.make(300.0, 150.0)
+  let environment = host.environment(&address)
+
+  // Setup is outside all samples; render reuses this exact immutable display list.
+  let tree = run renderer.parse(data, &options, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  let retained = run renderer.record(move tree)
+  let mut frame: u32 = 0
+  let mut elapsed: i64 = 0
+  let mut hash: u64 = 0
+  let mut consumed: u64 = 0
+  let mut width: u32 = 0
+  let mut height: u32 = 0
+  while frame < warmup + iterations {
+    let measured = run iteration(mode, data, &retained, &options, &environment)
+      |> Effect.provideMut<Resolver>(&mut resolver)
+    consumed = u64.wrappingAdd(consumed, measured.checksum)
+    if frame >= warmup {
+      elapsed = elapsed + measured.elapsed
+      hash = measured.checksum
+      width = measured.width
+      height = measured.height
+    }
+    frame = frame + 1
+  }
+  run Writer.writeString("{") |> Effect.provideMut<Writer>(&mut writer)
+  run Format.format(
+    "\"protocol\":1,\"iterations\":{iterations},\"warmup\":{warmup},\"elapsed_ns\":{elapsed},\"checksum\":\"{hash}\",\"consumed\":\"{consumed}\",\"width\":{width},\"height\":{height}",
+    &.{
+      iterations: iterations,
+      warmup: warmup,
+      elapsed: elapsed,
+      hash: hash,
+      consumed: consumed,
+      width: width,
+      height: height,
+    },
+  )
+    |> Effect.provideMut<Writer>(&mut writer)
+  run Writer.writeString("}\n") |> Effect.provideMut<Writer>(&mut writer)
+  run Writer.flush() |> Effect.provideMut<Writer>(&mut writer)
+  return 0
+}
+
+effect fn failed<E>(error: E) -> i32 {
+  drop error
+  StderrWriter.print("svg_bench: input, rendering, allocation or output failed\n", &())
+  return 1
+}
+
+pub effect fn main() -> i32
+  ? &mut HostInput {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut clock = OsMonotonicClock.make()
+  return run Effect.catchAll(process(), failed)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+    |> Effect.provideMut<MonotonicClock>(&mut clock)
+}
+
+effect fn hostPath(raw: &[u8]) -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.fromNativeBytes(raw)
+  } else {
+    return run Path.fromBytes(raw)
+  }
+}
+
+effect fn resolveFile(base: &Path, file: string) -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.resolve(base, file)
+  } else {
+    return run Path.resolve(base, file)
+  }
+}

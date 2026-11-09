@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><defs><pattern id="base" patternUnits="userSpaceOnUse" width="4" height="4" viewBox="0 0 2 2"><rect width="1" height="2" fill="red"/><rect x="1" width="1" height="2" fill="blue"/></pattern><pattern id="shifted" href="#base" patternTransform="translate(1 0)"/></defs><rect width="16" height="8" fill="url(#shifted) lime"/></svg>

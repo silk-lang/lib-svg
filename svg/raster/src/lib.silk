@@ -1,0 +1,5 @@
+//! Checked CPU execution of backend-neutral SVG display lists.
+import canvas
+import cpu
+import lower
+import tests

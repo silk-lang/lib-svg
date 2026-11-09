@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="60" height="60"><style>@keyframes m { from { x: 20px } to { x: 40px } } rect { animation: m 2s linear 1s }</style><rect x="5" width="10" height="10" fill="green"/></svg>

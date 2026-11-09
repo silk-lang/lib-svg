@@ -1,0 +1,19 @@
+//! SVG text layout: per-character font selection, shaping and positioning, and glyph outlines.
+pub import layout {
+  Anchor,
+  Baseline,
+  Shift,
+  Span,
+  aspect,
+  Setting,
+  Axis,
+  Character,
+  Instance,
+  PlacedGlyph,
+  Layout,
+  TextLength,
+  layout
+}
+pub import font_outline.outline { Outlines, Recorder, Op }
+pub import paths { spanGeometry, decorationGeometry, Decoration, ColorGlyph }
+pub import on_path { OnPath, Offset, Frame }

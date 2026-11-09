@@ -1,0 +1,2 @@
+<!-- SVG2 struct#UnknownElement and embedded#ForeignObjectElement. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><custom fill="red"><rect width="8" height="8"/></custom><private xmlns="urn:private"><rect xmlns="http://www.w3.org/2000/svg" x="24" width="8" height="8"/></private><foreignObject x="8" y="4" width="16" height="8" fill="blue"><div xmlns="http://www.w3.org/1999/xhtml"><svg xmlns="http://www.w3.org/2000/svg" width="50%" height="100%"><rect width="100%" height="100%"/></svg></div></foreignObject></svg>

@@ -1,0 +1,16 @@
+[package]
+name = "svg-reference-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+resvg = { git = "https://github.com/linebender/resvg", rev = "91455ee06d08ac2bfeab2b035ed2cfbfd0a68614", version = "=0.49.0", default-features = false, features = ["svgz", "raster-images"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

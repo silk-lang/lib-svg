@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute -->
+<defs><path id="p" d="M0 0H16" pathLength="8" vector-effect="non-scaling-stroke"/><path id="normal" d="M0 0H16" pathLength="8"/></defs>
+<g fill="none" stroke="black" stroke-width="2" stroke-dasharray="1 1">
+<use href="#p" transform="translate(0 2)"/>
+<use href="#p" transform="translate(0 6) scale(2 1)"/>
+<use href="#normal" transform="translate(0 10) scale(2 1)"/>
+<path d="M0 14H16" transform="scale(2 1)" pathLength="8" vector-effect="non-scaling-stroke" stroke-dasharray="12.5% 12.5%"/>
+<path d="M0 18H16 M0 22H16" pathLength="8"/>
+</g>
+</svg>

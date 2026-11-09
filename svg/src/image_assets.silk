@@ -1,0 +1,940 @@
+//! Owned decoded image resources, shared by all occurrences of a source node.
+import silk.text.string { String }
+import structure { Graph, SourceId, OccurrenceId }
+import structure
+import resources { Resolver, ResourceKind, ResourceError, Policy, Response, fetchWithPolicy }
+import url { Url, UrlError }
+import scene { RenderError }
+import used_images { NaturalSize }
+import svg_geometry.svg { AspectRatio }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.tokens { equal }
+import svg_image.image { Image, ImageError }
+import svg_image.png { PngError, Metadata as PngMetadata, Chromaticities }
+import svg_image.png
+import svg_image.jpeg { JpegError, Metadata as JpegMetadata }
+import svg_image.jpeg
+import svg_image.icc { Transform }
+import svg_image.icc
+import document_styles { StyledGraph }
+import color_profiles { Profiles }
+import svg_css.computed { ComputedValue, StyleId }
+import svg_css.properties { Property }
+import svg_css.values { Value }
+import svg_css.value_keywords { Keyword }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.core.ownership { Copy }
+import silk.collections.bytes { Bytes }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.u32
+import silk.num.usize
+
+pub union ColorMetadata {
+  Png { pub value: PngMetadata },
+  Jpeg { pub value: JpegMetadata },
+}
+
+pub struct Asset {
+  pub image: Image,
+  pub color: ColorMetadata
+}
+
+/// Encoded document response is shared; each image occurrence supplies its own
+/// viewport and secure style context. Transport metadata and redirect base survive.
+pub struct DocumentMetadata {
+  pub natural: NaturalSize,
+  pub aspect: Option<AspectRatio>,
+}
+
+pub struct DocumentSource {
+  pub response: Response,
+  pub request: Url,
+  pub metadata: Option<DocumentMetadata>,
+}
+
+union Loaded {
+  Raster { asset: Asset },
+  Document { source: DocumentSource },
+}
+
+/// A CSS mask layer image (CSS Masking 1 #the-mask-image) by occurrence and layer.
+pub struct LayerRequest {
+  pub occurrence: usize,
+  pub layer: usize,
+  pub url: Url,
+  pub policy: Policy,
+}
+
+struct LayerKey {
+  occurrence: usize,
+  layer: usize
+}
+
+impl Copy for LayerKey {}
+
+impl HashKey for LayerKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.occurrence == b.occurrence && a.layer == b.layer
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    return Hash.combine(Hash.mix(seed, usize.toU64(value.occurrence)), usize.toU64(value.layer))
+  }
+}
+
+/// A loaded layer image: a decoded raster asset or an SVG document source.
+pub union LayerSource {
+  Raster { pub asset: usize },
+  Document { pub document: usize },
+}
+
+impl Copy for LayerSource {}
+
+/// Byte, pixel and request budgets shared by every load into one store.
+struct Budget {
+  pixels: usize,
+  remaining: usize,
+  retained: usize,
+  urls: usize,
+}
+
+impl Copy for Budget {}
+
+pub struct Store {
+  pub retainedBytes: usize,
+  pub assets: List<Asset>,
+  pub documents: List<DocumentSource>,
+  documentIndices: List<List<usize>>,
+  indices: List<List<usize>>,
+  layers: HashMap<LayerKey, LayerSource>,
+  cache: List<Cached>,
+  budget: Option<Budget>,
+  // Per-occurrence assets converted for a non-auto `color-profile`.
+  variants: HashMap<usize, usize>,
+  // Fetch results kept from earlier loads; see [`ImageCache`].
+  kept: ImageCache,
+}
+
+impl Store {
+  pub fn empty() -> Store {
+    return Store {
+      retainedBytes: 0,
+      assets: List<Asset>.make(),
+      documents: List<DocumentSource>.make(),
+      documentIndices: List<List<usize>>.make(),
+      indices: List<List<usize>>.make(),
+      layers: HashMap<LayerKey, LayerSource>.make(Hash.seed(0)),
+      cache: List<Cached>.make(),
+      budget: Option<Budget>.None,
+      variants: HashMap<usize, usize>.make(Hash.seed(0)),
+      kept: ImageCache.disabled(),
+    }
+  }
+
+  /// Takes back the cache given to [`loadWith`], with what this store's loads added to it.
+  pub fn takeCache(self: &mut Self) -> ImageCache {
+    return Intrinsic.replace(self.kept, ImageCache.disabled())
+  }
+
+  pub fn findLayer(self: &Self, occurrence: usize, layer: usize) -> Option<LayerSource> {
+    return self.layers.get(LayerKey { occurrence: occurrence, layer: layer })
+  }
+
+  pub fn find(self: &Self, source: SourceId) -> Option<usize> {
+    if source.document.index >= self.indices.length() {
+      return Option<usize>.None
+    }
+    let nodes = self.indices.asSlice()[source.document.index].asSlice()
+    if source.node.index >= nodes.length || nodes[source.node.index] == usize.MAX {
+      return Option<usize>.None
+    }
+    return Option<usize>.some(nodes[source.node.index])
+  }
+
+  /// The asset an image occurrence paints: its `color-profile` variant, if any,
+  /// else the element's shared asset.
+  pub fn findOccurrence(self: &Self, occurrence: OccurrenceId, source: SourceId) -> Option<usize> {
+    if let Option<usize>.Some { value } = &self.variants.get(occurrence.index) {
+      return Option<usize>.some(value)
+    }
+    return self.find(source)
+  }
+
+  pub fn findDocument(self: &Self, source: SourceId) -> Option<usize> {
+    if source.document.index >= self.documentIndices.length() {
+      return Option<usize>.None
+    }
+    let nodes = self.documentIndices.asSlice()[source.document.index].asSlice()
+    if source.node.index >= nodes.length || nodes[source.node.index] == usize.MAX {
+      return Option<usize>.None
+    }
+    return Option<usize>.some(nodes[source.node.index])
+  }
+}
+
+struct Cached {
+  url: Url,
+  asset: usize,
+  document: usize,
+}
+
+fn convert(transform: &Option<Transform>, image: &mut Image) -> () {
+  match &transform.* {
+    Option<Transform>.Some { value } => {
+      if !icc.isIdentity(&value) {
+        icc.apply(&value, &mut image.*)
+      }
+    }
+    Option<Transform>.None => {}
+  }
+}
+
+fn present<T>(value: &Option<T>) -> bool {
+  return match &value.* {
+    Option<T>.Some { value: _ } => true
+    Option<T>.None => false
+  }
+}
+
+/// The conversion the image's own colour description asks for. PNG-3 §12.2: iCCP,
+/// then sRGB, then gAMA/cHRM; JPEG uses its APP2 profile. None means sRGB.
+effect fn embedded(color: &ColorMetadata) -> Option<Transform>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &color.* {
+    ColorMetadata.Png { value } => {
+      let profile = Bytes.asSlice(&value.iccProfile)
+      if profile.length > 0 {
+        run icc.fromProfile(profile)
+      } else if present<u8>(&value.srgbIntent) {
+        Option<Transform>.None
+      } else if present<u32>(&value.gamma) || present<Chromaticities>(&value.chromaticities) {
+        run icc.fromPng(&value.gamma, &value.chromaticities)
+      } else {
+        Option<Transform>.None
+      }
+    }
+    ColorMetadata.Jpeg { value } => {
+      let profile = Bytes.asSlice(&value.iccProfile)
+      if profile.length > 0 {
+        run icc.fromProfile(profile)
+      } else {
+        Option<Transform>.None
+      }
+    }
+  }
+}
+
+effect fn decode(data: &[u8]) -> Asset
+  ! PngError | JpegError | ImageError | OutOfMemoryError
+  ? &mut Allocator {
+  if data.length >= 8 && data[0] == 137 && data[1] == 80 && data[2] == 78 && data[3] == 71 {
+    let decoded = run png.decodeWithMetadata(data)
+    return Asset {
+      image: move decoded.image,
+      color: ColorMetadata.Png { value: move decoded.metadata },
+    }
+  }
+  if data.length >= 2 && data[0] == 255 && data[1] == 216 {
+    let decoded = run jpeg.decodeWithMetadata(data)
+    return Asset {
+      image: move decoded.image,
+      color: ColorMetadata.Jpeg { value: move decoded.metadata },
+    }
+  }
+  fail PngError.Unsupported
+}
+
+effect fn fetched(url: &Url, policy: &Policy, remaining: &mut usize) -> Loaded
+  ! RenderError | ResourceError | PngError | JpegError | ImageError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let response = run fetchWithPolicy(url, ResourceKind.Image, policy)
+  let count = Bytes.length(&response.bytes)
+  if count > remaining.* {
+    fail RenderError.TooLarge
+  }
+  remaining.* = remaining.* - count
+  let bytes = Bytes.asSlice(&response.bytes)
+  if (bytes.length >= 4 && bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71)
+    || (bytes.length >= 2 && bytes[0] == 255 && bytes[1] == 216) {
+    return Loaded.Raster { asset: run decode(bytes) }
+  }
+
+  // Document validation and intrinsic styles need the renderer's host context.
+  // Unsupported/malformed responses remain non-rendering until that validation.
+  return Loaded.Document {
+    source: DocumentSource {
+      response: move response,
+      request: run url.clone(),
+      metadata: Option<DocumentMetadata>.None,
+    },
+  }
+}
+
+/// Fetched images kept from one load to the next, so that an animated document does not
+/// fetch and decode its images again for every frame.
+///
+/// An entry is what one fetch of a URL under one policy produced: the decoded raster asset
+/// before colour conversion, the response of an SVG document image, or nothing when the fetch
+/// or the decode failed. A load that finds an entry copies it into its store and charges the
+/// same byte budgets a fetch would, so its output equals a load with no cache, as long as the
+/// host's resolver answers a URL the same way every time. Call [`ImageCache.sweep`] after each
+/// frame: an entry no load used in the last two frames is dropped.
+pub struct ImageCache {
+  enabled: bool,
+  entries: List<Kept>,
+}
+
+struct Kept {
+  url: Url,
+  policy: Policy,
+  // Response bytes the fetch charged against the source byte budget; zero when it failed
+  // before a response.
+  bytes: usize,
+  loaded: Option<Loaded>,
+  used: bool,
+  // Sweeps since a load last used the entry.
+  idle: u32,
+}
+
+impl ImageCache {
+  /// An empty cache that keeps what loads fetch.
+  pub fn make() -> ImageCache {
+    return ImageCache { enabled: true, entries: List<Kept>.make() }
+  }
+
+  /// A cache that keeps nothing: every load fetches again.
+  pub fn disabled() -> ImageCache {
+    return ImageCache { enabled: false, entries: List<Kept>.make() }
+  }
+
+  /// The number of URLs kept.
+  pub fn length(self: &Self) -> usize {
+    return self.entries.length()
+  }
+
+  /// Ends a frame: drops the entries no load used in this frame or the one before.
+  pub fn sweep(self: &mut Self) -> () {
+    let mut i: usize = 0
+    while i < self.entries.length() {
+      let entries = self.entries.asMutSlice()
+      if entries[i].used {
+        entries[i].used = false
+        entries[i].idle = 0
+      } else {
+        entries[i].idle = entries[i].idle + 1
+      }
+      let idle = entries[i].idle
+      drop entries
+      if idle >= 2 {
+        drop self.entries.remove(i)
+      } else {
+        i = i + 1
+      }
+    }
+  }
+}
+
+fn samePolicy(a: Policy, b: Policy) -> bool {
+  return a.mode == b.mode && a.limits.maxResourceBytes == b.limits.maxResourceBytes
+}
+
+effect fn optionalBytes(value: &Option<Bytes>) -> Option<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &value.* {
+    Option<Bytes>.Some { value: bytes } => Option<Bytes>.some(run Bytes.copy(Bytes.asSlice(&bytes)))
+    _ => Option<Bytes>.None
+  }
+}
+
+effect fn colorCopy(color: &ColorMetadata) -> ColorMetadata
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &color.* {
+    ColorMetadata.Png { value } => ColorMetadata.Png {
+      value: PngMetadata {
+        gamma: value.gamma,
+        chromaticities: value.chromaticities,
+        srgbIntent: value.srgbIntent,
+        iccProfile: run Bytes.copy(Bytes.asSlice(&value.iccProfile)),
+      },
+    }
+    ColorMetadata.Jpeg { value } => ColorMetadata.Jpeg {
+      value: JpegMetadata {
+        orientation: value.orientation,
+        iccProfile: run Bytes.copy(Bytes.asSlice(&value.iccProfile)),
+      },
+    }
+  }
+}
+
+effect fn loadedCopy(loaded: &Loaded) -> Loaded
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &loaded.* {
+    Loaded.Raster { asset } => Loaded.Raster {
+      asset: Asset { image: run asset.image.copy(), color: run colorCopy(&asset.color) },
+    }
+    Loaded.Document { source } => {
+      let finalUrl = match &source.response.finalUrl {
+        Option<Url>.Some { value } => Option<Url>.some(run value.clone())
+        _ => Option<Url>.None
+      }
+      Loaded.Document {
+        source: DocumentSource {
+          response: Response {
+            bytes: run Bytes.copy(Bytes.asSlice(&source.response.bytes)),
+            finalUrl: move finalUrl,
+            mediaType: run optionalBytes(&source.response.mediaType),
+            charset: run optionalBytes(&source.response.charset),
+          },
+          request: run source.request.clone(),
+          // A fetch never sets it; document_images.prepare fills the store's copy.
+          metadata: Option<DocumentMetadata>.None,
+        },
+      }
+    }
+  }
+}
+
+/// A fetch and decode of `url`, or None when the image is unavailable or undecodable.
+effect fn available(url: &Url, policy: &Policy, remaining: &mut usize) -> Option<Loaded>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let decoded = run Effect.result(fetched(url, policy, &mut remaining.*))
+  return match move decoded {
+    Result<
+      Loaded,
+      RenderError | ResourceError | PngError | JpegError | ImageError | OutOfMemoryError
+    >.Success {
+      value
+    } => Option<Loaded>.some(move value)
+    Result<
+      Loaded,
+      RenderError | ResourceError | PngError | JpegError | ImageError | OutOfMemoryError
+    >.Failure {
+      error
+    } => {
+      match &error {
+        RenderError value => {
+          fail value
+        }
+        OutOfMemoryError value => {
+          fail OutOfMemoryError {}
+        }
+        _ => {}
+      }
+      Option<Loaded>.None
+    }
+  }
+}
+
+/// [`available`], answered from the store's cache when it holds `url` under `policy`.
+effect fn availableKept(
+  store: &mut Store,
+  url: &Url,
+  policy: &Policy,
+  remaining: &mut usize,
+) -> Option<Loaded>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  if !store.kept.enabled {
+    return run available(url, policy, &mut remaining.*)
+  }
+  let mut i: usize = 0
+  while i < store.kept.entries.length() {
+    let entry = &mut store.kept.entries.asMutSlice()[i]
+    if equal(entry.url.bytes(), url.bytes()) && samePolicy(entry.policy, policy.*) {
+      if entry.bytes > remaining.* {
+        fail RenderError.TooLarge
+      }
+      remaining.* = remaining.* - entry.bytes
+      entry.used = true
+      return match &entry.loaded {
+        Option<Loaded>.Some { value } => Option<Loaded>.some(run loadedCopy(&value))
+        _ => Option<Loaded>.None
+      }
+    }
+    i = i + 1
+  }
+  let before = remaining.*
+  let found = run available(url, policy, &mut remaining.*)
+  let kept = match &found {
+    Option<Loaded>.Some { value } => Option<Loaded>.some(run loadedCopy(&value))
+    _ => Option<Loaded>.None
+  }
+  run store.kept.entries.append(
+    Kept {
+      url: run url.clone(),
+      policy: policy.*,
+      bytes: before - remaining.*,
+      loaded: move kept,
+      used: true,
+      idle: 0,
+    },
+  )
+  return move found
+}
+
+/// Resource errors and unsupported/malformed images paint nothing. Allocator
+/// failure is never swallowed. Source bytes and retained pixels have separate caps.
+pub effect fn load(graph: &Graph, maxPixels: usize) -> Store
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  return run loadWith(graph, maxPixels, ImageCache.disabled())
+}
+
+/// [`load`], reusing and adding to the images `cache` kept from earlier loads. Take the cache
+/// back with [`Store.takeCache`] after the last [`loadLayers`].
+pub effect fn loadWith(graph: &Graph, maxPixels: usize, cache: ImageCache) -> Store
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut store = Store.empty()
+  store.kept = move cache
+  store.budget = Option<Budget>.some(
+    Budget {
+      pixels: 0,
+      remaining: graph.limits.maxTotalBytes,
+      retained: graph.limits.maxTotalBytes,
+      urls: graph.limits.maxUrlBytes,
+    },
+  )
+  let mut documentIndex: usize = 0
+  while documentIndex < graph.documents.length() {
+    let source = &graph.documents.asSlice()[documentIndex]
+    let document = &source.document
+    let mut indices = List<usize>.make()
+    let mut documentIndices = List<usize>.make()
+    let mut n: usize = 0
+    while n < XmlDocument.nodes(document).length {
+      run indices.append(usize.MAX)
+      run documentIndices.append(usize.MAX)
+      let node = XmlNodeId { index: n }
+      n = n + 1
+      if !equal(
+        String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+        b"http://www.w3.org/2000/svg",
+      ) {
+        continue
+      }
+      let name = String.utf8Bytes(XmlDocument.localName(document, node))
+      let filterImage = equal(name, b"feImage")
+      if !equal(name, b"image") && !filterImage {
+        continue
+      }
+      let href = match &(XmlDocument.attribute(document, node, "", "href")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => Option<&[u8]>.some(value)
+        _ => (XmlDocument.attribute(document, node, "http://www.w3.org/1999/xlink", "href")
+          |> Option<string>.map<&[u8]>(String.utf8Bytes))
+      }
+      let text = match &href {
+        Option<&[u8]>.Some { value } => value
+        _ => {
+          continue
+        }
+      }
+
+      // An feImage href with a fragment names an element, rendered like use.
+      if text.length == 0 || (filterImage && structure.elementReference(text)) {
+        continue
+      }
+      let parsed = run Effect.result(
+        Url.resolve(&graph.urls.asSlice()[source.nodeBases.asSlice()[node.index]], text),
+      )
+      let url = match move parsed {
+        Result<Url, UrlError | OutOfMemoryError>.Success { value } => move value
+        Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
+          match &error {
+            OutOfMemoryError value => {
+              fail OutOfMemoryError {}
+            }
+            _ => {}
+          }
+          continue
+        }
+      }
+      let found = run obtain(&mut store, graph, move url, &source.policy, maxPixels)
+      indices.set(node.index, found.asset)
+      documentIndices.set(node.index, found.document)
+    }
+    run store.indices.append(move indices)
+    run store.documentIndices.append(move documentIndices)
+    documentIndex = documentIndex + 1
+  }
+  run settle(&mut store, graph)
+  return move store
+}
+
+/// Loads CSS mask layer images into a store built by [`load`], under the same
+/// budgets and URL cache.
+pub effect fn loadLayers(
+  store: &mut Store,
+  graph: &Graph,
+  requests: List<LayerRequest>,
+  maxPixels: usize,
+) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut pending = move requests
+  while pending.length() != 0 {
+    let request = pending.remove(0)
+    let found = run obtain(&mut store.*, graph, move request.url, &request.policy, maxPixels)
+    let key = LayerKey { occurrence: request.occurrence, layer: request.layer }
+    if found.asset != usize.MAX {
+      drop run store.layers.insert(key, LayerSource.Raster { asset: found.asset })
+    } else if found.document != usize.MAX {
+      drop run store.layers.insert(key, LayerSource.Document { document: found.document })
+    }
+  }
+  run settle(&mut store.*, graph)
+}
+
+effect fn settle(store: &mut Store, graph: &Graph) -> () {
+  if let Option<Budget>.Some { value } = &store.budget {
+    store.retainedBytes = graph.limits.maxTotalBytes - value.retained
+  }
+}
+
+struct Found {
+  asset: usize,
+  document: usize,
+}
+
+impl Copy for Found {}
+
+/// Fetches and retains one image URL, or reuses an earlier response for the same
+/// URL. Unavailable or undecodable images return usize.MAX indices.
+effect fn obtain(
+  store: &mut Store,
+  graph: &Graph,
+  url: Url,
+  policy: &Policy,
+  maxPixels: usize,
+) -> Found
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut budget = match &store.budget {
+    Option<Budget>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let found = run fetchInto(&mut store.*, graph, move url, policy, maxPixels, &mut budget)
+  store.budget = Option<Budget>.some(budget)
+  return found
+}
+
+effect fn fetchInto(
+  store: &mut Store,
+  graph: &Graph,
+  url: Url,
+  policy: &Policy,
+  maxPixels: usize,
+  budget: &mut Budget,
+) -> Found
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  // Secure authorization precedes cache lookup, so an unrestricted earlier
+  // document cannot lend a forbidden image to a secure document.
+  if policy.mode.isSecure() && !equal(url.scheme(), b"data") {
+    return Found { asset: usize.MAX, document: usize.MAX }
+  }
+  let mut i: usize = 0
+  while i < store.cache.length() {
+    let cached = &store.cache.asSlice()[i]
+    if equal(cached.url.bytes(), url.bytes()) {
+      return Found { asset: cached.asset, document: cached.document }
+    }
+    i = i + 1
+  }
+  if store.cache.length() >= graph.limits.maxRequests {
+    fail RenderError.TooLarge
+  }
+  if url.bytes().length > budget.urls {
+    fail RenderError.TooLarge
+  }
+  budget.urls = budget.urls - url.bytes().length
+  let decoded = run availableKept(&mut store.*, &url, policy, &mut budget.remaining)
+  let mut index = usize.MAX
+  let mut documentIndex = usize.MAX
+  match move decoded {
+    Option<Loaded>.Some { value: loaded } => {
+      match move loaded {
+        Loaded.Raster { asset: value } => {
+          let count = u32.toUsize(value.image.width()) * u32.toUsize(value.image.height())
+          if count > maxPixels - budget.pixels {
+            fail RenderError.TooLarge
+          }
+          let profile = match &value.color {
+            ColorMetadata.Png { value: color } => Bytes.length(&color.iccProfile)
+            ColorMetadata.Jpeg { value: color } => Bytes.length(&color.iccProfile)
+          }
+          if count > budget.retained / 4 {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - count * 4
+          if profile > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - profile
+          budget.pixels = budget.pixels + count
+          index = store.assets.length()
+          run store.assets.append(move value)
+        }
+        Loaded.Document { source: value } => {
+          let byteCount = Bytes.length(&value.response.bytes)
+          if byteCount > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - byteCount
+          let requestBytes = value.request.bytes().length
+          if requestBytes > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - requestBytes
+          let redirectBytes = match &value.response.finalUrl {
+            Option<Url>.Some { value: redirect } => redirect.bytes().length
+            _ => 0
+          }
+          if redirectBytes > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - redirectBytes
+          let mimeBytes = match &value.response.mediaType {
+            Option<Bytes>.Some { value: mime } => Bytes.length(&mime)
+            _ => 0
+          }
+          if mimeBytes > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - mimeBytes
+          let charsetBytes = match &value.response.charset {
+            Option<Bytes>.Some { value: charset } => Bytes.length(&charset)
+            _ => 0
+          }
+          if charsetBytes > budget.retained {
+            fail RenderError.TooLarge
+          }
+          budget.retained = budget.retained - charsetBytes
+          documentIndex = store.documents.length()
+          run store.documents.append(move value)
+        }
+      }
+    }
+    Option<Loaded>.None => {}
+  }
+  run store.cache.append(Cached { url: move url, asset: index, document: documentIndex })
+  return Found { asset: index, document: documentIndex }
+}
+
+union Choice {
+  Embedded,
+  Srgb,
+  Profile { entry: usize },
+}
+
+impl Copy for Choice {}
+
+// The SVG 1.1 `color-profile` property on an image (1.1 §12.3.3): auto keeps the
+// embedded description, sRGB ignores it, and a name or IRI selects a
+// `color-profile` element. Unknown names and IRIs keep the embedded description.
+fn choice(
+  styles: &StyledGraph<'_>,
+  profiles: &Profiles,
+  occurrence: OccurrenceId,
+  document: usize,
+) -> Choice {
+  let engine = &styles.catalog.engine
+  let style = match &styles.nodeStyle(occurrence) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      return Choice.Embedded
+    }
+  }
+  let entry = match &engine.get(style, Property.ColorProfile) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      return Choice.Embedded
+    }
+  }
+  let found = match &engine.values.get(entry.value).* {
+    Value.Keyword { keyword } => {
+      if keyword == Keyword.SRGB {
+        return Choice.Srgb
+      }
+      return Choice.Embedded
+    }
+    Value.Profile { name } => profiles.named(document, engine.values.text(name))
+    Value.Resource { url } => {
+      let text = engine.values.text(url)
+      if text.length < 2 || text[0] != 35 {
+        return Choice.Embedded
+      }
+      profiles.element(document, Slice.view<u8>(text, 1, text.length - 1))
+    }
+    _ => Option<usize>.None
+  }
+  return match &found {
+    Option<usize>.Some { value } => Choice.Profile { entry: value }
+    _ => Choice.Embedded
+  }
+}
+
+effect fn metadataCopy(color: &ColorMetadata) -> ColorMetadata
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &color.* {
+    ColorMetadata.Png { value } => ColorMetadata.Png {
+      value: PngMetadata {
+        gamma: value.gamma,
+        chromaticities: value.chromaticities,
+        srgbIntent: value.srgbIntent,
+        iccProfile: Bytes.make(),
+      },
+    }
+    ColorMetadata.Jpeg { value } => ColorMetadata.Jpeg {
+      value: JpegMetadata { orientation: value.orientation, iccProfile: Bytes.make() },
+    }
+  }
+}
+
+struct Variant {
+  asset: usize,
+  choice: Choice,
+  index: usize,
+}
+
+impl Copy for Variant {}
+
+fn sameChoice(a: Choice, b: Choice) -> bool {
+  return match &a {
+    Choice.Embedded => match &b {
+      Choice.Embedded => true
+      _ => false
+    }
+    Choice.Srgb => match &b {
+      Choice.Srgb => true
+      _ => false
+    }
+    Choice.Profile { entry: left } => match &b {
+      Choice.Profile { entry: right } => left == right
+      _ => false
+    }
+  }
+}
+
+/// Converts every decoded image to sRGB. Image occurrences whose `color-profile`
+/// is not `auto` get their own converted copy, shared between occurrences that make
+/// the same choice for the same asset; the rest share the asset converted with its
+/// embedded description. Copies count against the retained-byte budget.
+pub effect fn applyProfiles(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &StyledGraph<'_>,
+  profiles: &Profiles,
+) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let sources = store.assets.length()
+  let mut made = List<Variant>.make()
+  let mut index: usize = 0
+  while index < graph.occurrences.length() {
+    let occurrence = OccurrenceId { index: index }
+    index = index + 1
+    let source = graph.occurrences.asSlice()[occurrence.index].source
+    let asset = match &store.find(source) {
+      Option<usize>.Some { value } => value
+      _ => {
+        continue
+      }
+    }
+    let document = &graph.documents.asSlice()[source.document.index].document
+    if !equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"image") {
+      continue
+    }
+    let selected = choice(styles, profiles, occurrence, source.document.index)
+    if sameChoice(selected, Choice.Embedded) {
+      continue
+    }
+    let mut existing = usize.MAX
+    let mut v: usize = 0
+    while v < made.length() {
+      let entry = made.get(v)
+      if entry.asset == asset && sameChoice(entry.choice, selected) {
+        existing = entry.index
+      }
+      v = v + 1
+    }
+    if existing == usize.MAX {
+      let original = &store.assets.asSlice()[asset]
+      let width = original.image.width()
+      let height = original.image.height()
+      let count = u32.toUsize(width) * u32.toUsize(height) * 4
+      if let Option<Budget>.Some { value } = &store.budget {
+        if count > value.retained {
+          fail RenderError.TooLarge
+        }
+        store.budget = Option<Budget>.some(
+          Budget {
+            pixels: value.pixels,
+            remaining: value.remaining,
+            retained: value.retained - count,
+            urls: value.urls,
+          },
+        )
+      }
+
+      // The source already passed the same dimension checks.
+      let allocated = run Effect.result(Image.make(width, height))
+      let mut image = match move allocated {
+        Result<Image, ImageError | OutOfMemoryError>.Success { value } => move value
+        Result<Image, ImageError | OutOfMemoryError>.Failure { error } => {
+          match &error {
+            OutOfMemoryError problem => {
+              fail OutOfMemoryError {}
+            }
+            _ => {
+              fail RenderError.TooLarge
+            }
+          }
+        }
+      }
+      let target = image.dataMut()
+      let samples = original.image.data()
+      let mut i: usize = 0
+      while i < samples.length {
+        target[i] = samples[i]
+        i = i + 1
+      }
+      drop target
+      match &selected {
+        Choice.Profile { entry } => {
+          let chosen = &profiles.entries.asSlice()[entry]
+          let transform = run icc.fromProfileWith(chosen.data.asSlice(), chosen.renderingIntent())
+          convert(&transform, &mut image)
+        }
+        _ => {}
+      }
+      let color = run metadataCopy(&original.color)
+      existing = store.assets.length()
+      run store.assets.append(Asset { image: move image, color: move color })
+      run made.append(Variant { asset: asset, choice: selected, index: existing })
+    }
+    drop run store.variants.insert(occurrence.index, existing)
+  }
+  let mut a: usize = 0
+  while a < sources {
+    let transform = run embedded(&store.assets.asSlice()[a].color)
+    convert(&transform, &mut store.assets.asMutSlice()[a].image)
+    a = a + 1
+  }
+  run settle(&mut store.*, graph)
+}

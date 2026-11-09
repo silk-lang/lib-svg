@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes; At internal tangency the exterior half-plane uses the terminal color for pad and the offset-weighted period average (one-quarter red, three-quarters blue) for repeat/reflect. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="12">
+<rect x="8" y="0" width="4" height="12" fill="blue"/><rect x="12" y="0" width="8" height="12" fill="#4000bf"/>
+</svg>

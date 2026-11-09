@@ -1,0 +1,17 @@
+[workspace]
+members = [
+  "svg",
+  "svg/filters",
+  "svg/raster",
+  "svg/text",
+  "svg/render",
+  "svg/gpu",
+  "svg/gpu/tests",
+  "svg/tests",
+  "svg/bench",
+  "svg/tools/wasm",
+  "svg-render-test-harness",
+  "xml-compatibility",
+  "xml-conformance"
+]
+silk-version = "0.1.0-dev.61+91f335268900"

@@ -1,0 +1,491 @@
+//! Parse-once NON-CSS SVG paint attributes. Missing and invalid attributes remain
+//! None: resolve href templates before applying initial values. Expression IDs
+//! belong to the caller's Engine.values.numerics arena; no used context is captured.
+//! href and computed gradientTransform/patternTransform are deliberately absent.
+import silk.text.string { String }
+import used_viewports { Reference }
+import used_viewports
+import scene { SpreadMethod }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import svg_css.dimensions { Store as NumericStore, ExprId, Dimension }
+import svg_css.dimensions
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.value_cursor { Cursor }
+import svg_geometry.geometry { Rect }
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.svg
+import silk.collections.slice { Slice }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+pub enum CoordinateUnits {
+  UserSpaceOnUse,
+  ObjectBoundingBox,
+}
+
+pub enum MarkerUnits {
+  StrokeWidth,
+  UserSpaceOnUse,
+}
+
+pub union MarkerOrient {
+  Auto,
+  AutoStartReverse,
+  // An angle expression, or a number interpreted as degrees per OrientAttribute.
+  Angle { pub expression: ExprId },
+}
+
+impl Copy for MarkerOrient {}
+
+// pservers.html#LinearGradientAttributes: after templates, units=objectBoundingBox,
+// spread=pad, x1=y1=y2=0%, x2=100%. Transform remains computed CSS.
+pub struct LinearGradientMetadata {
+  pub units: Option<CoordinateUnits>,
+  pub spread: Option<SpreadMethod>,
+  pub x1: Option<ExprId>,
+  pub y1: Option<ExprId>,
+  pub x2: Option<ExprId>,
+  pub y2: Option<ExprId>,
+}
+
+impl Copy for LinearGradientMetadata {}
+
+// pservers.html#RadialGradientAttributes: after templates, cx=cy=r=50%, fr=0%;
+// only THEN do absent fx/fy take this gradient's resolved cx/cy. Negative literal
+// radii are unspecified for template lookup; CSS Values #calc-range clamps a
+// selected math expression's result to zero after computing its used context.
+pub struct RadialGradientMetadata {
+  pub units: Option<CoordinateUnits>,
+  pub spread: Option<SpreadMethod>,
+  pub cx: Option<ExprId>,
+  pub cy: Option<ExprId>,
+  pub r: Option<ExprId>,
+  pub fx: Option<ExprId>,
+  pub fy: Option<ExprId>,
+  pub fr: Option<ExprId>,
+}
+
+impl Copy for RadialGradientMetadata {}
+
+// pservers.html#PatternElementAttributes: after templates, units=objectBoundingBox,
+// contentUnits=userSpaceOnUse, x=y=width=height=0, no viewBox, PAR=xMidYMid meet.
+// A valid viewBox overrides contentUnits only at use; zero extents disable paint.
+pub struct PatternMetadata {
+  pub units: Option<CoordinateUnits>,
+  pub contentUnits: Option<CoordinateUnits>,
+  pub x: Option<ExprId>,
+  pub y: Option<ExprId>,
+  pub width: Option<ExprId>,
+  pub height: Option<ExprId>,
+  pub viewBox: Option<Rect>,
+  pub aspectRatio: Option<AspectRatio>,
+}
+
+impl Copy for PatternMetadata {}
+
+// 2016 CR pservers.html#MeshGradientAttributes: after templates,
+// units=objectBoundingBox, x=y=0%, type=bilinear. Transform remains computed CSS.
+pub struct MeshGradientMetadata {
+  pub units: Option<CoordinateUnits>,
+  pub x: Option<ExprId>,
+  pub y: Option<ExprId>,
+  pub bicubic: Option<bool>,
+}
+
+impl Copy for MeshGradientMetadata {}
+
+// 2016 CR pservers.html#HatchElementAttributes: after templates,
+// units=objectBoundingBox, contentUnits=userSpaceOnUse, x=y=pitch=rotate=0.
+// A negative pitch is invalid; a zero pitch disables the paint.
+pub struct HatchMetadata {
+  pub units: Option<CoordinateUnits>,
+  pub contentUnits: Option<CoordinateUnits>,
+  pub x: Option<ExprId>,
+  pub y: Option<ExprId>,
+  pub pitch: Option<ExprId>,
+  pub rotate: Option<ExprId>,
+}
+
+impl Copy for HatchMetadata {}
+
+// 2016 CR pservers.html#HatchpathElementAttributes: offset=0. d is parsed at use.
+pub struct HatchpathMetadata {
+  pub offset: Option<ExprId>,
+}
+
+impl Copy for HatchpathMetadata {}
+
+// painting.html#MarkerAttributes: units=strokeWidth, width=height=3, refs=0,
+// orient=0 degrees, no viewBox, PAR=xMidYMid meet. Zero extents disable markers.
+pub struct MarkerMetadata {
+  pub units: Option<MarkerUnits>,
+  pub width: Option<ExprId>,
+  pub height: Option<ExprId>,
+  pub refX: Option<Reference>,
+  pub refY: Option<Reference>,
+  pub orient: Option<MarkerOrient>,
+  pub viewBox: Option<Rect>,
+  pub aspectRatio: Option<AspectRatio>,
+}
+
+impl Copy for MarkerMetadata {}
+
+// pservers.html#StopElementOffsetAttribute and #StopNotes: default 0, evaluate
+// percentages against 1, clamp to [0,1], then enforce nondecreasing stop order.
+pub struct StopMetadata {
+  pub offset: Option<ExprId>,
+}
+
+impl Copy for StopMetadata {}
+
+pub union Metadata {
+  LinearGradient { pub value: LinearGradientMetadata },
+  RadialGradient { pub value: RadialGradientMetadata },
+  Pattern { pub value: PatternMetadata },
+  Marker { pub value: MarkerMetadata },
+  Stop { pub value: StopMetadata },
+  MeshGradient { pub value: MeshGradientMetadata },
+  Hatch { pub value: HatchMetadata },
+  Hatchpath { pub value: HatchpathMetadata },
+}
+
+impl Copy for Metadata {}
+
+fn whitespace(value: u8) -> bool {
+  return value == 32 || value == 9 || value == 10 || value == 13
+}
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  let bytes = match &(document.attribute(node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => {
+      return b""
+    }
+  }
+  let mut start: usize = 0
+  let mut end = bytes.length
+
+  // Bounds prove increment/subtraction safe; no untrusted offset arithmetic.
+  while start < end && whitespace(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && whitespace(bytes[end - 1]) {
+    end = end - 1
+  }
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+fn coordinateUnits(bytes: &[u8]) -> Option<CoordinateUnits> {
+  if equal(bytes, b"userSpaceOnUse") {
+    return Option<CoordinateUnits>.Some { value: CoordinateUnits.UserSpaceOnUse }
+  }
+  if equal(bytes, b"objectBoundingBox") {
+    return Option<CoordinateUnits>.Some { value: CoordinateUnits.ObjectBoundingBox }
+  }
+  return Option<CoordinateUnits>.None
+}
+
+fn spreadMethod(bytes: &[u8]) -> Option<SpreadMethod> {
+  if equal(bytes, b"pad") {
+    return Option<SpreadMethod>.Some { value: SpreadMethod.Pad }
+  }
+  if equal(bytes, b"reflect") {
+    return Option<SpreadMethod>.Some { value: SpreadMethod.Reflect }
+  }
+  if equal(bytes, b"repeat") {
+    return Option<SpreadMethod>.Some { value: SpreadMethod.Repeat }
+  }
+  return Option<SpreadMethod>.None
+}
+
+fn markerUnits(bytes: &[u8]) -> Option<MarkerUnits> {
+  if equal(bytes, b"strokeWidth") {
+    return Option<MarkerUnits>.Some { value: MarkerUnits.StrokeWidth }
+  }
+  if equal(bytes, b"userSpaceOnUse") {
+    return Option<MarkerUnits>.Some { value: MarkerUnits.UserSpaceOnUse }
+  }
+  return Option<MarkerUnits>.None
+}
+
+effect fn numeric(
+  bytes: &[u8],
+  dimension: Dimension,
+  nonnegative: bool,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Option<ExprId>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if bytes.length == 0 {
+    return Option<ExprId>.None
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let parsed = run dimensions.parse(&mut numerics.*, &input, &mut cursor, dimension, true)
+  if !cursor.done(&input) {
+    return Option<ExprId>.None
+  }
+  match &parsed {
+    Option<ExprId>.Some { value } => {
+      if nonnegative && dimensions.negativeLiteral(&numerics.*, value) {
+        return Option<ExprId>.None
+      }
+    }
+    _ => {}
+  }
+  return parsed
+}
+
+// <angle> | <number> in degrees, like a marker's orient angle.
+effect fn angle(bytes: &[u8], numerics: &mut NumericStore<'_>, limits: &Limits) -> Option<ExprId>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if bytes.length == 0 {
+    return Option<ExprId>.None
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let mut expression = run dimensions.parse(
+    &mut numerics.*,
+    &input,
+    &mut cursor,
+    Dimension.Angle,
+    false,
+  )
+  if expression.isNone() {
+    expression = run dimensions.parse(&mut numerics.*, &input, &mut cursor, Dimension.Number, false)
+  }
+  if !cursor.done(&input) {
+    return Option<ExprId>.None
+  }
+  return expression
+}
+
+effect fn length(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  name: string,
+  nonnegative: bool,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Option<ExprId>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  return run numeric(
+    attribute(document, node, name),
+    Dimension.LengthPercentage,
+    nonnegative,
+    &mut numerics.*,
+    limits,
+  )
+}
+
+effect fn reference(
+  bytes: &[u8],
+  horizontal: bool,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Option<Reference>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let parsed = run used_viewports.parseReference(bytes, horizontal, &mut numerics.*, limits)
+  return match &parsed {
+    Reference.Missing => Option<Reference>.None
+    _ => Option<Reference>.Some { value: parsed }
+  }
+}
+
+effect fn orientation(bytes: &[u8], numerics: &mut NumericStore<'_>, limits: &Limits) -> Option<
+  MarkerOrient
+>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if equal(bytes, b"auto") {
+    return Option<MarkerOrient>.Some { value: MarkerOrient.Auto }
+  }
+  if equal(bytes, b"auto-start-reverse") {
+    return Option<MarkerOrient>.Some { value: MarkerOrient.AutoStartReverse }
+  }
+  if bytes.length == 0 {
+    return Option<MarkerOrient>.None
+  }
+
+  // Tokenize once: orient's grammar is <angle> | <number>. The numeric parser
+  // restores its cursor on a dimension mismatch; bare numbers denote degrees.
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let mut expression = run dimensions.parse(
+    &mut numerics.*,
+    &input,
+    &mut cursor,
+    Dimension.Angle,
+    false,
+  )
+  match &expression {
+    Option<ExprId>.None => {
+      expression = run dimensions.parse(
+        &mut numerics.*,
+        &input,
+        &mut cursor,
+        Dimension.Number,
+        false,
+      )
+    }
+    _ => {}
+  }
+  if !cursor.done(&input) {
+    return Option<MarkerOrient>.None
+  }
+  return match &expression {
+    Option<ExprId>.Some { value } => Option<MarkerOrient>.Some {
+      value: MarkerOrient.Angle { expression: value }
+    }
+    _ => Option<MarkerOrient>.None
+  }
+}
+
+// Invalid syntax becomes an absent slot. Resource exhaustion remains an error,
+// as in the existing CSS/viewport parsers; it must not masquerade as a default.
+pub effect fn parse(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Option<Metadata>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let nodes = document.nodes()
+  if node.index >= nodes.length || nodes[node.index].kind != XmlNodeKind.Element
+    || !equal(String.utf8Bytes(document.namespaceUri(node)), b"http://www.w3.org/2000/svg") {
+    return Option<Metadata>.None
+  }
+  let name = String.utf8Bytes(document.localName(node))
+  if equal(name, b"linearGradient") {
+    return Option<Metadata>.Some {
+      value: Metadata.LinearGradient {
+        value: LinearGradientMetadata {
+          units: coordinateUnits(attribute(document, node, "gradientUnits")),
+          spread: spreadMethod(attribute(document, node, "spreadMethod")),
+          x1: run length(document, node, "x1", false, &mut numerics.*, limits),
+          y1: run length(document, node, "y1", false, &mut numerics.*, limits),
+          x2: run length(document, node, "x2", false, &mut numerics.*, limits),
+          y2: run length(document, node, "y2", false, &mut numerics.*, limits),
+        },
+      }
+    }
+  }
+  if equal(name, b"radialGradient") {
+    return Option<Metadata>.Some {
+      value: Metadata.RadialGradient {
+        value: RadialGradientMetadata {
+          units: coordinateUnits(attribute(document, node, "gradientUnits")),
+          spread: spreadMethod(attribute(document, node, "spreadMethod")),
+          cx: run length(document, node, "cx", false, &mut numerics.*, limits),
+          cy: run length(document, node, "cy", false, &mut numerics.*, limits),
+          r: run length(document, node, "r", true, &mut numerics.*, limits),
+          fx: run length(document, node, "fx", false, &mut numerics.*, limits),
+          fy: run length(document, node, "fy", false, &mut numerics.*, limits),
+          fr: run length(document, node, "fr", true, &mut numerics.*, limits),
+        },
+      }
+    }
+  }
+  if equal(name, b"meshgradient") {
+    let kind = attribute(document, node, "type")
+    return Option<Metadata>.Some {
+      value: Metadata.MeshGradient {
+        value: MeshGradientMetadata {
+          units: coordinateUnits(attribute(document, node, "gradientUnits")),
+          x: run length(document, node, "x", false, &mut numerics.*, limits),
+          y: run length(document, node, "y", false, &mut numerics.*, limits),
+          bicubic: if equal(kind, b"bicubic") {
+            Option<bool>.Some { value: true }
+          } else if equal(kind, b"bilinear") {
+            Option<bool>.Some { value: false }
+          } else {
+            Option<bool>.None
+          },
+        },
+      }
+    }
+  }
+  if equal(name, b"hatch") {
+    return Option<Metadata>.Some {
+      value: Metadata.Hatch {
+        value: HatchMetadata {
+          units: coordinateUnits(attribute(document, node, "hatchUnits")),
+          contentUnits: coordinateUnits(attribute(document, node, "hatchContentUnits")),
+          x: run length(document, node, "x", false, &mut numerics.*, limits),
+          y: run length(document, node, "y", false, &mut numerics.*, limits),
+          pitch: run length(document, node, "pitch", true, &mut numerics.*, limits),
+          rotate: run angle(attribute(document, node, "rotate"), &mut numerics.*, limits),
+        },
+      }
+    }
+  }
+  if equal(name, b"hatchpath") {
+    return Option<Metadata>.Some {
+      value: Metadata.Hatchpath {
+        value: HatchpathMetadata {
+          offset: run length(document, node, "offset", false, &mut numerics.*, limits),
+        },
+      }
+    }
+  }
+  if equal(name, b"pattern") {
+    return Option<Metadata>.Some {
+      value: Metadata.Pattern {
+        value: PatternMetadata {
+          units: coordinateUnits(attribute(document, node, "patternUnits")),
+          contentUnits: coordinateUnits(attribute(document, node, "patternContentUnits")),
+          x: run length(document, node, "x", false, &mut numerics.*, limits),
+          y: run length(document, node, "y", false, &mut numerics.*, limits),
+          width: run length(document, node, "width", true, &mut numerics.*, limits),
+          height: run length(document, node, "height", true, &mut numerics.*, limits),
+          viewBox: svg.viewBox(attribute(document, node, "viewBox")),
+          aspectRatio: svg.aspectRatio(attribute(document, node, "preserveAspectRatio")),
+        },
+      }
+    }
+  }
+  if equal(name, b"marker") {
+    return Option<Metadata>.Some {
+      value: Metadata.Marker {
+        value: MarkerMetadata {
+          units: markerUnits(attribute(document, node, "markerUnits")),
+          width: run length(document, node, "markerWidth", true, &mut numerics.*, limits),
+          height: run length(document, node, "markerHeight", true, &mut numerics.*, limits),
+          refX: run reference(attribute(document, node, "refX"), true, &mut numerics.*, limits),
+          refY: run reference(attribute(document, node, "refY"), false, &mut numerics.*, limits),
+          orient: run orientation(attribute(document, node, "orient"), &mut numerics.*, limits),
+          viewBox: svg.viewBox(attribute(document, node, "viewBox")),
+          aspectRatio: svg.aspectRatio(attribute(document, node, "preserveAspectRatio")),
+        },
+      }
+    }
+  }
+  if equal(name, b"stop") {
+    return Option<Metadata>.Some {
+      value: Metadata.Stop {
+        value: StopMetadata {
+          offset: run numeric(
+            attribute(document, node, "offset"),
+            Dimension.NumberPercentage,
+            false,
+            &mut numerics.*,
+            limits,
+          ),
+        },
+      }
+    }
+  }
+  return Option<Metadata>.None
+}

@@ -1,0 +1,52 @@
+//! What a display list is lowered onto: a surface that paints coverage, plus isolated layers
+//! and masks. `gpu_scene.Scene` has this shape; [`lower.PixmapCanvas`] is the CPU reference.
+import vector.strips { Coverage }
+import vector.pixmap { Rgba8 }
+import vector.paint { Gradient, ImagePattern }
+import vector.geometry_error { GeometryError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+/// No mask: a layer composites as it is.
+pub const NO_MASK: u32 = 0xffffffff
+
+/// Paints coverage into the current target, like `vector.paint.fill` with source-over.
+pub interface Surface {
+  /// Draws `coverage` with a straight-alpha `color` scaled by `opacity`, like `paint.fill`
+  /// with `Solid.make(color)`.
+  effect fn solid(self: &mut Self, coverage: &Coverage, color: Rgba8, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator
+
+  /// Draws `coverage` with `gradient`, like `paint.fill`.
+  effect fn gradient(self: &mut Self, coverage: &Coverage, gradient: &Gradient, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator
+
+  /// Draws `coverage` with the image `pattern`, like `paint.fill`.
+  effect fn image(
+    self: &mut Self,
+    coverage: &Coverage,
+    pattern: &ImagePattern<'_>,
+    opacity: u8,
+  ) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator
+}
+
+/// Isolated layers and masks, with the semantics of `gpu_scene.Scene`.
+pub interface Canvas {
+  /// Later draws go into a fresh transparent layer until [`popLayer`] or [`popMask`].
+  effect fn pushLayer(self: &mut Self) -> () ! OutOfMemoryError ? &mut Allocator
+
+  /// Composites the top layer onto its parent with a `vector.layer` blend `mode` and group
+  /// `opacity`, through `mask` unless it is [`NO_MASK`] (`vector.layer.compositeMasked`).
+  effect fn popLayer(self: &mut Self, mode: u8, opacity: u8, mask: u32) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator
+
+  /// Ends the top layer as a mask and returns its id: the layer's luminance (`luminance`) or
+  /// alpha, multiplied by mask `clip` unless that is [`NO_MASK`].
+  effect fn popMask(self: &mut Self, luminance: bool, clip: u32) -> u32
+    ! OutOfMemoryError
+    ? &mut Allocator
+}

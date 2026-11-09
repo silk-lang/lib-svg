@@ -1,0 +1,157 @@
+import path_length_limit { Budget }
+import path_length_limit as limits
+import scene { RenderError }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn invalidGeometry(error: RenderError) -> bool {
+  return error == RenderError.InvalidGeometry
+}
+
+effect fn uncertifiable(attempt: usize) -> bool
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut budget = Budget.make()
+  let one = run limits.constant(1.0)
+  let scale = run limits.monomial(1.0, 1)
+  if attempt == 0 {
+    let huge = run limits.monomial(9007199254740992.0, 1)
+
+    // The exact period is (2^53 + 1)S, not 2^53 S.
+    drop run limits.linear(&scale, &huge, 1.0, &mut budget)
+  } else if attempt == 1 {
+    let huge = run limits.constant(9007199254740992.0)
+    let a = run limits.linear(&one, &scale, 1.0, &mut budget)
+    let b = run limits.linear(&huge, &scale, 1.0, &mut budget)
+
+    // Convolution's S coefficient also needs the unrepresentable 2^53 + 1.
+    drop run limits.multiply(&a, &b, false, &mut budget)
+  } else if attempt == 2 {
+    let decimal = run limits.constant(1.1)
+    drop run limits.multiply(&decimal, &decimal, false, &mut budget)
+  } else if attempt == 3 {
+    let infinity = run limits.constant(1.0 / 0.0)
+    drop run limits.linear(&one, &infinity, 0.0, &mut budget)
+  } else if attempt == 4 {
+    let tiny = run limits.constant(f64.fromBits(1))
+    let half = run limits.constant(0.5)
+    drop run limits.multiply(&tiny, &half, false, &mut budget)
+  } else {
+    let infinity = run limits.constant(1.0 / 0.0)
+    let negativeZero = run limits.constant(-0.0)
+    drop run limits.multiply(&infinity, &negativeZero, false, &mut budget)
+  }
+  return false
+}
+
+test effect fn roundedCoefficientsAndIndeterminateProductsRefuse() -> ()
+  ! OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut attempt: usize = 0
+  while attempt < 6 {
+    let refused = run Effect.catch<RenderError>(uncertifiable(attempt), invalidGeometry)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      refused,
+      "uncertifiable coefficients and indeterminate products cannot choose dash phase",
+    )
+    attempt = attempt + 1
+  }
+}
+
+effect fn signedZeroArithmetic() -> ()
+  ! RenderError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let mut budget = Budget.make()
+  let zero = run limits.constant(0.0)
+  let minusOne = run limits.constant(-1.0)
+  let one = run limits.constant(1.0)
+  let negativeZero = run limits.multiply(&zero, &minusOne, false, &mut budget)
+  run Testing.expect(limits.negativeZero(&negativeZero), "zero times negative preserves the sign")
+  let scale = run limits.monomial(1.0, 1)
+  let mixed = run limits.linear(&scale, &one, 1.0, &mut budget)
+  let negativeInfinity = run limits.multiply(&mixed, &negativeZero, true, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&negativeInfinity)) == -1.0 / 0.0,
+    "mixed distance divided by negative zero is negative infinity",
+  )
+  run Testing.expect(
+    (run limits.compare(&negativeInfinity, &one, &mut budget)) < 0,
+    "max selects one percent, not negative infinity",
+  )
+  let quotientZero = run limits.multiply(&one, &negativeInfinity, true, &mut budget)
+  run Testing.expect(
+    limits.negativeZero(&quotientZero),
+    "finite divided by negative infinity preserves negative zero",
+  )
+  let positiveInfinity = run limits.multiply(&negativeInfinity, &negativeZero, true, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&positiveInfinity)) == 1.0 / 0.0,
+    "infinity divided by signed zero combines both signs",
+  )
+  let negative = run limits.multiply(&one, &minusOne, true, &mut budget)
+  let denominatorZero = run limits.multiply(&zero, &negative, false, &mut budget)
+  run Testing.expect(
+    limits.negativeZero(&denominatorZero),
+    "zero multiplication includes rational denominator sign",
+  )
+  run Testing.expect(
+    f64.isSignNegative(run limits.limit(&denominatorZero)),
+    "limit retains inner signed zero",
+  )
+  let cancelled = run limits.linear(&negative, &one, 1.0, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&cancelled)) == 0.0 && !limits.negativeZero(&cancelled),
+    "exact cancellation gives positive zero even with a negative denominator",
+  )
+  let negativeSum = run limits.linear(&negativeZero, &denominatorZero, 1.0, &mut budget)
+  run Testing.expect(
+    limits.negativeZero(&negativeSum),
+    "adding two negative zeros keeps negative zero",
+  )
+  let negativeVanishing = run limits.monomial(-1.0, -1)
+  run Testing.expect(
+    f64.isSignNegative(run limits.limit(&negativeVanishing)),
+    "negative vanishing limit remains negative zero",
+  )
+}
+
+test effect fn zeroAndInfinityKeepSignsAcrossRationalArithmetic() -> ()
+  ! RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run signedZeroArithmetic() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn exactMixedArithmetic() -> ()
+  ! RenderError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let mut budget = Budget.make()
+  let scale = run limits.monomial(1.0, 1)
+  let percentage = run limits.constant(1.1)
+  let mixed = run limits.linear(&scale, &percentage, 1.0, &mut budget)
+  let remainder = run limits.linear(&mixed, &scale, -1.0, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&remainder)) == 1.1,
+    "mixed percentage residual survives cancellation exactly",
+  )
+  let ratio = run limits.multiply(&mixed, &mixed, true, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&ratio)) == 1.0,
+    "identical rational numerator and denominator cancel",
+  )
+  let normal = run limits.constant(f64.fromBits(4503599627370496))
+  let half = run limits.constant(0.5)
+  let subnormal = run limits.multiply(&normal, &half, false, &mut budget)
+  run Testing.expect(
+    (run limits.limit(&subnormal)) == f64.fromBits(2251799813685248),
+    "exact subnormal products are not rejected",
+  )
+}
+
+test effect fn representableMixedAndSubnormalCoefficientsRemainAccepted() -> ()
+  ! RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run exactMixedArithmetic() |> Effect.provideMut<Allocator>(&mut allocator)
+}

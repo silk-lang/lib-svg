@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#ShapeRendering -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><rect x=".25" y=".25" width="7.5" height="7.5" shape-rendering="crispEdges"/><rect x="8.25" y=".25" width="7.5" height="7.5" shape-rendering="optimizeSpeed"/></svg>

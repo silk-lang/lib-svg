@@ -1,0 +1,3 @@
+# Used only by the Python reftest harness to decode/compare PNG sample values.
+# It is not an SVG renderer and does not add a runtime dependency to Silk.
+Pillow==13.0.0

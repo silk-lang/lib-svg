@@ -1,0 +1,582 @@
+//! SVG2 CR2018 pservers SHA256 25529cd8fee8d915fdd673f3a2a8053ba3ee060661c07e6a0f52ba16babf607f.
+//! coords SHA256 79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb.
+import used_patterns { Layout }
+import used_patterns
+import used_viewports { Clip }
+import mapping { Mapping }
+import paint_metadata { Metadata }
+import paint_metadata
+import document_styles { StyledDocument }
+import document_styles
+import stylesheets { Catalog }
+import resources { Resolver, DataOnly, Limits as ResourceLimits }
+import url { Url, UrlError }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlError }
+import svg_css.computed { HostContext, StyleId, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.tokens { Limits, CssError }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_css.media_features { Environment }
+import svg_geometry.geometry { Rect, Transform, Vector }
+import vector.geometry_error { GeometryError }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.f64
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+  return Rect { xMin: x, yMin: y, xMax: x + w, yMax: y + h }
+}
+
+fn same(a: Rect, b: Rect) -> bool {
+  return a.xMin == b.xMin && a.yMin == b.yMin && a.xMax == b.xMax && a.yMax == b.yMax
+}
+
+effect fn fixture(document: &XmlDocument) -> StyledDocument<'_>
+  ! CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = run Catalog.make()
+  let tokens = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(999.0, 777.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  return run document_styles.build(
+    document,
+    move catalog,
+    &host,
+    &Environment.headless(999.0, 777.0),
+    run Url.parseAbsolute(b"https://example.test/patterns.svg"),
+    &Limits.make(),
+  )
+}
+
+effect fn selected(data: &[u8], bounds: Rect) -> Option<Layout>
+  ! XmlError | CssError | UrlError | ComputedError | RenderError | GeometryError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let document = run XmlDocument.parse(data)
+  let mut styled = run fixture(&document)
+  let node = document.root()
+  let style = match &styled.nodeStyle(node) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let metadata = match &run paint_metadata.parse(
+    &document,
+    node,
+    &mut styled.catalog.engine.values.numerics,
+    &Limits.make(),
+  ) {
+    Option<Metadata>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  match &metadata {
+    Metadata.Pattern { value } => {
+      return run used_patterns.resolve(
+        &value,
+        &mut styled.catalog.engine,
+        style,
+        rect(30.0, 40.0, 200.0, 100.0),
+        bounds,
+      )
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn layoutIn(data: &[u8], bounds: Rect) -> Option<Layout>
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  return run selected(data, bounds)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn layout(data: &[u8]) -> Option<Layout>
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError {
+  return run layoutIn(data, rect(10.0, 20.0, 80.0, 40.0))
+}
+
+effect fn enabled(value: &Option<Layout>) -> Layout
+  ! RenderError {
+  return match &value.* {
+    Option<Layout>.Some { value: found } => found
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn matrix(actual: Transform, expected: Transform) -> ()
+  ! AssertionError<'static> {
+  let a = actual.coefficients()
+  let e = expected.coefficients()
+  let mut i: usize = 0
+  while i < 6 {
+    run Testing.expect(
+      f64.abs(a[i] - e[i]) <= 0.000000000001 * f64.max(1.0, f64.abs(e[i])),
+      "independently derived pattern matrix",
+    )
+    i = i + 1
+  }
+}
+
+effect fn affine(actual: &Mapping, expected: Transform) -> ()
+  ! AssertionError<'static> {
+  match &actual.* {
+    Mapping.Affine { value } => {
+      run matrix(value, expected)
+    }
+    _ => {
+      run Testing.expect(false, "expected affine pattern map")
+    }
+  }
+}
+
+// pservers.html#PatternElementPatternUnitsAttribute, #PatternElementPatternContentUnitsAttribute
+// #PatternNotes 1620-1645: tile x/y establish content origin; bbox origin is not added twice.
+test effect fn patternAllFourUnitsKeepTileOriginAndContentScaleSeparate() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let sources = [
+    b"<pattern xmlns='http://www.w3.org/2000/svg' x='.25' y='.5' width='.5' height='.25'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternContentUnits='objectBoundingBox' x='.25' y='.5' width='.5' height='.25'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' x='12' y='7' width='40' height='10'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' x='12' y='7' width='40' height='10'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    let a = run enabled(&run layout(sources[i]))
+    run affine(
+      &a.mapping,
+      if i < 2 {
+        Transform.new(80.0, 0.0, 0.0, 40.0, 30.0, 40.0)
+      } else {
+        Transform.translation(Vector.new(12.0, 7.0))
+      },
+    )
+    run matrix(
+      a.content,
+      if i == 0 {
+        Transform.scale(0.0125, 0.025)
+      } else if i == 3 {
+        Transform.scale(80.0, 40.0)
+      } else {
+        Transform.identity()
+      },
+    )
+    run Testing.expect(
+      same(
+        a.physical,
+        if i < 2 {
+          rect(0.0, 0.0, 0.5, 0.25)
+        } else {
+          rect(0.0, 0.0, 40.0, 10.0)
+        },
+      ),
+      "physical tile stays origin-zero in patternUnits",
+    )
+    run Testing.expect(
+      same(a.user, rect(30.0, 40.0, 200.0, 100.0)),
+      "content percentages keep the enclosing viewport in either unit (coords.html#ObjectBoundingBoxUnits)",
+    )
+    i = i + 1
+  }
+}
+
+// pservers.html#PatternElementXAttribute and #PatternElementPatternUnitsAttribute.
+// Font and absolute lengths are numbers in the chosen coordinate system, not divided by bbox extents.
+test effect fn patternLengthsUseAttributeSpecificPercentAndComputedFontBases() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' style='font-size:10px;width:999px;height:999px;x:999px;y:999px' x='calc(25% + 1em)' y='10%' width='1in' height='2em'/>",
+    ),
+  )
+  run affine(&a.mapping, Transform.translation(Vector.new(60.0, 10.0)))
+  run Testing.expect(
+    a.physical.width() == 96.0 && a.physical.height() == 20.0,
+    "raw pattern dimensions are not CSS geometry properties",
+  )
+  let b = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' style='font-size:10px' x='calc(25% + .01em)' y='50%' width='1px' height='25%'/>",
+    ),
+  )
+  run affine(&b.mapping, Transform.new(80.0, 0.0, 0.0, 40.0, 38.0, 40.0))
+  run Testing.expect(
+    b.physical.width() == 1.0 && b.physical.height() == 0.25,
+    "bbox percent resolves against one before implicit bbox map",
+  )
+  let c = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' style='font-size:10px' x='1in' y='2em' width='50%' height='25%'/>",
+    ),
+  )
+  run affine(&c.mapping, Transform.translation(Vector.new(96.0, 20.0)))
+  run Testing.expect(
+    c.physical.width() == 100.0 && c.physical.height() == 25.0,
+    "user-space tile percentages use enclosing SVG viewport, not host metrics",
+  )
+  let d = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' x='25%' y='50%' width='50%' height='25%'/>",
+    ),
+  )
+  run affine(&d.mapping, Transform.new(80.0, 0.0, 0.0, 40.0, 30.0, 40.0))
+  run Testing.expect(
+    d.physical.width() == 0.5 && d.physical.height() == 0.25,
+    "bbox tile percentages use normalized dimensions",
+  )
+}
+
+// pservers.html#PatternElementPatternTransformAttribute 1467-1472: B * CSS * T(x,y).
+test effect fn patternComputedCssTransformPrecedesPlacementAndFollowsBboxMap() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' x='.25' y='.5' width='.5' height='.25' patternTransform='translate(100 100)' style='transform-origin:0 0;transform:translate(.1px,.2px) rotate(90deg) scale(2,3)'/>",
+    ),
+  )
+
+  // CSS maps (u,v) to (.1-3v,.2+2u); bbox maps to (10+80u,20+40v).
+  run affine(&a.mapping, Transform.new(0.0, 80.0, -240.0, 0.0, -102.0, 48.0))
+  run matrix(a.content, Transform.scale(0.0125, 0.025))
+  let b = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' x='12' y='7' width='40' height='10' style='transform-origin:-30px -40px;transform:translate(3px,5px) scale(2,3)'/>",
+    ),
+  )
+  run affine(&b.mapping, Transform.new(2.0, 0.0, 0.0, 3.0, 27.0, 26.0))
+}
+
+// Full CSS matrix3d is composed before Mapping flattens z=0; never truncate to six coefficients.
+test effect fn patternProjectiveCssRetainsHomogeneousPlacement() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' x='.25' y='.5' width='.5' height='.25' style='transform-origin:0 0;transform:matrix3d(1,0,0,.5,0,1,0,0,0,0,1,0,0,0,0,1)'/>",
+    ),
+  )
+
+  // w=.5u+1.125, X=85u+31.25, Y=10u+40v+42.5.
+  match &a.mapping {
+    Mapping.Projective { value } => {
+      let w = value.ww
+      run Testing.expect(
+        f64.abs(value.wx / w - 0.5 / 1.125) < 0.000000000001 && value.wy == 0.0,
+        "projective denominator includes tile translation",
+      )
+      run Testing.expect(
+        f64.abs(value.xx / w - 85.0 / 1.125) < 0.000000000001
+          && f64.abs(value.xw / w - 31.25 / 1.125) < 0.000000000001,
+        "bbox translation multiplies homogeneous w",
+      )
+      run Testing.expect(
+        f64.abs(value.yx / w - 10.0 / 1.125) < 0.000000000001
+          && f64.abs(value.yy / w - 40.0 / 1.125) < 0.000000000001
+          && f64.abs(value.yw / w - 42.5 / 1.125) < 0.000000000001,
+        "projective y numerator retains bbox offset",
+      )
+    }
+    _ => {
+      run Testing.expect(false, "projective CSS cannot become affine")
+    }
+  }
+}
+
+// coords.html#ComputingAViewportsTransform; pservers.html#PatternNotes.
+// coords.html#ElementsThatEstablishViewports 830-847: viewBox is NOT a new percentage viewport.
+test effect fn patternViewBoxFitsTileAndOverridesContentUnitsWithoutChangingPercentViewport() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let sources = [
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' x='12' y='7' width='60' height='50' viewBox='10 20 20 10'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' x='12' y='7' width='60' height='50' viewBox='10 20 20 10' preserveAspectRatio='none'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' x='12' y='7' width='60' height='50' viewBox='10 20 20 10' preserveAspectRatio='xMaxYMin slice'/>",
+  ]
+  let expected = [
+    Transform.new(3.0, 0.0, 0.0, 3.0, -30.0, -50.0),
+    Transform.new(3.0, 0.0, 0.0, 5.0, -30.0, -100.0),
+    Transform.new(5.0, 0.0, 0.0, 5.0, -90.0, -100.0),
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    let a = run enabled(&run layout(sources[i]))
+    run matrix(a.content, expected[i])
+    run affine(&a.mapping, Transform.translation(Vector.new(12.0, 7.0)))
+    run Testing.expect(
+      same(a.user, rect(30.0, 40.0, 200.0, 100.0)),
+      "viewBox never replaces enclosing SVG percentage basis",
+    )
+    i = i + 1
+  }
+  let b = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' width='.5' height='.25' viewBox='10 20 20 10' preserveAspectRatio='none'/>",
+    ),
+  )
+  run matrix(b.content, Transform.new(0.025, 0.0, 0.0, 0.025, -0.25, -0.5))
+}
+
+// pservers.html#PatternNotes 1597-1604; render.html#OverflowAndClipProperties.
+// SVG1.1 masking.html#ClipProperty: explicit clip lengths are in child coordinates.
+test effect fn patternClipIsTileLocalAndLegacyLengthsFollowContentMapping() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(b"<pattern xmlns='http://www.w3.org/2000/svg' width='.5' height='.25'/>"),
+  )
+  run Testing.expect(
+    match &a.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(0.0, 0.0, 0.5, 0.25))
+      _ => false
+    },
+    "UA overflow hidden clips physical tile",
+  )
+  let b = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' width='.5' height='.25' style='overflow:visible'/>",
+    ),
+  )
+  run Testing.expect(!b.clip.isSome(), "visible overflow has no fabricated tile clip")
+  let c = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' width='60' height='50' viewBox='10 20 20 10' style='overflow:visible;clip:rect(21px,28px,29px,12px)'/>",
+    ),
+  )
+  run Testing.expect(
+    match &c.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(6.0, 13.0, 48.0, 24.0))
+      _ => false
+    },
+    "legacy clip is transformed by viewBox, not by CSS or tile placement",
+  )
+  let d = run enabled(
+    &run layout(
+      b"<pattern xmlns='http://www.w3.org/2000/svg' width='.5' height='.25' style='clip:rect(2px,20px,8px,4px)'/>",
+    ),
+  )
+  run Testing.expect(
+    match &d.clip {
+      Option<Clip>.Some { value } => same(value.rectangle, rect(0.05, 0.05, 0.2, 0.15))
+      _ => false
+    },
+    "legacy clip follows mixed user-to-bbox content scale",
+  )
+}
+
+// pservers.html#PatternElementWidthAttribute, #PatternElementHeightAttribute; coords.html#ObjectBoundingBox.
+test effect fn patternDefaultsAndDegenerateDimensionsDisableOnlyApplicableUnits() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | GeometryError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let sources = [
+    b"<pattern xmlns='http://www.w3.org/2000/svg'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='0'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='-1' height='1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='-1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='calc(1px - 2px)' height='1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='calc(1px - 2px)'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='1' viewBox='0 0 0 10'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='1' viewBox='0 0 10 0'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    run Testing.expect(
+      !(run layout(sources[i])).isSome(),
+      "zero dimensions disable; invalid negative literals become missing/default zero",
+    )
+    i = i + 1
+  }
+  let boxes = [rect(10.0, 20.0, 0.0, 40.0), rect(10.0, 20.0, 80.0, 0.0)]
+  i = 0
+  while i < boxes.length {
+    run Testing.expect(
+      !(run layoutIn(
+        b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
+        boxes[i],
+      )).isSome(),
+      "bbox tile requires two nonzero bbox dimensions",
+    )
+    run Testing.expect(
+      !(run layoutIn(
+        b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' width='10' height='10'/>",
+        boxes[i],
+      )).isSome(),
+      "bbox contents require nonzero bbox dimensions",
+    )
+    let a = run enabled(
+      &run layoutIn(
+        b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' width='10' height='10'/>",
+        boxes[i],
+      ),
+    )
+    run matrix(a.content, Transform.identity())
+    let b = run enabled(
+      &run layoutIn(
+        b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' patternContentUnits='objectBoundingBox' width='10' height='10' viewBox='0 0 5 5'/>",
+        boxes[i],
+      ),
+    )
+    run matrix(b.content, Transform.scale(2.0, 2.0))
+    i = i + 1
+  }
+}
+
+// conform.html#ErrorProcessing: nonfinite values or positive scales rounded to zero are explicit failures.
+test effect fn patternNumericOverflowAndUnderflowNeverBecomeDisabledOrIdentity() -> ()
+  ! XmlError | CssError | UrlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let sources = [
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='calc(infinity * 1px)' height='1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1e308' height='1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' width='1e308' height='1e308' viewBox='0 0 1e-300 1e-300'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='userSpaceOnUse' width='1e-300' height='1e-300' viewBox='0 0 1e300 1e300'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
+    b"<pattern xmlns='http://www.w3.org/2000/svg' width='1e-300' height='1e-300'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    // The final two cases exercise reciprocal overflow and tile-size underflow.
+    let bounds = if i >= sources.length - 2 {
+      rect(0.0, 0.0, 1e-320, 1e-320)
+    } else {
+      rect(10.0, 20.0, 80.0, 40.0)
+    }
+    let result = run Effect.result(layoutIn(sources[i], bounds))
+    run Testing.expect(
+      match move result {
+        Result<
+          Option<Layout>,
+          XmlError
+            | CssError
+            | UrlError
+            | ComputedError
+            | RenderError
+            | GeometryError
+            | OutOfMemoryError
+        >.Failure {
+          error
+        } => match move error {
+          RenderError problem => problem == RenderError.InvalidGeometry
+          GeometryError problem => true
+          XmlError problem => {
+            fail problem
+          }
+          CssError problem => {
+            fail move problem
+          }
+          UrlError problem => {
+            fail problem
+          }
+          ComputedError problem => {
+            fail move problem
+          }
+          OutOfMemoryError problem => {
+            fail move problem
+          }
+        }
+        _ => false
+      },
+      "nonfinite values and unrepresentable positive geometry fail explicitly",
+    )
+    i = i + 1
+  }
+}

@@ -1,0 +1,377 @@
+// UTS46 revision36 / Unicode18.0.0, URL non-strict ToASCII.
+// Mapping data alone is local; canonical normalization and properties use silk.text.
+import url_idna_data as Data
+import url_idna_punycode as Punycode
+import url_idna_punycode { IdnaError }
+import silk.text.unicode { Unicode, Decomposed }
+import silk.text.unicode_properties {
+  GeneralCategory,
+  BidiClass,
+  JoiningType,
+  CanonicalCombiningClass,
+}
+import silk.text.utf8_scan as Utf8
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.u32
+
+// Resource limits, not DNS limits: 64KiB input, 16Ki Unicode scalar workspace,
+// and 16Mi variable-cost operations shared by NFC ordering and punycode.
+// These leave every normal DNS name ample room while bounding hostile labels.
+pub fn maxInputBytes() -> usize {
+  return 65536
+}
+
+pub fn maxScalars() -> usize {
+  return 16384
+}
+
+pub fn maxWork() -> usize {
+  return 16777216
+}
+
+effect fn decompose(cp: u32, ordered: &mut List<u32>, work: &mut usize, depth: usize) -> ()
+  ! IdnaError | OutOfMemoryError
+  ? &mut Allocator {
+  if depth >= 32 {
+    fail IdnaError.InputLimit
+  }
+  run Punycode.spend(&mut work.*, 1)
+  match move Unicode.decompose(cp) {
+    Option<Decomposed>.Some { value: Decomposed.Pair { first, second } } => {
+      run decompose(first, &mut ordered.*, &mut work.*, depth + 1)
+      run decompose(second, &mut ordered.*, &mut work.*, depth + 1)
+      return
+    }
+    Option<Decomposed>.Some { value: Decomposed.Singleton { scalar } } => {
+      run decompose(scalar, &mut ordered.*, &mut work.*, depth + 1)
+      return
+    }
+    _ => {}
+  }
+  if ordered.length() >= maxScalars() {
+    fail IdnaError.InputLimit
+  }
+  let mut at = ordered.length()
+  run ordered.append(cp)
+  let ccc = CanonicalCombiningClass.of(cp).number()
+  if ccc == 0 {
+    return
+  }
+  while at > 0 {
+    run Punycode.spend(&mut work.*, 1)
+    let previous = ordered.get(at - 1)
+    if CanonicalCombiningClass.of(previous).number() <= ccc {
+      break
+    }
+    ordered.set(at, previous)
+    at = at - 1
+  }
+  ordered.set(at, cp)
+}
+
+effect fn compose(ordered: &[u32], output: &mut List<u32>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  output.clear()
+  let mut starter: usize = 0
+  let mut hasStarter = false
+  let mut previousClass: u8 = 0
+  let mut at: usize = 0
+  while at < ordered.length {
+    let cp = ordered[at]
+    let ccc = CanonicalCombiningClass.of(cp).number()
+    let mut combined: u32 = 0
+    if hasStarter && (previousClass == 0 || previousClass < ccc) {
+      combined = Unicode.compose(output.get(starter), cp) |> Option<u32>.unwrapOr(0)
+    }
+    if combined != 0 {
+      output.set(starter, combined)
+    } else {
+      if ccc == 0 {
+        starter = output.length()
+        hasStarter = true
+      }
+      run output.append(cp)
+      previousClass = ccc
+    }
+    at = at + 1
+  }
+}
+
+fn ace(label: &[u32]) -> bool {
+  return label.length >= 4 && label[0] == 120 && label[1] == 110 && label[2] == 45 && label[3] == 45
+}
+
+fn nonAscii(label: &[u32]) -> bool {
+  let mut at: usize = 0
+  while at < label.length {
+    if label[at] >= 128 {
+      return true
+    }
+    at = at + 1
+  }
+  return false
+}
+
+fn joins(label: &[u32], at: usize) -> bool {
+  if at > 0 && CanonicalCombiningClass.of(label[at - 1]).number() == 9 {
+    return true
+  }
+  if label[at] == 0x200d {
+    return false
+  }
+  let mut before = at
+  while before > 0 && JoiningType.of(label[before - 1]) == JoiningType.T {
+    before = before - 1
+  }
+  if before == 0 {
+    return false
+  }
+  let left = JoiningType.of(label[before - 1])
+  if left != JoiningType.L && left != JoiningType.D {
+    return false
+  }
+  let mut after = at + 1
+  while after < label.length && JoiningType.of(label[after]) == JoiningType.T {
+    after = after + 1
+  }
+  if after == label.length {
+    return false
+  }
+  let right = JoiningType.of(label[after])
+  return right == JoiningType.R || right == JoiningType.D
+}
+
+fn valid(label: &[u32]) -> bool {
+  if label.length == 0 {
+    return true
+  }
+  if ace(label) {
+    return false
+  }
+  let category = GeneralCategory.of(label[0])
+  if category == GeneralCategory.Mn || category == GeneralCategory.Mc
+    || category == GeneralCategory.Me {
+    return false
+  }
+  let mut at: usize = 0
+  while at < label.length {
+    let cp = label[at]
+    if cp == 46 || Data.status(Data.lookup(cp)) > 1 {
+      return false
+    }
+    if (cp == 0x200c || cp == 0x200d) && !joins(label, at) {
+      return false
+    }
+    at = at + 1
+  }
+  return true
+}
+
+fn rtl(cp: u32) -> bool {
+  let kind = BidiClass.of(cp)
+  return kind == BidiClass.R || kind == BidiClass.AL || kind == BidiClass.AN
+}
+
+fn bidi(label: &[u32]) -> bool {
+  if label.length == 0 {
+    return true
+  }
+  let first = BidiClass.of(label[0])
+  let right = first == BidiClass.R || first == BidiClass.AL
+  if !right && first != BidiClass.L {
+    return false
+  }
+  let mut last = first
+  let mut european = false
+  let mut arabic = false
+  let mut at: usize = 0
+  while at < label.length {
+    let kind = BidiClass.of(label[at])
+    if kind == BidiClass.EN {
+      european = true
+    }
+    if kind == BidiClass.AN {
+      arabic = true
+    }
+    if kind != BidiClass.NSM {
+      last = kind
+    }
+    let common = kind == BidiClass.EN || kind == BidiClass.ES || kind == BidiClass.CS
+      || kind == BidiClass.ET
+      || kind == BidiClass.ON
+      || kind == BidiClass.BN
+      || kind == BidiClass.NSM
+    if !common {
+      if right {
+        if kind != BidiClass.R && kind != BidiClass.AL && kind != BidiClass.AN {
+          return false
+        }
+      } else if kind != BidiClass.L {
+        return false
+      }
+    }
+    at = at + 1
+  }
+  if right {
+    return !(european && arabic)
+      && (last == BidiClass.R || last == BidiClass.AL || last == BidiClass.EN
+        || last == BidiClass.AN)
+  }
+  return last == BidiClass.L || last == BidiClass.EN
+}
+
+effect fn isNfc(
+  label: &[u32],
+  ordered: &mut List<u32>,
+  normalized: &mut List<u32>,
+  work: &mut usize,
+) -> bool
+  ! IdnaError | OutOfMemoryError
+  ? &mut Allocator {
+  ordered.clear()
+  let mut at: usize = 0
+  while at < label.length {
+    run decompose(label[at], &mut ordered.*, &mut work.*, 0)
+    at = at + 1
+  }
+  run compose(ordered.asSlice(), &mut normalized.*)
+  if normalized.length() != label.length {
+    return false
+  }
+  at = 0
+  while at < label.length {
+    if normalized.get(at) != label[at] {
+      return false
+    }
+    at = at + 1
+  }
+  return true
+}
+
+// Invalid UTF8, disallowed/invalid labels, and invalid arithmetic return None.
+// Implementation resource exhaustion fails with IdnaError.InputLimit; allocator
+// failure remains OutOfMemoryError. Empty labels are preserved because
+// VerifyDnsLength=false. URL parsing checks empty/forbidden hosts itself.
+// CheckHyphens=false, CheckBidi=true, CheckJoiners=true,
+// UseSTD3ASCIIRules=false, TransitionalProcessing=false,
+// VerifyDnsLength=false, IgnoreInvalidPunycode=false.
+pub effect fn domainToAscii(input: &[u8]) -> Option<Bytes>
+  ! IdnaError | OutOfMemoryError
+  ? &mut Allocator {
+  if input.length > maxInputBytes() {
+    fail IdnaError.InputLimit
+  }
+  let mut work = maxWork()
+  let mut ordered = List<u32>.make()
+  let mut normalized = List<u32>.make()
+  let mut at: usize = 0
+  while at < input.length {
+    let decoded = Utf8.decode(input, at)
+
+    // U+FFFD itself is disallowed too, so replacement decoding cannot hide an error.
+    let record = Data.lookup(decoded.scalar)
+    let status = Data.status(record)
+    if status == 4 {
+      return Option<Bytes>.None
+    }
+    if status == 3 {
+      let mut index: usize = 0
+      while index < Data.length(record) {
+        run decompose(Data.mapping(record, index), &mut ordered, &mut work, 0)
+        index = index + 1
+      }
+    } else if status != 2 {
+      run decompose(decoded.scalar, &mut ordered, &mut work, 0)
+    }
+    at = decoded.next
+  }
+  run compose(ordered.asSlice(), &mut normalized)
+  let mut unicode = List<u32>.make()
+  let mut decoded = List<u32>.make()
+  let mut nfc = List<u32>.make()
+  let mut start: usize = 0
+  let mut hasRtl = false
+  at = 0
+  while at <= normalized.length() {
+    if at == normalized.length() || normalized.get(at) == 46 {
+      let label = Slice.view<u32>(normalized.asSlice(), start, at - start)
+      if ace(label) {
+        if !(run Punycode.decode(
+          Slice.view<u32>(label, 4, label.length - 4),
+          &mut decoded,
+          &mut work,
+        )) {
+          return Option<Bytes>.None
+        }
+        if !nonAscii(decoded.asSlice()) || !valid(decoded.asSlice()) {
+          return Option<Bytes>.None
+        }
+        if !(run isNfc(decoded.asSlice(), &mut ordered, &mut nfc, &mut work)) {
+          return Option<Bytes>.None
+        }
+        if decoded.length() > maxScalars() - unicode.length() {
+          fail IdnaError.InputLimit
+        }
+        run unicode.appendSlice(decoded.asSlice())
+      } else {
+        if !valid(label) {
+          return Option<Bytes>.None
+        }
+        if label.length > maxScalars() - unicode.length() {
+          fail IdnaError.InputLimit
+        }
+        run unicode.appendSlice(label)
+      }
+      if at < normalized.length() {
+        if unicode.length() >= maxScalars() {
+          fail IdnaError.InputLimit
+        }
+        run unicode.append(46)
+      }
+      start = at + 1
+    }
+    at = at + 1
+  }
+  at = 0
+  while at < unicode.length() {
+    if rtl(unicode.get(at)) {
+      hasRtl = true
+      break
+    }
+    at = at + 1
+  }
+  let mut output = Bytes.make()
+  at = 0
+  start = 0
+  while at <= unicode.length() {
+    if at == unicode.length() || unicode.get(at) == 46 {
+      let label = Slice.view<u32>(unicode.asSlice(), start, at - start)
+      if hasRtl && !bidi(label) {
+        return Option<Bytes>.None
+      }
+      if nonAscii(label) {
+        if !(run Punycode.encode(label, &mut output, &mut work)) {
+          return Option<Bytes>.None
+        }
+      } else {
+        let mut index: usize = 0
+        while index < label.length {
+          let byte = [u32.toU8(label[index])]
+          run output.append(&byte)
+          index = index + 1
+        }
+      }
+      if at < unicode.length() {
+        run output.append(b".")
+      }
+      start = at + 1
+    }
+    at = at + 1
+  }
+  return Option<Bytes>.Some { value: move output }
+}

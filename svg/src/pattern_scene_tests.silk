@@ -1,0 +1,291 @@
+//! SVG2 CR2018 pservers #PaintServerTemplates, #PatternNotes and coords
+//! #ObjectBoundingBox. These exercise the real styled graph -> retained picture seam.
+import resolve
+import scene { RenderTree, RenderOptions, RenderError, Paint, PaintInstance }
+import structure { Options, StructureError }
+import structure
+import document_styles
+import stylesheets { Catalog }
+import view_selection { Selection }
+import resources { Resolver, DataOnly, Limits as ResourceLimits }
+import url { Url, UrlError }
+import svg_css.tokens { Limits, CssError }
+import svg_css.computed { HostContext, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_css.media_features { Environment }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn scene(data: &[u8], maxDepth: usize) -> RenderTree<'_>
+  ! StructureError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let options = Options.defaults()
+  let base = run Url.parseAbsolute(b"https://example.test/pattern.svg")
+  let mut graph = run structure.build(data, &base, &options)
+  let mut catalog = run Catalog.make()
+  let tokens = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(100.0, 100.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  let styled = run document_styles.buildGraph(
+    &mut graph,
+    move catalog,
+    &host,
+    &Environment.headless(100.0, 100.0),
+    Selection.empty(),
+    &Limits.make(),
+    &options,
+  )
+  graph.limits.maxOccurrenceDepth = maxDepth
+  return run resolve.resolve(
+    move graph,
+    move styled,
+    &RenderOptions.make(),
+    &Limits.make(),
+    100.0,
+    100.0,
+  )
+}
+
+effect fn fixture(data: &[u8]) -> RenderTree<'_>
+  ! StructureError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  return run scene(data, 256)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn inheritedPatternRetainsOneLocalPicture() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><defs><pattern id='base' patternUnits='userSpaceOnUse' width='10' height='20' viewBox='0 0 5 10'><rect width='5' height='10'/></pattern><pattern id='p' href='#base' patternTransform='translate(3 4)'/></defs><rect width='100' height='100' fill='url(#p)'/><rect x='10' y='15' width='20' height='30' fill='url(#p)'/></svg>",
+  )
+  run Testing.expect(
+    tree.patterns.length() == 1,
+    "different referring boxes share the same user-space picture and texture budget",
+  )
+  let picture = &tree.patterns.asSlice()[0]
+  run Testing.expect(
+    picture.tile.width() == 10.0 && picture.tile.height() == 20.0,
+    "template tile extents",
+  )
+  run Testing.expect(picture.shapes.length() == 1, "template children use styled shadow closure")
+  run Testing.expect(
+    picture.contentBounds.xMin == 0.0 && picture.contentBounds.xMax == 10.0,
+    "external transform is not repeated inside picture",
+  )
+}
+
+test effect fn overflowPatternIncludesDistantStrokeAndMarker() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><marker id='m' markerUnits='userSpaceOnUse' markerWidth='10' markerHeight='10' overflow='visible'><rect x='50' width='2' height='2'/></marker><pattern id='p' patternUnits='userSpaceOnUse' width='10' height='10' overflow='visible'><path d='M 30 5 L 40 5' fill='none' stroke='red' stroke-width='4' marker-end='url(#m)'/></pattern></defs><rect width='100' height='100' fill='url(#p)'/></svg>",
+  )
+  run Testing.expect(tree.patterns.length() == 1, "retained pattern")
+  let picture = &tree.patterns.asSlice()[0]
+  run Testing.expect(
+    picture.contentBounds.xMax >= 92.0 && picture.contentBounds.yMin <= 3.0,
+    "overflow bounds include expanded marker and stroke, not one neighboring tile",
+  )
+}
+
+test effect fn nestedPatternCycleAndDegenerateTileTerminate() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='a' patternUnits='userSpaceOnUse' width='10' height='10'><rect width='10' height='10' fill='url(#b) red'/></pattern><pattern id='b' patternUnits='userSpaceOnUse' width='5' height='5'><rect width='5' height='5' fill='url(#a) blue'/></pattern><pattern id='zero' width='0' height='1'/></defs><rect width='100' height='100' fill='url(#a)'/><rect width='100' height='100' fill='url(#zero) red'/></svg>",
+  )
+  run Testing.expect(tree.patterns.length() == 2, "active edge closes cyclic pattern references")
+
+  // The last shape is the second rectangle's; earlier ones include hit regions.
+  match &tree.shapes.asSlice()[tree.shapes.length() - 1].style.fill {
+    Paint.None => {}
+    _ => {
+      run Testing.expect(false, "valid zero tile suppresses painting instead of choosing fallback")
+    }
+  }
+}
+
+// coords #ObjectBoundingBox and pservers #PatternNotes: the instance map owns
+// bbox origin; the retained tile and its contents remain origin-zero.
+test effect fn objectPatternOriginAndResourceLocalVectorEffect() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='p' width='.5' height='.5' patternContentUnits='objectBoundingBox' overflow='visible' vector-effect='non-scaling-size'><path d='M0 .25 H.5' transform='scale(2)' fill='none' stroke='red' stroke-width='.1' vector-effect='non-scaling-stroke'/></pattern></defs><rect x='20' y='30' width='40' height='60' fill='url(#p)'/></svg>",
+  )
+  run Testing.expect(tree.patterns.length() == 1, "bbox pattern retained")
+  let picture = &tree.patterns.asSlice()[0]
+  run Testing.expect(
+    picture.tile.width() == 0.5 && picture.tile.height() == 0.5,
+    "physical tile uses pattern units",
+  )
+  run Testing.expect(
+    picture.shapes.asSlice()[0].strokeSpace.isSome(),
+    "resource-local non-scaling stroke",
+  )
+  run Testing.expect(
+    picture.contentBounds.xMax >= 1.0,
+    "non-graphics pattern root vector-effect does not cancel child geometry",
+  )
+}
+
+// painting #context-paint: neither a direct pattern reference nor an unrelated
+// definition referenced from a use shadow tree manufactures a context element.
+test effect fn patternReferenceDoesNotManufactureContextPaint() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='p' patternUnits='userSpaceOnUse' width='10' height='10'><rect width='10' height='10' fill='context-fill'/><use href='#dot' fill='red'/></pattern><rect id='dot' width='2' height='2' fill='context-fill'/><rect id='target' width='100' height='100' fill='url(#p)'/></defs><use href='#target' fill='blue'/></svg>",
+  )
+  run Testing.expect(tree.patterns.length() == 1, "one resource picture")
+  let picture = &tree.patterns.asSlice()[0]
+  match &picture.shapes.asSlice()[0].style.fill {
+    Paint.None => {}
+    _ => {
+      run Testing.expect(false, "unrelated pattern has no context")
+    }
+  }
+  match &picture.shapes.asSlice()[1].style.fill {
+    Paint.Solid { color } => {
+      run Testing.expect(
+        color.r == 1.0 && color.b == 0.0,
+        "use inside pattern establishes its own context",
+      )
+    }
+    _ => {
+      run Testing.expect(false, "nested use context retained")
+    }
+  }
+}
+
+test effect fn finiteProjectivePatternMapStaysOnInstance() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='p' patternUnits='userSpaceOnUse' width='10' height='10' style='transform:matrix3d(1,0,0,.001,0,1,0,0,0,0,1,0,0,0,0,1)'><rect width='10' height='10'/></pattern></defs><rect width='100' height='100' fill='url(#p)'/></svg>",
+  )
+  run Testing.expect(tree.patterns.length() == 1, "finite projective pattern supported")
+  run Testing.expect(
+    tree.patterns.asSlice()[0].contentBounds.xMax == 10.0,
+    "projective instance transform not duplicated into content",
+  )
+}
+
+effect fn limitedAttempt(data: &[u8]) -> bool
+  ! StructureError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  drop run scene(data, 4)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  return false
+}
+
+effect fn isTooLarge(error: RenderError) -> bool {
+  return error == RenderError.TooLarge
+}
+
+// Resource reuse must not bypass the combined occurrence depth budget.
+test effect fn cachedPatternStillChargesNestedOccurrenceDepth() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let limited = run Effect.catch<RenderError>(
+    limitedAttempt(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='p' patternUnits='userSpaceOnUse' width='10' height='10'><g><rect width='10' height='10'/></g></pattern></defs><rect width='100' height='100' fill='url(#p)'/><g><rect width='100' height='100' fill='url(#p)'/></g></svg>",
+    ),
+    isTooLarge,
+  )
+  run Testing.expect(limited, "cached picture depth is added to referencing occurrence depth")
+}
+
+test effect fn laterPatternStrokesGrowSharedPathConversionArena() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let tree = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><pattern id='a' patternUnits='userSpaceOnUse' width='10' height='10' overflow='visible'><path d='M0 5H10' stroke='red' stroke-width='2'/></pattern><pattern id='b' patternUnits='userSpaceOnUse' width='10' height='10' overflow='visible'><path d='M0 5H10' stroke='blue' stroke-width='4' stroke-dasharray='2 2' stroke-linecap='square'/></pattern></defs><rect width='50' height='100' fill='url(#a)'/><rect x='50' width='50' height='100' fill='url(#b)'/></svg>",
+  )
+  run Testing.expect(
+    tree.patterns.length() == 2,
+    "distinct pictures share a growing conversion arena",
+  )
+  run Testing.expect(
+    tree.patterns.asSlice()[1].contentBounds.yMin <= 3.0,
+    "later dashed caps retain painted bounds",
+  )
+}

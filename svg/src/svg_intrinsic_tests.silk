@@ -1,0 +1,88 @@
+//! SVG2 CR2018 #IntrinsicSizing, SHA256 79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb.
+import svg_intrinsic
+import svg_css.tokens { Limits, CssError }
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.properties { Property }
+import svg_css.values { Store, ValueId, Mode, ComputeContext }
+import svg_css.values
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_geometry.geometry { Rect }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn dimension(source: &[u8], expected: Option<f64>) -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let tokens = run lexer.tokenize(source, &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut store = Store.make()
+  let parsed = run values.parse(&mut store, Property.Width, &input, Mode.Css)
+  let id = match &parsed {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      run Testing.expect(false, "valid width syntax")
+      return
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let palette = ColorContext.make(black, [black; 19])
+  let dimensions = Context.make(300.0, 150.0, 16.0)
+  let context = ComputeContext { dimensions: &dimensions, colors: &palette, systemFonts: &fonts }
+  let computed = run values.compute(&mut store, id, &context)
+  let result = svg_intrinsic.dimension(&store, computed)
+  let equal = match &expected {
+    Option<f64>.Some { value } => match &result {
+      Option<f64>.Some { value: actual } => actual == value
+      _ => false
+    }
+    _ => result.isNone()
+  }
+  run Testing.expect(equal, "only definite computed lengths supply intrinsic dimensions")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#IntrinsicSizing
+test effect fn computedLengthsExcludeAutoAndPercentages() -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run dimension(b"2in", Option<f64>.some(192.0)) |> Effect.provideMut<Allocator>(&mut allocator)
+  run dimension(b"2em", Option<f64>.some(32.0)) |> Effect.provideMut<Allocator>(&mut allocator)
+  run dimension(b"0px", Option<f64>.some(0.0)) |> Effect.provideMut<Allocator>(&mut allocator)
+  run dimension(b"auto", Option<f64>.None) |> Effect.provideMut<Allocator>(&mut allocator)
+  run dimension(b"50%", Option<f64>.None) |> Effect.provideMut<Allocator>(&mut allocator)
+  run dimension(b"calc(10px + 25%)", Option<f64>.None)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#IntrinsicSizing
+test effect fn definiteDimensionsPrecedeSelectedViewBoxRatio() -> ()
+  ! AssertionError<'static> {
+  let box = Option<Rect>.some(Rect { xMin: 0.0, yMin: 0.0, xMax: 9.0, yMax: 3.0 })
+  let explicit = svg_intrinsic.natural(Option<f64>.some(8.0), Option<f64>.some(4.0), box)
+  let fallback = svg_intrinsic.natural(Option<f64>.None, Option<f64>.some(4.0), box)
+  let zero = svg_intrinsic.natural(Option<f64>.some(0.0), Option<f64>.some(4.0), box)
+  let a = match &explicit.ratio {
+    Option<f64>.Some { value } => value == 2.0
+    _ => false
+  }
+  let b = match &fallback.ratio {
+    Option<f64>.Some { value } => value == 3.0
+    _ => false
+  }
+  run Testing.expect(
+    a && b && zero.ratio.isNone(),
+    "definite width/height wins; otherwise selected viewBox supplies ratio; zero remains non-rendering",
+  )
+}

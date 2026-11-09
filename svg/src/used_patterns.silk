@@ -1,0 +1,200 @@
+//! Backend-neutral pattern coordinates for already template-merged metadata.
+//! SVG2 CR2018 pservers SHA256 25529cd8fee8d915fdd673f3a2a8053ba3ee060661c07e6a0f52ba16babf607f.
+import paint_metadata { PatternMetadata, CoordinateUnits }
+import scene { RenderError }
+import mapping { Mapping }
+import used_paints
+import used_transforms
+import used_viewports { Clip }
+import used_viewports
+import svg_css.computed { Engine, StyleId }
+import svg_geometry.geometry { Rect, Transform, Vector, isEmptyRect, isValidRect }
+import svg_geometry.transforms { Matrix }
+import svg_geometry.svg { AspectRatio, Alignment }
+import svg_geometry.svg
+import vector.geometry_error { GeometryError }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+
+pub struct Layout {
+  // Origin-zero physical tile in patternUnits, before patternTransform.
+  pub physical: Rect,
+  // Tile-origin coordinates -> referencing element user coordinates. The caller
+  // appends its CTM; translating a repeated tile happens to this map's RIGHT.
+  pub mapping: Mapping,
+  // Pattern child coordinates -> origin-zero tile; positive scale/translation only.
+  pub content: Transform,
+  // Descendant percentage basis, NOT the physical tile or pattern viewBox.
+  pub user: Rect,
+  // Tile-local clip, not an axis-aligned bound of the CSS-transformed tile.
+  pub clip: Option<Clip>,
+}
+
+impl Copy for Layout {}
+
+fn unitBox() -> Rect {
+  return Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+}
+
+// pservers.html#PatternElementAttributes: defaults are applied only AFTER the
+// caller has merged template attributes; CSS patternTransform is already computed.
+pub effect fn resolve(
+  metadata: &PatternMetadata,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  parentViewport: Rect,
+  bounds: Rect,
+) -> Option<Layout>
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  if !isValidRect(parentViewport) || !isValidRect(bounds) || !f64.isFinite(parentViewport.width())
+    || !f64.isFinite(parentViewport.height())
+    || !f64.isFinite(bounds.width())
+    || !f64.isFinite(bounds.height()) {
+    fail RenderError.InvalidGeometry
+  }
+  let objectUnits = match &metadata.units {
+    Option<CoordinateUnits>.Some { value } => value == CoordinateUnits.ObjectBoundingBox
+    _ => true
+  }
+  let objectContent = !metadata.viewBox.isSome()
+    && match &metadata.contentUnits {
+      Option<CoordinateUnits>.Some { value } => value == CoordinateUnits.ObjectBoundingBox
+      _ => false
+    }
+
+  // coords.html#ObjectBoundingBox: either applicable bbox coordinate system
+  // needs two nonzero dimensions. A viewBox makes contentUnits inapplicable.
+  if (objectUnits || objectContent) && isEmptyRect(bounds) {
+    return Option<Layout>.None
+  }
+  let reference = if objectUnits {
+    unitBox()
+  } else {
+    parentViewport
+  }
+  let x = run used_paints.number(&mut engine.*, style, metadata.x, reference.width(), 0.0)
+  let y = run used_paints.number(&mut engine.*, style, metadata.y, reference.height(), 0.0)
+  let w = run used_paints.number(&mut engine.*, style, metadata.width, reference.width(), 0.0)
+  let h = run used_paints.number(&mut engine.*, style, metadata.height, reference.height(), 0.0)
+
+  // CSS Values #calc-range clamps selected math expressions at used-value time.
+  // Invalid negative literals were discarded before template lookup.
+  if w <= 0.0 || h <= 0.0 {
+    return Option<Layout>.None
+  }
+  let physical = Rect { xMin: 0.0, yMin: 0.0, xMax: w, yMax: h }
+  if objectUnits {
+    // A nonzero tile must not silently collapse or overflow in the implicit
+    // bbox conversion, even when both factors individually remain finite.
+    let width = w * bounds.width()
+    let height = h * bounds.height()
+    if !f64.isFinite(width) || !f64.isFinite(height) || width == 0.0 || height == 0.0 {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let mut content = Transform.identity()
+  match &metadata.viewBox {
+    Option<Rect>.Some { value: box } => {
+      if !isValidRect(box) || !f64.isFinite(box.width()) || !f64.isFinite(box.height()) {
+        fail RenderError.InvalidGeometry
+      }
+      if isEmptyRect(box) {
+        return Option<Layout>.None
+      }
+      let ratio = match &metadata.aspectRatio {
+        Option<AspectRatio>.Some { value } => value
+        _ => AspectRatio { alignment: Alignment.XMidYMid, slice: false, defer: false }
+      }
+
+      // #PatternNotes 1620-1645: fit into the tile region in patternUnits; viewBox
+      // overrides patternContentUnits, not patternUnits or tile origin. The aspect ratio
+      // is that of the region on the canvas, so a bounding-box tile is fitted at its
+      // user-space size and then expressed in bounding-box units.
+      if objectUnits {
+        let fitted = match &svg.viewportWithAspectRatio(
+          box,
+          w * bounds.width(),
+          h * bounds.height(),
+          ratio,
+        ) {
+          Option<Transform>.Some { value } => value
+          _ => {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        content = (Transform.scale(1.0 / bounds.width(), 1.0 / bounds.height())) * fitted
+      } else {
+        content = match &svg.viewportWithAspectRatio(box, w, h, ratio) {
+          Option<Transform>.Some { value } => value
+          _ => {
+            fail RenderError.InvalidGeometry
+          }
+        }
+      }
+    }
+    _ => {
+      // #PatternNotes 1626-1640 places child zero at tile x/y, even without
+      // viewBox. Mixed units therefore change scale ONLY; adding bbox origin
+      // here, or subtracting tile x/y, would move that specified content origin.
+      if objectUnits && !objectContent {
+        content = Transform.scale(1.0 / bounds.width(), 1.0 / bounds.height())
+      } else if !objectUnits && objectContent {
+        content = Transform.scale(bounds.width(), bounds.height())
+      }
+    }
+  }
+  if !content.isFinite() || content.xx <= 0.0 || content.yy <= 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+
+  // Match used_paints' computed transform reference-box convention. No XML
+  // reparsing: patternTransform aliases Transform in the completed CSS cascade.
+  let fillReference = if objectUnits {
+    reference
+  } else {
+    bounds
+  }
+  let css = match &used_transforms.element(
+    &engine.*,
+    style,
+    reference,
+    fillReference,
+    fillReference,
+  ) {
+    Option<Matrix>.Some { value } => run Mapping.fromMatrix(&value)
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let coordinateMap = if objectUnits {
+    Mapping.Affine {
+      value: Transform.new(bounds.width(), 0.0, 0.0, bounds.height(), bounds.xMin, bounds.yMin),
+    }
+  } else {
+    Mapping.identity()
+  }
+
+  // #PatternElementPatternTransformAttribute 1467-1472: B * CSS * T(x,y).
+  let placement = Mapping.Affine { value: Transform.translation(Vector.new(x, y)) }
+  let mapping = run coordinateMap.compose(&(run css.compose(&placement)))
+  let clip = run used_viewports.clipping(&engine.*, style, physical, content)
+
+  // coords.html#ElementsThatEstablishViewports 830-847 (pinned SHA256
+  // 79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb): a pattern
+  // establishes NO SVG viewport, even with viewBox, and bbox content keeps the
+  // enclosing SVG percentage extent: "If percentages are used within the content
+  // of a pattern [...] these values are treated according to [...] Units"
+  // (coords.html#ObjectBoundingBoxUnits).
+  return Option<Layout>.some(
+    Layout {
+      physical: physical,
+      mapping: mapping,
+      content: content,
+      user: parentViewport,
+      clip: clip,
+    },
+  )
+}

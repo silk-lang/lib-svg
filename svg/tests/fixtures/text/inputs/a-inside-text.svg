@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="130">
+<text x="10" y="50" font-family="Noto Sans" font-size="40">Hi <a href="https://example.com/" target="_blank" fill="red">AVA</a></text>
+<text x="10" y="110" font-family="Noto Sans" font-size="40"><a xlink:href="#nowhere">H<tspan fill="red">i</tspan></a> A</text>
+</svg>

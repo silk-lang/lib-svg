@@ -1,0 +1,8 @@
+[package]
+name = "svg-bench"
+version = "0.1.0"
+silk-version = "0.1.0-dev.61+91f335268900"
+
+[dependencies]
+svg_render = { path = "../render", package = "svg-render" }
+svg_core = { path = "..", package = "svg" }

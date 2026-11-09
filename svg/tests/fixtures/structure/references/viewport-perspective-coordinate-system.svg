@@ -1,0 +1,2 @@
+<!-- Perspective sends the child's pre-projection [8,10]^2 to [16,20]^2, outside the physical viewport. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect x="24" width="8" height="8" fill="red"/></svg>

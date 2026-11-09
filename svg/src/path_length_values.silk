@@ -1,0 +1,390 @@
+//! SVG2 CR2018 paths #PathLengthAttribute and painting #StrokeShape.
+//! Calibrate distance-valued terms, not percentage distances or dimensionless
+//! ratios. At author length zero retain the positive-scale limit through modulo.
+import scene { RenderError }
+import svg_css.dimensions { Store, ExprId, Expr, Unit, Operation }
+import svg_css.dimensions
+import path_length_limit { Value as LimitValue, Budget }
+import path_length_limit as limits
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+pub struct Dashes {
+  pub values: List<f64>,
+  pub offset: f64
+}
+
+fn minimum(a: f64, b: f64) -> f64 {
+  if a != a || b != b {
+    return 0.0 / 0.0
+  }
+  if a == 0.0 && b == 0.0 {
+    return if 1.0 / a < 0.0 {
+      a
+    } else {
+      b
+    }
+  }
+  return f64.min(a, b)
+}
+
+fn maximum(a: f64, b: f64) -> f64 {
+  if a != a || b != b {
+    return 0.0 / 0.0
+  }
+  if a == 0.0 && b == 0.0 {
+    return if 1.0 / a > 0.0 {
+      a
+    } else {
+      b
+    }
+  }
+  return f64.max(a, b)
+}
+
+// Relative units have already been canonicalized by computed CSS. Intermediate
+// compound dimensions can cancel; a unitless ratio is not a path distance.
+fn degree(store: &Store<'_>, id: ExprId) -> i32 {
+  if dimensions.numberResult(store, id) {
+    return 0
+  }
+  return match &store.get(id).* {
+    Expr.Literal { value: _, unit } => if unit == Unit.Px {
+      1
+    } else {
+      0
+    }
+    Expr.Calc { value } => degree(store, value)
+    Expr.PercentContext { value: _, percentage: _ } => 0
+    Expr.Binary { operation, left, right } => {
+      let a = degree(store, left)
+      let b = degree(store, right)
+      return if operation == Operation.Multiply {
+        a + b
+      } else if operation == Operation.Divide {
+        a - b
+      } else if a > b {
+        a
+      } else {
+        b
+      }
+    }
+  }
+}
+
+// A dash entry or offset that is a bare <number> is a distance in user units, unlike a
+// unitless factor inside a calculation, so it scales with the path like a length.
+fn distance(store: &Store<'_>, id: ExprId, basis: f64, scale: f64) -> f64 {
+  if dimensions.numberResult(store, id) {
+    let value = dimensions.evaluateUncensored(store, id, basis)
+    if value == 0.0 {
+      return value
+    }
+    return value * scale
+  }
+  return scaled(store, id, basis, scale)
+}
+
+fn scaled(store: &Store<'_>, id: ExprId, basis: f64, scale: f64) -> f64 {
+  if dimensions.numberResult(store, id) {
+    return dimensions.evaluateUncensored(store, id, basis)
+  }
+  if !dimensions.containsPercentage(store, id) {
+    let value = dimensions.evaluateUncensored(store, id, basis)
+    if value == 0.0 {
+      return value
+    }
+    let power = degree(store, id)
+    let mut factor: f64 = 1.0
+    let mut i: i32 = 0
+    while i < power {
+      factor = factor * scale
+      i = i + 1
+    }
+    while i > power {
+      factor = factor / scale
+      i = i - 1
+    }
+    return value * factor
+  }
+  return match &store.get(id).* {
+    Expr.Literal { value: _, unit: _ } => dimensions.evaluateUncensored(store, id, basis)
+    Expr.PercentContext { value: _, percentage: _ } => dimensions.evaluateUncensored(
+      store,
+      id,
+      basis,
+    )
+    Expr.Calc { value } => scaled(store, value, basis, scale)
+    Expr.Binary { operation, left, right } => {
+      let a = scaled(store, left, basis, scale)
+      let b = scaled(store, right, basis, scale)
+      return match operation {
+        Operation.Add => a + b
+        Operation.Subtract => a - b
+        Operation.Multiply => a * b
+        Operation.Divide => a / b
+        Operation.Min => minimum(a, b)
+        Operation.Max => maximum(a, b)
+      }
+    }
+  }
+}
+
+fn bounded(value: f64) -> f64 {
+  if value != value || value == 0.0 {
+    return 0.0
+  }
+  let limit = f64.fromBits(9218868437227405311)
+  return f64.max(-limit, f64.min(limit, value))
+}
+
+effect fn expressionLimit(
+  store: &Store<'_>,
+  id: ExprId,
+  basis: f64,
+  budget: &mut Budget,
+) -> LimitValue
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if dimensions.numberResult(store, id) {
+    return run limits.constant(dimensions.evaluateUncensored(store, id, basis))
+  }
+  if !dimensions.containsPercentage(store, id) {
+    return run limits.monomial(dimensions.evaluateUncensored(store, id, basis), degree(store, id))
+  }
+  return match &store.get(id).* {
+    Expr.Literal { value: _, unit: _ } => run limits.constant(
+      dimensions.evaluateUncensored(store, id, basis),
+    )
+    Expr.PercentContext { value: _, percentage: _ } => run limits.constant(
+      dimensions.evaluateUncensored(store, id, basis),
+    )
+    Expr.Calc { value } => run expressionLimit(store, value, basis, &mut budget.*)
+    Expr.Binary { operation, left, right } => {
+      let a = run expressionLimit(store, left, basis, &mut budget.*)
+      let b = run expressionLimit(store, right, basis, &mut budget.*)
+      return match operation {
+        Operation.Add => run limits.linear(&a, &b, 1.0, &mut budget.*)
+        Operation.Subtract => run limits.linear(&a, &b, -1.0, &mut budget.*)
+        Operation.Multiply => run limits.multiply(&a, &b, false, &mut budget.*)
+        Operation.Divide => run limits.multiply(&a, &b, true, &mut budget.*)
+        Operation.Min => {
+          let order = run limits.compare(&a, &b, &mut budget.*)
+          return if order < 0 || (order == 0 && !limits.negativeZero(&b)) {
+            move a
+          } else {
+            move b
+          }
+        }
+        Operation.Max => {
+          let order = run limits.compare(&a, &b, &mut budget.*)
+          return if order > 0 || (order == 0 && !limits.negativeZero(&a)) {
+            move a
+          } else {
+            move b
+          }
+        }
+      }
+    }
+  }
+}
+
+effect fn rootLimit(
+  store: &Store<'_>,
+  id: ExprId,
+  basis: f64,
+  nonnegative: bool,
+  budget: &mut Budget,
+) -> LimitValue
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let ordinary = dimensions.evaluateUncensored(store, id, basis)
+  if ordinary != ordinary {
+    return run limits.constant(0.0)
+  }
+  let result = if dimensions.numberResult(store, id) {
+    // A bare <number> entry is a user-unit distance; see `distance`.
+    run limits.monomial(bounded(ordinary), 1)
+  } else if f64.isFinite(ordinary) {
+    run expressionLimit(store, id, basis, &mut budget.*)
+  } else {
+    run limits.monomial(bounded(ordinary), degree(store, id))
+  }
+  if nonnegative && limits.sign(&result) < 0 {
+    return run limits.constant(0.0)
+  }
+  return move result
+}
+
+// Finite replacement for an infinite terminal interval, never a dash-scale
+// approximation: no contour can reach its far endpoint. Earlier finite intervals
+// and their cap transitions remain exact in the selected infinite-scale limit.
+effect fn terminal(length: f64) -> f64
+  ! RenderError {
+  let value = 2.0 * f64.max(1.0, length)
+  if !f64.isFinite(value) {
+    fail RenderError.InvalidGeometry
+  }
+  return value
+}
+
+effect fn zeroAuthor(
+  store: &Store<'_>,
+  expressions: &[ExprId],
+  offset: ExprId,
+  basis: f64,
+  length: f64,
+  count: usize,
+) -> Dashes
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut budget = Budget.make()
+  let mut terms = run List<LimitValue>.makeWithCapacity(count)
+  let mut period = run limits.constant(0.0)
+  let mut i: usize = 0
+  while i < count {
+    let term = run rootLimit(store, expressions[i % expressions.length], basis, true, &mut budget)
+    let sum = run limits.linear(&period, &term, 1.0, &mut budget)
+    period = move sum
+    run terms.append(move term)
+    i = i + 1
+  }
+  if limits.sign(&period) == 0 {
+    return Dashes { values: List<f64>.make(), offset: 0.0 }
+  }
+  let position = run rootLimit(store, offset, basis, false, &mut budget)
+  let total = run limits.limit(&period)
+  let mut out = List<f64>.make()
+  if f64.isFinite(total) {
+    i = 0
+    while i < count {
+      run out.append(run limits.limit(&terms.asSlice()[i]))
+      i = i + 1
+    }
+
+    // SVGWG #81 permits clamping a nonzero infinitely scaled position to the
+    // largest representable value. This branch has no infinite dash intervals.
+    return Dashes { values: move out, offset: bounded(run limits.limit(&position)) }
+  }
+  let quotient = run limits.multiply(&position, &period, true, &mut budget)
+  let cycles = f64.floor(run limits.limit(&quotient))
+  if !f64.isFinite(cycles) || f64.abs(cycles) > 4503599627370496.0 {
+    // A modulo with an unbounded quotient has no limiting phase. Never invent
+    // one from an arbitrary epsilon author length.
+    fail RenderError.InvalidGeometry
+  }
+  let mut phase = run limits.linear(&position, &period, -cycles, &mut budget)
+  if limits.sign(&phase) < 0 {
+    let corrected = run limits.linear(&phase, &period, 1.0, &mut budget)
+    phase = move corrected
+  }
+  if (run limits.compare(&phase, &period, &mut budget)) >= 0 {
+    let corrected = run limits.linear(&phase, &period, -1.0, &mut budget)
+    phase = move corrected
+  }
+  if limits.sign(&phase) < 0 || (run limits.compare(&phase, &period, &mut budget)) >= 0 {
+    fail RenderError.InvalidGeometry
+  }
+  let mut selected: usize = 0
+  while selected < count
+    && (run limits.compare(&phase, &terms.asSlice()[selected], &mut budget)) > 0 {
+    let next = run limits.linear(&phase, &terms.asSlice()[selected], -1.0, &mut budget)
+    phase = move next
+    selected = selected + 1
+  }
+  if selected == count {
+    fail RenderError.InvalidGeometry
+  }
+  let remaining = run limits.linear(&terms.asSlice()[selected], &phase, -1.0, &mut budget)
+  let mut value = run limits.limit(&remaining)
+  let guard = run terminal(length)
+  let startsInGap = selected % 2 == 1
+  let usedOffset = if startsInGap {
+    1.0
+  } else {
+    0.0
+  }
+  if startsInGap {
+    run out.append(0.0)
+  }
+  let mut ended = !f64.isFinite(value)
+  if ended {
+    value = guard
+  }
+  run out.append(value + usedOffset)
+  i = 1
+  while !ended && i <= count {
+    value = run limits.limit(&terms.asSlice()[(selected + i) % count])
+    ended = !f64.isFinite(value)
+    run out.append(
+      if ended {
+        guard
+      } else {
+        value
+      },
+    )
+    i = i + 1
+  }
+  if !ended {
+    fail RenderError.InvalidGeometry
+  }
+  if out.length() % 2 == 1 {
+    run out.append(guard)
+  }
+  return Dashes { values: move out, offset: usedOffset }
+}
+
+pub effect fn resolve(
+  store: &Store<'_>,
+  expressions: &[ExprId],
+  offset: ExprId,
+  basis: f64,
+  author: f64,
+  length: f64,
+) -> Dashes
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if !f64.isFinite(author) || author < 0.0 || !f64.isFinite(length) || length < 0.0
+    || !f64.isFinite(basis)
+    || basis < 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+  if expressions.length == 0 {
+    return Dashes { values: List<f64>.make(), offset: 0.0 }
+  }
+  if expressions.length > usize.MAX / 2 {
+    fail RenderError.TooLarge
+  }
+  let count = if expressions.length % 2 == 0 {
+    expressions.length
+  } else {
+    expressions.length * 2
+  }
+  if author == 0.0 {
+    return run zeroAuthor(store, expressions, offset, basis, length, count)
+  }
+  let scale = length / author
+  if !f64.isFinite(scale) {
+    fail RenderError.InvalidGeometry
+  }
+  let mut values = run List<f64>.makeWithCapacity(count)
+  let mut nonzero = false
+  let mut i: usize = 0
+  while i < count {
+    let value = f64.max(
+      0.0,
+      bounded(distance(store, expressions[i % expressions.length], basis, scale)),
+    )
+    if value > 0.0 {
+      nonzero = true
+    }
+    run values.append(value)
+    i = i + 1
+  }
+  if !nonzero {
+    values.clear()
+  }
+  return Dashes { values: move values, offset: bounded(distance(store, offset, basis, scale)) }
+}

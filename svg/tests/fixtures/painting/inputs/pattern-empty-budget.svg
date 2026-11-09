@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute; https://www.w3.org/TR/css-values-4/#calc-type-checking -->
+<defs><pattern id="p" patternUnits="userSpaceOnUse" width="1000000" height="1000000"><g/></pattern></defs><rect width="32" height="32" fill="url(#p) red"/></svg>

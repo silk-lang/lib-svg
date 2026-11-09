@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><defs><rect id="shape" width="2" height="3"/></defs><clipPath id="c"><use href="#shape" x="3" y="2"/></clipPath><rect width="8" height="8" clip-path="url(#c)"/></svg>

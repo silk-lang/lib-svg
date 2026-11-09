@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="32">
+<path d="M4 24 V4 H24 V12 H12 V24 Z" fill="#802040"/>
+<path d="M36 24 V8 L40 4 H56 V12 H44 V24 Z" fill="#208040"/>
+<path d="M68 24 V8 A4 4 0 0 1 72 4 H88 V12 H76 V24 Z" fill="#204080"/>
+</svg>

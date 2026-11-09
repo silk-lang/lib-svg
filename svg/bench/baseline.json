@@ -1,0 +1,4940 @@
+{
+  "callgrind_scope": "Full separate process invocation, including startup, file I/O, setup, warmup, checksum and untimed parse-result rasterization; Ir is NOT a stage-only counter. Wall-time samples above run without Valgrind.",
+  "comparison": {
+    "checksum_equal": {
+      "iconset/end-to-end": false,
+      "iconset/parse": false,
+      "iconset/render": false,
+      "instances/end-to-end": true,
+      "instances/parse": true,
+      "instances/render": true,
+      "largemap/end-to-end": false,
+      "largemap/parse": false,
+      "largemap/render": false,
+      "mixedcurves/end-to-end": false,
+      "mixedcurves/parse": false,
+      "mixedcurves/render": false,
+      "paintservers/end-to-end": false,
+      "paintservers/parse": false,
+      "paintservers/render": false,
+      "stylesheets/end-to-end": true,
+      "stylesheets/parse": true,
+      "stylesheets/render": true,
+      "tiger/end-to-end": false,
+      "tiger/parse": false,
+      "tiger/render": false
+    },
+    "checksum_note": "FNV-1a over every premultiplied RGBA byte. Numerical rasterization differences are allowed; equality is not a pixel-conformance verdict.",
+    "ratio_definition": "silk/rust native median stage time; >1 means silk slower",
+    "ratios": {
+      "iconset/end-to-end": 5.028641010548958,
+      "iconset/parse": 10.865499853781417,
+      "iconset/render": 2.0576731453814703,
+      "instances/end-to-end": 4.75215902653207,
+      "instances/parse": 13.835752739822603,
+      "instances/render": 0.3383550977173515,
+      "largemap/end-to-end": 2.8759228812706055,
+      "largemap/parse": 13.039338480465533,
+      "largemap/render": 1.372384973321741,
+      "mixedcurves/end-to-end": 5.142056648558938,
+      "mixedcurves/parse": 8.648773631014924,
+      "mixedcurves/render": 3.866673413856831,
+      "paintservers/end-to-end": 3.207776414961701,
+      "paintservers/parse": 7.378529401128551,
+      "paintservers/render": 2.7056366836308747,
+      "stylesheets/end-to-end": 0.6586005201319297,
+      "stylesheets/parse": 0.6525646106748475,
+      "stylesheets/render": 0.538077236905616,
+      "tiger/end-to-end": 2.428303243099961,
+      "tiger/parse": 7.801480996646849,
+      "tiger/render": 1.895027135594262
+    }
+  },
+  "config": {
+    "callgrind": true,
+    "iterations": 1,
+    "modes": [
+      "parse",
+      "render",
+      "end-to-end"
+    ],
+    "pixmap_policy": "fresh zeroed allocation per render, included in stage time",
+    "sample_unit": "one complete workload pass; sum per-file native times / iterations",
+    "samples": 3,
+    "timer": "native monotonic wall clock; Python perf_counter_ns separately records process wall time",
+    "warmup": 0
+  },
+  "environment": {
+    "binaries": {
+      "rust": {
+        "path": "/home/juliaortiz.guest/svg-work/scripts/svg/rust-bench/target/release/svg-reference-bench",
+        "sha256": "237e99cb8594d14986e027c64314e562e48144ab58b2f42e4e3326954247ed09",
+        "version": "svg-reference-bench protocol 1; resvg/usvg 91455ee06d08ac2bfeab2b035ed2cfbfd0a68614; fresh pixmap per render"
+      },
+      "silk": {
+        "path": "/home/juliaortiz.guest/svg-phase5-dev29/build/llvm/aarch64-unknown-linux-gnu/release/svg_bench",
+        "sha256": "3b7d2b3cc29dec93b93d81c1458e349c7d5c315bfcae2b36daa8f8612732660b",
+        "version": "svg_bench protocol 1; parse=parse+record; fresh pixmap per render"
+      }
+    },
+    "build_environment": {
+      "SILK_CLANG": "/home/juliaortiz.guest/svg-tools/llvm-22.1.8/bin/clang"
+    },
+    "cpu": "aarch64",
+    "logical_cpus": 4,
+    "machine": "aarch64",
+    "platform": "Linux-6.8.0-142-generic-aarch64-with-glibc2.39",
+    "tool_versions": {
+      "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+      "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)\nTarget: aarch64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/juliaortiz.guest/svg-tools/llvm-22.1.8/bin",
+      "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+      "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2",
+      "silk": "silk v0.1.0-dev.29+94cf9559bf47",
+      "valgrind": "valgrind-3.22.0"
+    }
+  },
+  "measured_at_utc": "2026-10-29T21:05:35.606576+00:00",
+  "protocol": 1,
+  "reference_pin": "91455ee06d08ac2bfeab2b035ed2cfbfd0a68614",
+  "results": {
+    "rust": {
+      "iconset/end-to-end": {
+        "callgrind_process_Ir": 114013336,
+        "median_ns": 6962394.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "7010441481690326263",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1418489769235456704",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "10900528647032357487",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "7391006680968922028",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "17239635213030477736",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "1792684822325498034",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "7856975714107165424",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "2950957307192281683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "5780811228403174922",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "4421653842695923946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8807054630720400951",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "6937092012532850070",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "2591904589235934145",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "7777281328885077352",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "7334096004987963109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "12601053847442965540",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "2097557671155949547",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "2212403170410848054",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "1866771350599500098",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "1150391993106158447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1168689717500939932",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "9326586552816838714",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "14260334366697225491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "12579427831319588480",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "1479754958774886898",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "18054941004805556254",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "1251727860123722213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "7841874424461489860",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "11196032157163944723",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "8265822640529649277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "18310144559758423176",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "13713423071517393431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "14222794877053935632",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "7478933520869498193",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "3802664705426655601",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "4192159472960813621",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "7521511379590924906",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "16209488024695187389",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "17453606315253788369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "4561241111959015469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "15984310559187589523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "8693179619917042462",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "7930713794234681997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "912052876850373756",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "10503015603744568113",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "8387509152924721659",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "15561090149219297651",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "3354190209757043905",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "17450559813610416754",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "4427873984400607956",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "14284664688669785378",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "1924185449513191625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "1724082376194406523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "135351117499033466",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "15673403237492965175",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "16583967727955616469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "14439835715729286208",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "3388748797796051066",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "4771908640165411211",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "14629600556279111282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "8072237314790325968",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "17021003625945654656",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "14658111027256022064",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9612706304744670833",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "8789367193040533130",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "13739536423378525185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "17650386229179481750",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "1736377782517522047",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10496645047093547526",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "10843377072163590379",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "2471600308453548198",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "10601603758532002849",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "10417809936032362683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "15617174424453743500",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "8336765745148077100",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "17687415018412417752",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "3386131245413265625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "11362561782973951380",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "9297111866684565748",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "9246604034045933979",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "7038358817753235699",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "4948613039341723022",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "11224111412326438006",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "13262014858835584305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14550071579381774491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "55436305144839456",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "11388322200674162603",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "11361107642370547891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "12899202210477452891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8997885097656057265",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "11894578674987451046",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "6362161934435378548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "1917023603041789282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "11534622640753557861",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "13131015434160443392",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "10984766558237663045",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "15258990502566754359",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "17698908991925525826",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "13138134437708854837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "1894862770312985707",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "13126945194661576615",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15796152080655742997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "10576693222044682477",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "7513107016760310383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "3030337745978552564",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "16565114170537308097",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "838052388322642927",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "5327325623858029011",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "17069213293556191102",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "6469611138573927738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "16437101985596566367",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "15632632495365499831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "14449873924777204950",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "5111367048915056345",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "17081748944831541151",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "968337839194606277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "13793433362234634671",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "10722640175164631425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "9367701687738263305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11812140518845425041",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "692820288076624315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "17255728418991102810",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "13565873791440750670",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "13490146520991924774",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "5838497448943625465",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "1129349287940189122",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "9779829690298793782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "6111692644666215564",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 86438546,
+        "process_wall_samples_ns": [
+          86438546,
+          92061228,
+          79940184
+        ],
+        "samples_ns": [
+          6962394.0,
+          7278510.0,
+          6806305.0
+        ]
+      },
+      "iconset/parse": {
+        "callgrind_process_Ir": 114010791,
+        "median_ns": 2338964.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "7010441481690326263",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1418489769235456704",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "10900528647032357487",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "7391006680968922028",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "17239635213030477736",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "1792684822325498034",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "7856975714107165424",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "2950957307192281683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "5780811228403174922",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "4421653842695923946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8807054630720400951",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "6937092012532850070",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "2591904589235934145",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "7777281328885077352",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "7334096004987963109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "12601053847442965540",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "2097557671155949547",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "2212403170410848054",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "1866771350599500098",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "1150391993106158447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1168689717500939932",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "9326586552816838714",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "14260334366697225491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "12579427831319588480",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "1479754958774886898",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "18054941004805556254",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "1251727860123722213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "7841874424461489860",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "11196032157163944723",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "8265822640529649277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "18310144559758423176",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "13713423071517393431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "14222794877053935632",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "7478933520869498193",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "3802664705426655601",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "4192159472960813621",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "7521511379590924906",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "16209488024695187389",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "17453606315253788369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "4561241111959015469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "15984310559187589523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "8693179619917042462",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "7930713794234681997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "912052876850373756",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "10503015603744568113",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "8387509152924721659",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "15561090149219297651",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "3354190209757043905",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "17450559813610416754",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "4427873984400607956",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "14284664688669785378",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "1924185449513191625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "1724082376194406523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "135351117499033466",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "15673403237492965175",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "16583967727955616469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "14439835715729286208",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "3388748797796051066",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "4771908640165411211",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "14629600556279111282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "8072237314790325968",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "17021003625945654656",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "14658111027256022064",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9612706304744670833",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "8789367193040533130",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "13739536423378525185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "17650386229179481750",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "1736377782517522047",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10496645047093547526",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "10843377072163590379",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "2471600308453548198",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "10601603758532002849",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "10417809936032362683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "15617174424453743500",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "8336765745148077100",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "17687415018412417752",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "3386131245413265625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "11362561782973951380",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "9297111866684565748",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "9246604034045933979",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "7038358817753235699",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "4948613039341723022",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "11224111412326438006",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "13262014858835584305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14550071579381774491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "55436305144839456",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "11388322200674162603",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "11361107642370547891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "12899202210477452891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8997885097656057265",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "11894578674987451046",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "6362161934435378548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "1917023603041789282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "11534622640753557861",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "13131015434160443392",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "10984766558237663045",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "15258990502566754359",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "17698908991925525826",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "13138134437708854837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "1894862770312985707",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "13126945194661576615",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15796152080655742997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "10576693222044682477",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "7513107016760310383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "3030337745978552564",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "16565114170537308097",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "838052388322642927",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "5327325623858029011",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "17069213293556191102",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "6469611138573927738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "16437101985596566367",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "15632632495365499831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "14449873924777204950",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "5111367048915056345",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "17081748944831541151",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "968337839194606277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "13793433362234634671",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "10722640175164631425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "9367701687738263305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11812140518845425041",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "692820288076624315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "17255728418991102810",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "13565873791440750670",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "13490146520991924774",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "5838497448943625465",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "1129349287940189122",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "9779829690298793782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "6111692644666215564",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 81551704,
+        "process_wall_samples_ns": [
+          79246588,
+          81551704,
+          92561904
+        ],
+        "samples_ns": [
+          2237759.0,
+          2338964.0,
+          2392924.0
+        ]
+      },
+      "iconset/render": {
+        "callgrind_process_Ir": 94238305,
+        "median_ns": 4585323.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "7010441481690326263",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1418489769235456704",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "10900528647032357487",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "7391006680968922028",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "17239635213030477736",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "1792684822325498034",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "7856975714107165424",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "2950957307192281683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "5780811228403174922",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "4421653842695923946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8807054630720400951",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "6937092012532850070",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "2591904589235934145",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "7777281328885077352",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "7334096004987963109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "12601053847442965540",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "2097557671155949547",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "2212403170410848054",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "1866771350599500098",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "1150391993106158447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1168689717500939932",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "9326586552816838714",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "14260334366697225491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "12579427831319588480",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "1479754958774886898",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "18054941004805556254",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "1251727860123722213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "7841874424461489860",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "11196032157163944723",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "8265822640529649277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "18310144559758423176",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "13713423071517393431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "14222794877053935632",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "7478933520869498193",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "3802664705426655601",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "4192159472960813621",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "7521511379590924906",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "16209488024695187389",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "17453606315253788369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "4561241111959015469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "15984310559187589523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "8693179619917042462",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "7930713794234681997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "912052876850373756",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "10503015603744568113",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "8387509152924721659",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "15561090149219297651",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "3354190209757043905",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "17450559813610416754",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "4427873984400607956",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "14284664688669785378",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "1924185449513191625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "1724082376194406523",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "135351117499033466",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "15673403237492965175",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "16583967727955616469",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "14439835715729286208",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "3388748797796051066",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "4771908640165411211",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "14629600556279111282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "8072237314790325968",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "17021003625945654656",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "14658111027256022064",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9612706304744670833",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "8789367193040533130",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "13739536423378525185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "17650386229179481750",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "1736377782517522047",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10496645047093547526",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "10843377072163590379",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "2471600308453548198",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "10601603758532002849",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "10417809936032362683",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "15617174424453743500",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "8336765745148077100",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "17687415018412417752",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "3386131245413265625",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "11362561782973951380",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "9297111866684565748",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "9246604034045933979",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "7038358817753235699",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "4948613039341723022",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "11224111412326438006",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "13262014858835584305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14550071579381774491",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "55436305144839456",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "11388322200674162603",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "11361107642370547891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "12899202210477452891",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8997885097656057265",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "11894578674987451046",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "6362161934435378548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "1917023603041789282",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "11534622640753557861",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "13131015434160443392",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "10984766558237663045",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "15258990502566754359",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "17698908991925525826",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "13138134437708854837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "1894862770312985707",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "13126945194661576615",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15796152080655742997",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "10576693222044682477",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "7513107016760310383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "3030337745978552564",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "16565114170537308097",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "838052388322642927",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "5327325623858029011",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "17069213293556191102",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "6469611138573927738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "16437101985596566367",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "15632632495365499831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "14449873924777204950",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "5111367048915056345",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "17081748944831541151",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "968337839194606277",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "13793433362234634671",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "10722640175164631425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "9367701687738263305",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11812140518845425041",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "692820288076624315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "17255728418991102810",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "13565873791440750670",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "13490146520991924774",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "5838497448943625465",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "1129349287940189122",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "9779829690298793782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "6111692644666215564",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 82629411,
+        "process_wall_samples_ns": [
+          82629411,
+          125420123,
+          75802362
+        ],
+        "samples_ns": [
+          4585323.0,
+          5904514.0,
+          4338829.0
+        ]
+      },
+      "instances/end-to-end": {
+        "callgrind_process_Ir": 282519037,
+        "median_ns": 16336645.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 25139339,
+        "process_wall_samples_ns": [
+          25139339,
+          26492372,
+          25079840
+        ],
+        "samples_ns": [
+          16209729.0,
+          17366097.0,
+          16336645.0
+        ]
+      },
+      "instances/parse": {
+        "callgrind_process_Ir": 282518996,
+        "median_ns": 5475172.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 25227084,
+        "process_wall_samples_ns": [
+          25795205,
+          24985044,
+          25227084
+        ],
+        "samples_ns": [
+          5911461.0,
+          5273090.0,
+          5475172.0
+        ]
+      },
+      "instances/render": {
+        "callgrind_process_Ir": 214447418,
+        "median_ns": 10050518.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 22569479,
+        "process_wall_samples_ns": [
+          22569479,
+          23853137,
+          18232340
+        ],
+        "samples_ns": [
+          10574182.0,
+          9976602.0,
+          10050518.0
+        ]
+      },
+      "largemap/end-to-end": {
+        "callgrind_process_Ir": 323702828,
+        "median_ns": 20727883.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "14598352634358608230",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 31296386,
+        "process_wall_samples_ns": [
+          30527517,
+          31296386,
+          32358877
+        ],
+        "samples_ns": [
+          19879056.0,
+          20727883.0,
+          21955707.0
+        ]
+      },
+      "largemap/parse": {
+        "callgrind_process_Ir": 323702800,
+        "median_ns": 2715687.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "14598352634358608230",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 30125721,
+        "process_wall_samples_ns": [
+          31370711,
+          28711690,
+          30125721
+        ],
+        "samples_ns": [
+          2783811.0,
+          2712770.0,
+          2715687.0
+        ]
+      },
+      "largemap/render": {
+        "callgrind_process_Ir": 284796745,
+        "median_ns": 16929703.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "14598352634358608230",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 26898625,
+        "process_wall_samples_ns": [
+          26898625,
+          26528503,
+          28323780
+        ],
+        "samples_ns": [
+          16929703.0,
+          15934377.0,
+          17120534.0
+        ]
+      },
+      "mixedcurves/end-to-end": {
+        "callgrind_process_Ir": 103617122,
+        "median_ns": 5948289.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "5322352365615507831",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 9848886,
+        "process_wall_samples_ns": [
+          11296916,
+          9605345,
+          9848886
+        ],
+        "samples_ns": [
+          6808824.0,
+          5933914.0,
+          5948289.0
+        ]
+      },
+      "mixedcurves/parse": {
+        "callgrind_process_Ir": 103617109,
+        "median_ns": 1352407.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "5322352365615507831",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 10083591,
+        "process_wall_samples_ns": [
+          10083591,
+          9926926,
+          12152117
+        ],
+        "samples_ns": [
+          1339115.0,
+          1352407.0,
+          1781112.0
+        ]
+      },
+      "mixedcurves/render": {
+        "callgrind_process_Ir": 86421637,
+        "median_ns": 4742715.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "5322352365615507831",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 8651103,
+        "process_wall_samples_ns": [
+          9380430,
+          8640727,
+          8651103
+        ],
+        "samples_ns": [
+          5048588.0,
+          4742715.0,
+          4596924.0
+        ]
+      },
+      "paintservers/end-to-end": {
+        "callgrind_process_Ir": 116757246,
+        "median_ns": 7724202.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "16794826927404740785",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 11236347,
+        "process_wall_samples_ns": [
+          10855182,
+          11236347,
+          11380429
+        ],
+        "samples_ns": [
+          7471121.0,
+          7760702.0,
+          7724202.0
+        ]
+      },
+      "paintservers/parse": {
+        "callgrind_process_Ir": 116757120,
+        "median_ns": 746621.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "16794826927404740785",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 11441094,
+        "process_wall_samples_ns": [
+          11441094,
+          11517136,
+          11381803
+        ],
+        "samples_ns": [
+          721120.0,
+          746621.0,
+          794787.0
+        ]
+      },
+      "paintservers/render": {
+        "callgrind_process_Ir": 107507332,
+        "median_ns": 7112622.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "16794826927404740785",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 10466435,
+        "process_wall_samples_ns": [
+          9847271,
+          10466435,
+          10838140
+        ],
+        "samples_ns": [
+          6704833.0,
+          7112622.0,
+          7223204.0
+        ]
+      },
+      "stylesheets/end-to-end": {
+        "callgrind_process_Ir": 2383132412,
+        "median_ns": 77180803.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 154394605,
+        "process_wall_samples_ns": [
+          153473902,
+          155662429,
+          154394605
+        ],
+        "samples_ns": [
+          76397182.0,
+          78243503.0,
+          77180803.0
+        ]
+      },
+      "stylesheets/parse": {
+        "callgrind_process_Ir": 2383132399,
+        "median_ns": 74408370.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 154987778,
+        "process_wall_samples_ns": [
+          154987778,
+          154350949,
+          156472809
+        ],
+        "samples_ns": [
+          73895541.0,
+          74408370.0,
+          76931644.0
+        ]
+      },
+      "stylesheets/render": {
+        "callgrind_process_Ir": 1218636940,
+        "median_ns": 2844521.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 80475142,
+        "process_wall_samples_ns": [
+          81160471,
+          80475142,
+          79069444
+        ],
+        "samples_ns": [
+          2797647.0,
+          3409601.0,
+          2844521.0
+        ]
+      },
+      "tiger/end-to-end": {
+        "callgrind_process_Ir": 143567669,
+        "median_ns": 11653449.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "778800141856034146",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 18720809,
+        "process_wall_samples_ns": [
+          18370813,
+          25767295,
+          18720809
+        ],
+        "samples_ns": [
+          11653449.0,
+          16138788.0,
+          11565075.0
+        ]
+      },
+      "tiger/parse": {
+        "callgrind_process_Ir": 143564123,
+        "median_ns": 1155033.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "778800141856034146",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 22533068,
+        "process_wall_samples_ns": [
+          22533068,
+          20866456,
+          24403136
+        ],
+        "samples_ns": [
+          1113158.0,
+          1155033.0,
+          2063400.0
+        ]
+      },
+      "tiger/render": {
+        "callgrind_process_Ir": 130798039,
+        "median_ns": 11372701.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "778800141856034146",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 18330770,
+        "process_wall_samples_ns": [
+          21129081,
+          18034606,
+          18330770
+        ],
+        "samples_ns": [
+          13292185.0,
+          11372701.0,
+          11247619.0
+        ]
+      }
+    },
+    "silk": {
+      "iconset/end-to-end": {
+        "callgrind_process_Ir": 650044619,
+        "median_ns": 35011380.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "13973340914304042946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1328221625182242676",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "17368737106350186837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "2539442438781710998",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "7917550719805567945",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "10490423779911852728",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "13747555368227631786",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "3959526426144146771",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "1708287716224575548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "1924909706418816706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8517533963406155978",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "15208715619170532402",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "18359241886301814213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "13200609903931000591",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "15396376740071624088",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "15090912237054920649",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "8190795726211068413",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "11796134574249633077",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "3736968835283429781",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "17813286056336569405",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1879746844641739706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "1161640827947130538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "3845977736902303769",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "7290856212575005152",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "5546304996692680431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "8538514990058261315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "5100658667484464782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "1566795951729794538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "14752643736327551600",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "4927270265779782909",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "9764290330500717983",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "15070349831733709604",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "13436256146513471943",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "12932416776389802231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "7755857143614420446",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "11249469172376746620",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "4285045163930614454",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "13064508941764411799",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "12864366404643259859",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "11969484770169061743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "17460375367093976741",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "1025286210084811587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "6860431653169496038",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "10673767596377070626",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "8063548437547949688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "16910326476621354104",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "3744681068347782199",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "17642176712469208330",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "947043587335596463",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "17453866603479422995",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "12712380112584473743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "14198897194145201383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "8827872673072113085",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "5049146480391837807",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "3407383393997178096",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "9567175356598324784",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "15313715338553707502",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "1469173846197176792",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "18315419641847226142",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "3406842206574698897",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "3377220652167790288",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "10167986333966628934",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "9748795581689756496",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9740165104098643782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "1923960159580780095",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "2551217825711215808",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "8234280092747510563",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "16205995052982649132",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10689009369297543383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "9159649896939669941",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "10000942490024342205",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "5870856904384100895",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "2983639121835143231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "7815978188443071730",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "15858489206705554307",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "2860120300183279639",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "17195489124555158996",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "10376628092043340000",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "5866654338644963447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "17032599185136556716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "12214500278548729109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "1395961718218207555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "15206358557868499042",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "9032446319613446657",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14316768806122765685",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "6830518245233577555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "4586707412888380276",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "1856850601045859535",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "4248756594701107513",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8663473214747595483",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "3952840389500446596",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "14201989195205199155",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "6793862551867554688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "13659448163286860322",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "16046687398955040073",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "18167053694927290236",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "7403593225335169961",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "6642137868112287579",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "560655581965617587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "17606537162033033421",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "9597614556789408892",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15374007499741024576",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "13412473980200579629",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "5108057623062450185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "12007226420087295901",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "4868867135464516977",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "9211034688488035319",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "13000978127439825369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "9715889535539278637",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "9167935372838593552",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "2964825803359733250",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "11981321531283635374",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "3777128756154727313",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "6443347390927216242",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "9264983392901480900",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "9616173445454969757",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "12349482336011557825",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "4095039347035084738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "12201691106809526716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11377555324892986497",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "18393516985331882969",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "6427602937955224425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "3363760308452816984",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "2919633687795465831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "1309239982119738273",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "12759315897916759647",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "13512963429834459027",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "9458184855868978708",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 175492672,
+        "process_wall_samples_ns": [
+          173594848,
+          260300364,
+          175492672
+        ],
+        "samples_ns": [
+          34267628.0,
+          50057978.0,
+          35011380.0
+        ]
+      },
+      "iconset/parse": {
+        "callgrind_process_Ir": 650035099,
+        "median_ns": 25414013.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "13973340914304042946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1328221625182242676",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "17368737106350186837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "2539442438781710998",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "7917550719805567945",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "10490423779911852728",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "13747555368227631786",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "3959526426144146771",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "1708287716224575548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "1924909706418816706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8517533963406155978",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "15208715619170532402",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "18359241886301814213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "13200609903931000591",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "15396376740071624088",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "15090912237054920649",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "8190795726211068413",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "11796134574249633077",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "3736968835283429781",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "17813286056336569405",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1879746844641739706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "1161640827947130538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "3845977736902303769",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "7290856212575005152",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "5546304996692680431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "8538514990058261315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "5100658667484464782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "1566795951729794538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "14752643736327551600",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "4927270265779782909",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "9764290330500717983",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "15070349831733709604",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "13436256146513471943",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "12932416776389802231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "7755857143614420446",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "11249469172376746620",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "4285045163930614454",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "13064508941764411799",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "12864366404643259859",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "11969484770169061743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "17460375367093976741",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "1025286210084811587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "6860431653169496038",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "10673767596377070626",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "8063548437547949688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "16910326476621354104",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "3744681068347782199",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "17642176712469208330",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "947043587335596463",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "17453866603479422995",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "12712380112584473743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "14198897194145201383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "8827872673072113085",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "5049146480391837807",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "3407383393997178096",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "9567175356598324784",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "15313715338553707502",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "1469173846197176792",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "18315419641847226142",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "3406842206574698897",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "3377220652167790288",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "10167986333966628934",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "9748795581689756496",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9740165104098643782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "1923960159580780095",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "2551217825711215808",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "8234280092747510563",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "16205995052982649132",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10689009369297543383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "9159649896939669941",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "10000942490024342205",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "5870856904384100895",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "2983639121835143231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "7815978188443071730",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "15858489206705554307",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "2860120300183279639",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "17195489124555158996",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "10376628092043340000",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "5866654338644963447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "17032599185136556716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "12214500278548729109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "1395961718218207555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "15206358557868499042",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "9032446319613446657",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14316768806122765685",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "6830518245233577555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "4586707412888380276",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "1856850601045859535",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "4248756594701107513",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8663473214747595483",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "3952840389500446596",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "14201989195205199155",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "6793862551867554688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "13659448163286860322",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "16046687398955040073",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "18167053694927290236",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "7403593225335169961",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "6642137868112287579",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "560655581965617587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "17606537162033033421",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "9597614556789408892",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15374007499741024576",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "13412473980200579629",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "5108057623062450185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "12007226420087295901",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "4868867135464516977",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "9211034688488035319",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "13000978127439825369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "9715889535539278637",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "9167935372838593552",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "2964825803359733250",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "11981321531283635374",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "3777128756154727313",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "6443347390927216242",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "9264983392901480900",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "9616173445454969757",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "12349482336011557825",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "4095039347035084738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "12201691106809526716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11377555324892986497",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "18393516985331882969",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "6427602937955224425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "3363760308452816984",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "2919633687795465831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "1309239982119738273",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "12759315897916759647",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "13512963429834459027",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "9458184855868978708",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 173566658,
+        "process_wall_samples_ns": [
+          173078553,
+          173566658,
+          177045407
+        ],
+        "samples_ns": [
+          25414013.0,
+          25267674.0,
+          26230462.0
+        ]
+      },
+      "iconset/render": {
+        "callgrind_process_Ir": 388381059,
+        "median_ns": 9435096.0,
+        "outputs": {
+          "icon-000.svg": {
+            "checksum": "13973340914304042946",
+            "height": 32,
+            "width": 32
+          },
+          "icon-001.svg": {
+            "checksum": "1328221625182242676",
+            "height": 32,
+            "width": 32
+          },
+          "icon-002.svg": {
+            "checksum": "17368737106350186837",
+            "height": 32,
+            "width": 32
+          },
+          "icon-003.svg": {
+            "checksum": "2539442438781710998",
+            "height": 32,
+            "width": 32
+          },
+          "icon-004.svg": {
+            "checksum": "7917550719805567945",
+            "height": 32,
+            "width": 32
+          },
+          "icon-005.svg": {
+            "checksum": "10490423779911852728",
+            "height": 32,
+            "width": 32
+          },
+          "icon-006.svg": {
+            "checksum": "13747555368227631786",
+            "height": 32,
+            "width": 32
+          },
+          "icon-007.svg": {
+            "checksum": "3959526426144146771",
+            "height": 32,
+            "width": 32
+          },
+          "icon-008.svg": {
+            "checksum": "1708287716224575548",
+            "height": 32,
+            "width": 32
+          },
+          "icon-009.svg": {
+            "checksum": "1924909706418816706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-010.svg": {
+            "checksum": "8517533963406155978",
+            "height": 32,
+            "width": 32
+          },
+          "icon-011.svg": {
+            "checksum": "15208715619170532402",
+            "height": 32,
+            "width": 32
+          },
+          "icon-012.svg": {
+            "checksum": "18359241886301814213",
+            "height": 32,
+            "width": 32
+          },
+          "icon-013.svg": {
+            "checksum": "13200609903931000591",
+            "height": 32,
+            "width": 32
+          },
+          "icon-014.svg": {
+            "checksum": "15396376740071624088",
+            "height": 32,
+            "width": 32
+          },
+          "icon-015.svg": {
+            "checksum": "15090912237054920649",
+            "height": 32,
+            "width": 32
+          },
+          "icon-016.svg": {
+            "checksum": "8190795726211068413",
+            "height": 32,
+            "width": 32
+          },
+          "icon-017.svg": {
+            "checksum": "11796134574249633077",
+            "height": 32,
+            "width": 32
+          },
+          "icon-018.svg": {
+            "checksum": "3736968835283429781",
+            "height": 32,
+            "width": 32
+          },
+          "icon-019.svg": {
+            "checksum": "17813286056336569405",
+            "height": 32,
+            "width": 32
+          },
+          "icon-020.svg": {
+            "checksum": "1879746844641739706",
+            "height": 32,
+            "width": 32
+          },
+          "icon-021.svg": {
+            "checksum": "1161640827947130538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-022.svg": {
+            "checksum": "3845977736902303769",
+            "height": 32,
+            "width": 32
+          },
+          "icon-023.svg": {
+            "checksum": "7290856212575005152",
+            "height": 32,
+            "width": 32
+          },
+          "icon-024.svg": {
+            "checksum": "5546304996692680431",
+            "height": 32,
+            "width": 32
+          },
+          "icon-025.svg": {
+            "checksum": "8538514990058261315",
+            "height": 32,
+            "width": 32
+          },
+          "icon-026.svg": {
+            "checksum": "5100658667484464782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-027.svg": {
+            "checksum": "1566795951729794538",
+            "height": 32,
+            "width": 32
+          },
+          "icon-028.svg": {
+            "checksum": "14752643736327551600",
+            "height": 32,
+            "width": 32
+          },
+          "icon-029.svg": {
+            "checksum": "4927270265779782909",
+            "height": 32,
+            "width": 32
+          },
+          "icon-030.svg": {
+            "checksum": "9764290330500717983",
+            "height": 32,
+            "width": 32
+          },
+          "icon-031.svg": {
+            "checksum": "15070349831733709604",
+            "height": 32,
+            "width": 32
+          },
+          "icon-032.svg": {
+            "checksum": "13436256146513471943",
+            "height": 32,
+            "width": 32
+          },
+          "icon-033.svg": {
+            "checksum": "12932416776389802231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-034.svg": {
+            "checksum": "7755857143614420446",
+            "height": 32,
+            "width": 32
+          },
+          "icon-035.svg": {
+            "checksum": "11249469172376746620",
+            "height": 32,
+            "width": 32
+          },
+          "icon-036.svg": {
+            "checksum": "4285045163930614454",
+            "height": 32,
+            "width": 32
+          },
+          "icon-037.svg": {
+            "checksum": "13064508941764411799",
+            "height": 32,
+            "width": 32
+          },
+          "icon-038.svg": {
+            "checksum": "12864366404643259859",
+            "height": 32,
+            "width": 32
+          },
+          "icon-039.svg": {
+            "checksum": "11969484770169061743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-040.svg": {
+            "checksum": "17460375367093976741",
+            "height": 32,
+            "width": 32
+          },
+          "icon-041.svg": {
+            "checksum": "1025286210084811587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-042.svg": {
+            "checksum": "6860431653169496038",
+            "height": 32,
+            "width": 32
+          },
+          "icon-043.svg": {
+            "checksum": "10673767596377070626",
+            "height": 32,
+            "width": 32
+          },
+          "icon-044.svg": {
+            "checksum": "8063548437547949688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-045.svg": {
+            "checksum": "16910326476621354104",
+            "height": 32,
+            "width": 32
+          },
+          "icon-046.svg": {
+            "checksum": "3744681068347782199",
+            "height": 32,
+            "width": 32
+          },
+          "icon-047.svg": {
+            "checksum": "17642176712469208330",
+            "height": 32,
+            "width": 32
+          },
+          "icon-048.svg": {
+            "checksum": "947043587335596463",
+            "height": 32,
+            "width": 32
+          },
+          "icon-049.svg": {
+            "checksum": "17453866603479422995",
+            "height": 32,
+            "width": 32
+          },
+          "icon-050.svg": {
+            "checksum": "12712380112584473743",
+            "height": 32,
+            "width": 32
+          },
+          "icon-051.svg": {
+            "checksum": "14198897194145201383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-052.svg": {
+            "checksum": "8827872673072113085",
+            "height": 32,
+            "width": 32
+          },
+          "icon-053.svg": {
+            "checksum": "5049146480391837807",
+            "height": 32,
+            "width": 32
+          },
+          "icon-054.svg": {
+            "checksum": "3407383393997178096",
+            "height": 32,
+            "width": 32
+          },
+          "icon-055.svg": {
+            "checksum": "9567175356598324784",
+            "height": 32,
+            "width": 32
+          },
+          "icon-056.svg": {
+            "checksum": "15313715338553707502",
+            "height": 32,
+            "width": 32
+          },
+          "icon-057.svg": {
+            "checksum": "1469173846197176792",
+            "height": 32,
+            "width": 32
+          },
+          "icon-058.svg": {
+            "checksum": "18315419641847226142",
+            "height": 32,
+            "width": 32
+          },
+          "icon-059.svg": {
+            "checksum": "3406842206574698897",
+            "height": 32,
+            "width": 32
+          },
+          "icon-060.svg": {
+            "checksum": "3377220652167790288",
+            "height": 32,
+            "width": 32
+          },
+          "icon-061.svg": {
+            "checksum": "10167986333966628934",
+            "height": 32,
+            "width": 32
+          },
+          "icon-062.svg": {
+            "checksum": "9748795581689756496",
+            "height": 32,
+            "width": 32
+          },
+          "icon-063.svg": {
+            "checksum": "9740165104098643782",
+            "height": 32,
+            "width": 32
+          },
+          "icon-064.svg": {
+            "checksum": "1923960159580780095",
+            "height": 32,
+            "width": 32
+          },
+          "icon-065.svg": {
+            "checksum": "2551217825711215808",
+            "height": 32,
+            "width": 32
+          },
+          "icon-066.svg": {
+            "checksum": "8234280092747510563",
+            "height": 32,
+            "width": 32
+          },
+          "icon-067.svg": {
+            "checksum": "16205995052982649132",
+            "height": 32,
+            "width": 32
+          },
+          "icon-068.svg": {
+            "checksum": "10689009369297543383",
+            "height": 32,
+            "width": 32
+          },
+          "icon-069.svg": {
+            "checksum": "9159649896939669941",
+            "height": 32,
+            "width": 32
+          },
+          "icon-070.svg": {
+            "checksum": "10000942490024342205",
+            "height": 32,
+            "width": 32
+          },
+          "icon-071.svg": {
+            "checksum": "5870856904384100895",
+            "height": 32,
+            "width": 32
+          },
+          "icon-072.svg": {
+            "checksum": "2983639121835143231",
+            "height": 32,
+            "width": 32
+          },
+          "icon-073.svg": {
+            "checksum": "7815978188443071730",
+            "height": 32,
+            "width": 32
+          },
+          "icon-074.svg": {
+            "checksum": "15858489206705554307",
+            "height": 32,
+            "width": 32
+          },
+          "icon-075.svg": {
+            "checksum": "2860120300183279639",
+            "height": 32,
+            "width": 32
+          },
+          "icon-076.svg": {
+            "checksum": "17195489124555158996",
+            "height": 32,
+            "width": 32
+          },
+          "icon-077.svg": {
+            "checksum": "10376628092043340000",
+            "height": 32,
+            "width": 32
+          },
+          "icon-078.svg": {
+            "checksum": "5866654338644963447",
+            "height": 32,
+            "width": 32
+          },
+          "icon-079.svg": {
+            "checksum": "17032599185136556716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-080.svg": {
+            "checksum": "12214500278548729109",
+            "height": 32,
+            "width": 32
+          },
+          "icon-081.svg": {
+            "checksum": "1395961718218207555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-082.svg": {
+            "checksum": "15206358557868499042",
+            "height": 32,
+            "width": 32
+          },
+          "icon-083.svg": {
+            "checksum": "9032446319613446657",
+            "height": 32,
+            "width": 32
+          },
+          "icon-084.svg": {
+            "checksum": "14316768806122765685",
+            "height": 32,
+            "width": 32
+          },
+          "icon-085.svg": {
+            "checksum": "6830518245233577555",
+            "height": 32,
+            "width": 32
+          },
+          "icon-086.svg": {
+            "checksum": "4586707412888380276",
+            "height": 32,
+            "width": 32
+          },
+          "icon-087.svg": {
+            "checksum": "1856850601045859535",
+            "height": 32,
+            "width": 32
+          },
+          "icon-088.svg": {
+            "checksum": "4248756594701107513",
+            "height": 32,
+            "width": 32
+          },
+          "icon-089.svg": {
+            "checksum": "8663473214747595483",
+            "height": 32,
+            "width": 32
+          },
+          "icon-090.svg": {
+            "checksum": "3952840389500446596",
+            "height": 32,
+            "width": 32
+          },
+          "icon-091.svg": {
+            "checksum": "14201989195205199155",
+            "height": 32,
+            "width": 32
+          },
+          "icon-092.svg": {
+            "checksum": "6793862551867554688",
+            "height": 32,
+            "width": 32
+          },
+          "icon-093.svg": {
+            "checksum": "13659448163286860322",
+            "height": 32,
+            "width": 32
+          },
+          "icon-094.svg": {
+            "checksum": "16046687398955040073",
+            "height": 32,
+            "width": 32
+          },
+          "icon-095.svg": {
+            "checksum": "18167053694927290236",
+            "height": 32,
+            "width": 32
+          },
+          "icon-096.svg": {
+            "checksum": "7403593225335169961",
+            "height": 32,
+            "width": 32
+          },
+          "icon-097.svg": {
+            "checksum": "6642137868112287579",
+            "height": 32,
+            "width": 32
+          },
+          "icon-098.svg": {
+            "checksum": "560655581965617587",
+            "height": 32,
+            "width": 32
+          },
+          "icon-099.svg": {
+            "checksum": "17606537162033033421",
+            "height": 32,
+            "width": 32
+          },
+          "icon-100.svg": {
+            "checksum": "9597614556789408892",
+            "height": 32,
+            "width": 32
+          },
+          "icon-101.svg": {
+            "checksum": "15374007499741024576",
+            "height": 32,
+            "width": 32
+          },
+          "icon-102.svg": {
+            "checksum": "13412473980200579629",
+            "height": 32,
+            "width": 32
+          },
+          "icon-103.svg": {
+            "checksum": "5108057623062450185",
+            "height": 32,
+            "width": 32
+          },
+          "icon-104.svg": {
+            "checksum": "12007226420087295901",
+            "height": 32,
+            "width": 32
+          },
+          "icon-105.svg": {
+            "checksum": "4868867135464516977",
+            "height": 32,
+            "width": 32
+          },
+          "icon-106.svg": {
+            "checksum": "9211034688488035319",
+            "height": 32,
+            "width": 32
+          },
+          "icon-107.svg": {
+            "checksum": "13000978127439825369",
+            "height": 32,
+            "width": 32
+          },
+          "icon-108.svg": {
+            "checksum": "9715889535539278637",
+            "height": 32,
+            "width": 32
+          },
+          "icon-109.svg": {
+            "checksum": "9167935372838593552",
+            "height": 32,
+            "width": 32
+          },
+          "icon-110.svg": {
+            "checksum": "2964825803359733250",
+            "height": 32,
+            "width": 32
+          },
+          "icon-111.svg": {
+            "checksum": "11981321531283635374",
+            "height": 32,
+            "width": 32
+          },
+          "icon-112.svg": {
+            "checksum": "3777128756154727313",
+            "height": 32,
+            "width": 32
+          },
+          "icon-113.svg": {
+            "checksum": "6443347390927216242",
+            "height": 32,
+            "width": 32
+          },
+          "icon-114.svg": {
+            "checksum": "9264983392901480900",
+            "height": 32,
+            "width": 32
+          },
+          "icon-115.svg": {
+            "checksum": "9616173445454969757",
+            "height": 32,
+            "width": 32
+          },
+          "icon-116.svg": {
+            "checksum": "12349482336011557825",
+            "height": 32,
+            "width": 32
+          },
+          "icon-117.svg": {
+            "checksum": "4095039347035084738",
+            "height": 32,
+            "width": 32
+          },
+          "icon-118.svg": {
+            "checksum": "12201691106809526716",
+            "height": 32,
+            "width": 32
+          },
+          "icon-119.svg": {
+            "checksum": "11377555324892986497",
+            "height": 32,
+            "width": 32
+          },
+          "icon-120.svg": {
+            "checksum": "18393516985331882969",
+            "height": 32,
+            "width": 32
+          },
+          "icon-121.svg": {
+            "checksum": "6427602937955224425",
+            "height": 32,
+            "width": 32
+          },
+          "icon-122.svg": {
+            "checksum": "3363760308452816984",
+            "height": 32,
+            "width": 32
+          },
+          "icon-123.svg": {
+            "checksum": "2919633687795465831",
+            "height": 32,
+            "width": 32
+          },
+          "icon-124.svg": {
+            "checksum": "1309239982119738273",
+            "height": 32,
+            "width": 32
+          },
+          "icon-125.svg": {
+            "checksum": "12759315897916759647",
+            "height": 32,
+            "width": 32
+          },
+          "icon-126.svg": {
+            "checksum": "13512963429834459027",
+            "height": 32,
+            "width": 32
+          },
+          "icon-127.svg": {
+            "checksum": "9458184855868978708",
+            "height": 32,
+            "width": 32
+          }
+        },
+        "process_wall_median_ns": 152764250,
+        "process_wall_samples_ns": [
+          152764250,
+          167301418,
+          143333367
+        ],
+        "samples_ns": [
+          9280600.0,
+          11585781.0,
+          9435096.0
+        ]
+      },
+      "instances/end-to-end": {
+        "callgrind_process_Ir": 1119082762,
+        "median_ns": 77634335.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 154157430,
+        "process_wall_samples_ns": [
+          150325660,
+          175275669,
+          154157430
+        ],
+        "samples_ns": [
+          77634335.0,
+          79498699.0,
+          74154734.0
+        ]
+      },
+      "instances/parse": {
+        "callgrind_process_Ir": 1119082715,
+        "median_ns": 75753126.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 161321563,
+        "process_wall_samples_ns": [
+          150243801,
+          161321563,
+          171925868
+        ],
+        "samples_ns": [
+          69336293.0,
+          78688857.0,
+          75753126.0
+        ]
+      },
+      "instances/render": {
+        "callgrind_process_Ir": 591311867,
+        "median_ns": 3400644.0,
+        "outputs": {
+          "instances.svg": {
+            "checksum": "4883979664568468261",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 99320065,
+        "process_wall_samples_ns": [
+          99320065,
+          120508594,
+          81257765
+        ],
+        "samples_ns": [
+          3437020.0,
+          3400644.0,
+          3178312.0
+        ]
+      },
+      "largemap/end-to-end": {
+        "callgrind_process_Ir": 997072430,
+        "median_ns": 59611793.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "2994233956011191820",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 107926882,
+        "process_wall_samples_ns": [
+          107926882,
+          105419319,
+          120162998
+        ],
+        "samples_ns": [
+          59611793.0,
+          56480943.0,
+          66217118.0
+        ]
+      },
+      "largemap/parse": {
+        "callgrind_process_Ir": 997072373,
+        "median_ns": 35410762.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "2994233956011191820",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 105748667,
+        "process_wall_samples_ns": [
+          103760557,
+          176091862,
+          105748667
+        ],
+        "samples_ns": [
+          35410762.0,
+          87162938.0,
+          33894108.0
+        ]
+      },
+      "largemap/render": {
+        "callgrind_process_Ir": 683235524,
+        "median_ns": 23234070.0,
+        "outputs": {
+          "largemap.svg": {
+            "checksum": "2994233956011191820",
+            "height": 1024,
+            "width": 1024
+          }
+        },
+        "process_wall_median_ns": 69907499,
+        "process_wall_samples_ns": [
+          70504787,
+          69907499,
+          67937807
+        ],
+        "samples_ns": [
+          23285736.0,
+          22789740.0,
+          23234070.0
+        ]
+      },
+      "mixedcurves/end-to-end": {
+        "callgrind_process_Ir": 472756943,
+        "median_ns": 30586439.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "10161863629459192945",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 45401080,
+        "process_wall_samples_ns": [
+          44906251,
+          50688457,
+          45401080
+        ],
+        "samples_ns": [
+          29589655.0,
+          32606175.0,
+          30586439.0
+        ]
+      },
+      "mixedcurves/parse": {
+        "callgrind_process_Ir": 472756892,
+        "median_ns": 11696662.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "10161863629459192945",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 45573324,
+        "process_wall_samples_ns": [
+          45573324,
+          44761205,
+          47043313
+        ],
+        "samples_ns": [
+          12150659.0,
+          11696662.0,
+          11502789.0
+        ]
+      },
+      "mixedcurves/render": {
+        "callgrind_process_Ir": 358593551,
+        "median_ns": 18338530.0,
+        "outputs": {
+          "mixedcurves.svg": {
+            "checksum": "10161863629459192945",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 35402402,
+        "process_wall_samples_ns": [
+          35402402,
+          35505527,
+          33902081
+        ],
+        "samples_ns": [
+          18657361.0,
+          17628952.0,
+          18338530.0
+        ]
+      },
+      "paintservers/end-to-end": {
+        "callgrind_process_Ir": 337202723,
+        "median_ns": 24777513.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "4075073167423613040",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 34440952,
+        "process_wall_samples_ns": [
+          34440952,
+          33779206,
+          35164031
+        ],
+        "samples_ns": [
+          24245932.0,
+          25083177.0,
+          24777513.0
+        ]
+      },
+      "paintservers/parse": {
+        "callgrind_process_Ir": 337202664,
+        "median_ns": 5508965.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "4075073167423613040",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 35187153,
+        "process_wall_samples_ns": [
+          36100648,
+          35187153,
+          32169381
+        ],
+        "samples_ns": [
+          5948671.0,
+          5508965.0,
+          4590180.0
+        ]
+      },
+      "paintservers/render": {
+        "callgrind_process_Ir": 286246451,
+        "median_ns": 19244171.0,
+        "outputs": {
+          "paintservers.svg": {
+            "checksum": "4075073167423613040",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 27433828,
+        "process_wall_samples_ns": [
+          27433828,
+          28206240,
+          26988956
+        ],
+        "samples_ns": [
+          19443253.0,
+          19244171.0,
+          18926257.0
+        ]
+      },
+      "stylesheets/end-to-end": {
+        "callgrind_process_Ir": 1029782600,
+        "median_ns": 50831317.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 111147902,
+        "process_wall_samples_ns": [
+          123657857,
+          111147902,
+          106699476
+        ],
+        "samples_ns": [
+          54863289.0,
+          50571277.0,
+          50831317.0
+        ]
+      },
+      "stylesheets/parse": {
+        "callgrind_process_Ir": 1029782553,
+        "median_ns": 48556269.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 108159537,
+        "process_wall_samples_ns": [
+          108159537,
+          126965317,
+          106355136
+        ],
+        "samples_ns": [
+          47460151.0,
+          58618986.0,
+          48556269.0
+        ]
+      },
+      "stylesheets/render": {
+        "callgrind_process_Ir": 531157398,
+        "median_ns": 1530572.0,
+        "outputs": {
+          "stylesheets.svg": {
+            "checksum": "15851226093616132389",
+            "height": 512,
+            "width": 512
+          }
+        },
+        "process_wall_median_ns": 66399324,
+        "process_wall_samples_ns": [
+          66399324,
+          56790350,
+          66703739
+        ],
+        "samples_ns": [
+          1650614.0,
+          1530572.0,
+          1527906.0
+        ]
+      },
+      "tiger/end-to-end": {
+        "callgrind_process_Ir": 442216041,
+        "median_ns": 28298108.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "4594215698344372726",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 42745993,
+        "process_wall_samples_ns": [
+          42745993,
+          43124907,
+          41914958
+        ],
+        "samples_ns": [
+          29025227.0,
+          27809154.0,
+          28298108.0
+        ]
+      },
+      "tiger/parse": {
+        "callgrind_process_Ir": 442215989,
+        "median_ns": 9010968.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "4594215698344372726",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 52223411,
+        "process_wall_samples_ns": [
+          52223411,
+          120379528,
+          51659749
+        ],
+        "samples_ns": [
+          9010968.0,
+          8827721.0,
+          10376916.0
+        ]
+      },
+      "tiger/render": {
+        "callgrind_process_Ir": 362210240,
+        "median_ns": 21551577.0,
+        "outputs": {
+          "tiger-sized.svg": {
+            "checksum": "4594215698344372726",
+            "height": 900,
+            "width": 900
+          }
+        },
+        "process_wall_median_ns": 36789122,
+        "process_wall_samples_ns": [
+          36789122,
+          39024937,
+          34600224
+        ],
+        "samples_ns": [
+          21551577.0,
+          22918275.0,
+          20656835.0
+        ]
+      }
+    }
+  },
+  "stages": {
+    "end-to-end": "Parse + record (Silk) / usvg retained tree + allocate/zero + render + intermediate-tree destruction. File I/O, PNG encoding, checksum and destination destruction excluded.",
+    "parse": "XML + computed style + geometry resolve + Silk record / usvg render-ready retained tree; not raw resolve. Retained result rasterized and consumed outside timing.",
+    "render": "Reuse retained display list/tree; allocate and zero a fresh destination inside every timed render; checksum and destination destruction outside timing."
+  },
+  "workload_manifest_sha256": "2d90448854bb6c2549ac8a32a22929cc7cb1d5d0ac2dac5b61b9d1eba581dd8e",
+  "workloads": {
+    "iconset": {
+      "bytes": 61557,
+      "documents": 128,
+      "sha256": "6fe34e85db8f6d9b19c7417050aca4fe401c75507a607cb882e524cc63fed082",
+      "spec": {
+        "config": {
+          "count": 128,
+          "seed": 7,
+          "size": 32
+        }
+      }
+    },
+    "instances": {
+      "bytes": 53028,
+      "documents": 1,
+      "sha256": "dc4b7a27e5194ea68307cfd3f81e76e9b1f86b8cc0216d77795bb0ad5a0f1604",
+      "spec": {
+        "config": {
+          "grid": 32,
+          "size": 512
+        }
+      }
+    },
+    "largemap": {
+      "bytes": 163569,
+      "documents": 1,
+      "sha256": "c9892aaeb92b1464e7427c1c22494d7e342e3a9d94b125bab1939c20e81964c7",
+      "spec": {
+        "config": {
+          "grid": 32,
+          "size": 1024
+        }
+      }
+    },
+    "mixedcurves": {
+      "bytes": 60863,
+      "documents": 1,
+      "sha256": "f0b4b7973efa8f6a6f25bdb609d02abb4f811f1ae89e751f9dfa92f20e9e120c",
+      "spec": {
+        "config": {
+          "grid": 16,
+          "size": 512
+        }
+      }
+    },
+    "paintservers": {
+      "bytes": 22171,
+      "documents": 1,
+      "sha256": "a3bb208214276b522b6c15bcb0e9d829c8f6809459f8520e5edee179efffd5a8",
+      "spec": {
+        "config": {
+          "grid": 8,
+          "size": 512
+        }
+      }
+    },
+    "stylesheets": {
+      "bytes": 186884,
+      "documents": 1,
+      "sha256": "d7bdeb1de19e9c43890c93602e61a967a610d67bd94df33d58444c88b3bc3c6d",
+      "spec": {
+        "config": {
+          "columns": 64,
+          "rows": 32,
+          "size": 512
+        }
+      }
+    },
+    "tiger": {
+      "bytes": 68878,
+      "documents": 1,
+      "sha256": "b46578682465a19da860d07c928bfdb965df5b50b3945eb2786fdf5d0b3efdbc",
+      "spec": {
+        "attribution": "Ghostscript authors; SVG conversion by Wikimedia Commons contributor Ysangkok",
+        "bytes": 68630,
+        "license": "AGPL-3.0-or-later",
+        "license_evidence": "https://commons.wikimedia.org/w/index.php?title=File:Ghostscript_Tiger.svg&oldid=1272862804",
+        "license_url": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "modifications": "Original downloaded verbatim into tiger.svg; benchmark uses separately derived tiger-sized.svg with explicit root width and height. Geometry, paint and viewBox preserved; XML serialization may change namespace prefixes.",
+        "sha1": "9ecd3be0f976e42d1beb28973af0b1722239fbd0",
+        "sha256": "5211e169283f43ab8ad7ea7998d917d5fbb3c568ac85c1a0217e86792822684d",
+        "source_revision": "2009-11-16T19:41:18Z",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/f/fd/Ghostscript_Tiger.svg",
+        "viewport_normalization": {
+          "bytes": 68878,
+          "height": 900,
+          "reason": "Both engines receive the same explicit 900x900 host viewport rather than their different defaults for a viewBox-only SVG.",
+          "sha256": "792ce860da956c381ce5e602fd225691c10f73896a6de9acbe27889d67c69bd9",
+          "viewBox": "0 0 900 900",
+          "width": 900
+        }
+      }
+    }
+  }
+}

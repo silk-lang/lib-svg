@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "rounded-radius-clamping",
+      "input": "inputs/rounded-radius-clamping.svg",
+      "references": [
+        {
+          "path": "references/rounded-radius-clamping.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Radii clamp independently to half the rectangle dimensions; a lone rx supplies ry. Reference is the specified equivalent arc path.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html#RectElement",
+      "tolerance": {}
+    },
+    {
+      "id": "ellipse-circle-arcs",
+      "input": "inputs/ellipse-circle-arcs.svg",
+      "references": [
+        {
+          "path": "references/ellipse-circle-arcs.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Ellipse and circle outlines equal four quarter elliptical arcs, closed from the positive x-axis.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html#EllipseElement",
+      "tolerance": {}
+    },
+    {
+      "id": "relative-shorthand-paths",
+      "input": "inputs/relative-shorthand-paths.svg",
+      "references": [
+        {
+          "path": "references/relative-shorthand-paths.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Relative coordinates, closepath current-point reset, H/V and reflected S/T controls expand to the explicit absolute path.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathData",
+      "tolerance": {}
+    },
+    {
+      "id": "viewbox-meet",
+      "input": "inputs/viewbox-meet.svg",
+      "references": [
+        {
+          "path": "references/viewbox-meet.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xMidYMid meet maps viewBox (10,20,20,20) into 72x40 with scale 2 and horizontal letterboxing.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "viewbox-slice",
+      "input": "inputs/viewbox-slice.svg",
+      "references": [
+        {
+          "path": "references/viewbox-slice.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xMidYMid slice uses scale 4 and y translation -100; content extends past and is clipped by the output viewport.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "viewbox-none",
+      "input": "inputs/viewbox-none.svg",
+      "references": [
+        {
+          "path": "references/viewbox-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "none maps x by 4 and y by 2 independently, subtracting the nonzero viewBox origin.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "fill-rules",
+      "input": "inputs/fill-rules.svg",
+      "references": [
+        {
+          "path": "references/fill-rules.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Same-direction nested contours fill under nonzero but make a hole under evenodd; reversing the inner contour gives the equivalent nonzero hole.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#FillRuleProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "stroke-joins",
+      "input": "inputs/stroke-joins.svg",
+      "references": [
+        {
+          "path": "references/stroke-joins.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Width-8 right-angle miter, bevel and round joins equal their explicit outline polygons and quarter-circle arc.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#StrokeLinejoinProperty",
+      "tolerance": {
+        "antialias_channel": 80,
+        "reason": "Opaque geometry only: exact opaque/transparent samples, bounded differences only where both samples have partial alpha. Vector round outlines use 0.0625px chords, equivalent cubic paths use 0.25px flattening; ceil((0.0625+0.25)*255)=80 bounds the coverage allowance rather than pinning observed pixels. SVG2 conform.html#ConformingSVGViewers permits one-device-pixel geometric error. Observed differences are confined to the round corner."
+      }
+    },
+    {
+      "id": "stroke-caps",
+      "input": "inputs/stroke-caps.svg",
+      "references": [
+        {
+          "path": "references/stroke-caps.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Butt caps stop at endpoints; square caps extend half-width; round caps form semicircles of radius half-width.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#StrokeLinecapProperty",
+      "tolerance": {
+        "antialias_channel": 80,
+        "reason": "Opaque geometry only: exact opaque/transparent samples, bounded differences only where both samples have partial alpha. Vector round outlines use 0.0625px chords, equivalent cubic paths use 0.25px flattening; ceil((0.0625+0.25)*255)=80 bounds the coverage allowance rather than pinning observed pixels. SVG2 conform.html#ConformingSVGViewers permits one-device-pixel geometric error. Observed differences are confined to the round caps."
+      }
+    },
+    {
+      "id": "stroke-dash-offset",
+      "input": "inputs/stroke-dash-offset.svg",
+      "references": [
+        {
+          "path": "references/stroke-dash-offset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An 8-on/4-off pattern with offset 4 begins halfway through a dash; the five nonempty butt-capped spans equal these rectangles.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#StrokeDashoffsetProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "group-opacity-isolation",
+      "input": "inputs/group-opacity-isolation.svg",
+      "references": [
+        {
+          "path": "references/group-opacity-isolation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Overlapping opaque children composite into an isolated group before group opacity applies, so overlap is no darker than the union.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#ObjectAndGroupOpacityProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "currentcolor-inheritance",
+      "input": "inputs/currentcolor-inheritance.svg",
+      "references": [
+        {
+          "path": "references/currentcolor-inheritance.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Inherited currentColor paint resolves against each element's computed color, including descendant overrides.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#ColorProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "visibility-versus-display",
+      "input": "inputs/visibility-versus-display.svg",
+      "references": [
+        {
+          "path": "references/visibility-versus-display.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Visibility is inherited and descendants can restore visible; display none excludes the whole subtree despite descendant display/visibility overrides.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#VisibilityControl",
+      "tolerance": {}
+    },
+    {
+      "id": "defs-never-paint",
+      "input": "inputs/defs-never-paint.svg",
+      "references": [
+        {
+          "path": "references/defs-never-paint.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Defs descendants are not directly rendered, even with display inline; the unrelated visible rectangle remains.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#DefsElement",
+      "tolerance": {}
+    },
+    {
+      "id": "literal-rgba",
+      "input": "inputs/literal-rgba.svg",
+      "references": [
+        {
+          "path": "references/literal-rgba.png",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mathematically known 4x4 literal RGBA: transparent border and opaque red 2x2 center at integer pixel boundaries. The PNG contains exactly those samples, not output from a browser or rasterizer.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html#RectElement",
+      "tolerance": {}
+    }
+  ]
+}

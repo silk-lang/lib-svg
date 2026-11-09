@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">
+<defs><font horiz-adv-x="600"><font-face font-family="Test Font" units-per-em="1000" ascent="800" descent="200"/><missing-glyph horiz-adv-x="400" d="M50 0L350 0L350 500L50 500Z M100 50L100 450L300 450L300 50Z"/><glyph unicode="A" d="M100 0L500 0L500 700L100 700Z"/><glyph unicode="B" horiz-adv-x="800" d="M100 0Q400 900 700 0Z"/><hkern u1="A" u2="B,C" k="100"/></font></defs>
+<text x="10" y="50" font-family="Test Font" font-size="40">BAB</text>
+</svg>

@@ -1,0 +1,486 @@
+import view_fragment { Fragment, SpatialUnit, ZoomAndPan }
+import svg_geometry.svg { Alignment, AspectRatio }
+import view_fragment
+import svg_css.values { Store, Value, ValueId }
+import svg_css.tokens { Limits, CssError, CssErrorKind }
+import svg_css.transform_values { TransformValue, Operation }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn decoded<'a>(text: &'a [u8], store: &mut Store<'_>) -> Fragment<'a>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  return run view_fragment.parse(text, text, &mut store.*, &Limits.make())
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/xml/#NT-Name
+test effect fn bareNamesAndEncodedBoundariesRemainDistinct() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let limits = Limits.make()
+  let id = run view_fragment.parse(b"caf%C3%A9", b"caf\xC3\xA9", &mut store, &limits)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(id.valid, "Unicode XML name survives URL decoding")
+  run Testing.expect(
+    match &id.id {
+      Option<&[u8]>.Some { value } => value.length == 5
+      _ => false
+    },
+    "ID borrows decoded name",
+  )
+  let encoded = run view_fragment.parse(b"t%3D10", b"t=10", &mut store, &limits)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &encoded.temporal {
+      Option<view_fragment.TimeSegment>.None => true
+      _ => false
+    },
+    "encoded equals is not a media delimiter",
+  )
+  let badNames: [&[u8]; 5] = [b"1name", b"two names", b"bad(name)", b"\xFF", b"\xCC\x80name"]
+  let mut i: usize = 0
+  while i < badNames.length {
+    let parsed = run decoded(badNames[i], &mut store)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(!parsed.valid, "bare names follow XML Name, not arbitrary byte strings")
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html#ViewElementViewTargetAttribute
+test effect fn viewComponentsPreservePresenceAndLegacyAssociation() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let parsed = run decoded(
+    b"svgView(viewTarget(first second);zoomAndPan(disable);preserveAspectRatio(xMaxYMin slice);viewBox(1,2,0,4))",
+    &mut store,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    parsed.valid,
+    "all components may occur in any order; zero viewBox width is valid",
+  )
+  match &parsed.view {
+    Option<view_fragment.ViewOverrides>.Some { value } => {
+      run Testing.expect(
+        match &value.aspectRatio {
+          Option<AspectRatio>.Some { value: par } => par.alignment == Alignment.XMaxYMin
+            && par.slice
+          _ => false
+        },
+        "typed PAR",
+      )
+      run Testing.expect(
+        match &value.zoomAndPan {
+          Option<ZoomAndPan>.Some { value: zoom } => zoom == ZoomAndPan.Disable
+          _ => false
+        },
+        "legacy zoom syntax retained without UI behavior",
+      )
+      run Testing.expect(
+        match &value.viewTarget {
+          Option<&[u8]>.Some { value: names } => names.length == 12
+          _ => false
+        },
+        "view target association retained without invented highlighting",
+      )
+      run Testing.expect(
+        match &value.transform {
+          Option<ValueId>.None => true
+          _ => false
+        },
+        "omitted transform is not explicit identity",
+      )
+    }
+    _ => {
+      run Testing.expect(false, "view specification returned")
+    }
+  }
+  let omitted = run decoded(b"svgView(viewBox(0 0 4 4))", &mut store)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &omitted.view {
+      Option<view_fragment.ViewOverrides>.Some { value } => match &value.aspectRatio {
+        Option<AspectRatio>.None => true
+        _ => false
+      }
+      _ => false
+    },
+    "omitted PAR stays absent",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/coords.html#PreserveAspectRatioAttribute
+test effect fn fragmentAspectRatioRetainsSharedLegacyValue() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let parsed = run decoded(b"svgView(preserveAspectRatio(defer none slice))", &mut store)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(parsed.valid, "legacy defer is additive fragment grammar")
+  run Testing.expect(
+    match &parsed.view {
+      Option<view_fragment.ViewOverrides>.Some { value } => match &value.aspectRatio {
+        Option<AspectRatio>.Some { value: par } => par.alignment == Alignment.None && par.defer
+          && par.slice
+        _ => false
+      }
+      _ => false
+    },
+    "fragment retains shared typed value without canonical text roundtrip",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/css-transforms-1/#svg-syntax
+// https://www.w3.org/TR/css-transforms-1/#svg-transform-functions
+// https://drafts.csswg.org/css-transforms-2/#three-d-transform-functions
+test effect fn viewTransformsUseSvgAndCssGrammarsWithoutFlatteningCss3d() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let cases: [&[u8]; 4] = [
+    b"svgView(transform(translate (1 2),rotate(90 4 5)))",
+    b"svgView(transform(translate(1)))",
+    b"svgView(transform(translate(1px,2px) rotate(30deg)))",
+    b"svgView(transform(matrix3d(1,0,0,0,0,1,0,0,0,0,1,.25,0,0,0,1)))",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let parsed = run decoded(cases[i], &mut store) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(parsed.valid, "legacy SVG and SVG2 transform-property grammars accepted")
+    run Testing.expect(
+      match &parsed.view {
+        Option<view_fragment.ViewOverrides>.Some { .. } => true
+        _ => false
+      },
+      "view present",
+    )
+
+    // The fragment's last use: reading the store below must not overlap the parse's borrow of it.
+    let transformId = match &parsed.view {
+      Option<view_fragment.ViewOverrides>.Some { value } => value.transform
+      _ => Option<ValueId>.None
+    }
+    match &transformId {
+      Option<ValueId>.Some { value: id } => {
+        run Testing.expect(
+          match &store.get(id).* {
+            Value.Transform { value: transform } => true
+            _ => false
+          },
+          "transform stored in shared typed value arena",
+        )
+        if i == 3 {
+          match &store.get(id).* {
+            Value.Transform { value: transform } => match &transform {
+              TransformValue.List { operations } => {
+                run Testing.expect(
+                  match &operations.asSlice()[0] {
+                    Operation.Matrix3 { components } => true
+                    _ => false
+                  },
+                  "CSS 3D matrix is retained, not prematurely flattened to affine",
+                )
+              }
+              _ => {
+                run Testing.expect(false, "matrix3d retains its operation list")
+              }
+            }
+            _ => {
+              run Testing.expect(false, "typed transform")
+            }
+          }
+        }
+      }
+      _ => {
+        run Testing.expect(false, "transform present")
+      }
+    }
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// Atomic invalid fallback is the documented project recovery policy.
+test effect fn invalidSvgViewsNeverExposePartialOverrides() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let cases: [&[u8]; 15] = [
+    b"svgView()",
+    b"svgView(viewBox(0 0 -1 4))",
+    b"svgView(viewBox(0 0 4 4);)",
+    b"svgView(viewBox(0 0 4 4);viewBox(0 0 8 8))",
+    b"svgView(preserveAspectRatio(none bogus))",
+    b"svgView(transform(translate(2,)))",
+    b"svgView(transform(inherit))",
+    b"svgView(viewTarget())",
+    b"svgView(zoomAndPan(other))",
+    b"svgView(viewBox(0 0 4 4);other(2))",
+    b"svgView(viewBox(0 0 4 4))tail",
+    b"svgView(transform(rotate(90 4)))",
+    b"svgView(preserveAspectRatio())",
+    b"svgView(preserveAspectRatio(defer))",
+    b"svgView(preserveAspectRatio(none meet slice))",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let parsed = run decoded(cases[i], &mut store) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(!parsed.valid, "invalid component rejects entire svgView")
+    run Testing.expect(
+      match &parsed.view {
+        Option<view_fragment.ViewOverrides>.None => true
+        _ => false
+      },
+      "no partial overrides exposed",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#processing-name-value-components
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#processing-name-value-lists
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#naming-time
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#naming-space
+test effect fn mediaDimensionsRecoverIndependentlyAndLastValidWins() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let limits = Limits.make()
+  let parsed = run decoded(
+    b"t=1&t=npt:0:01:02.5,70&unknown=ignored&xywh=percent:25,25,50,50&t=bad&xywh=0,0,0,1",
+    &mut store,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    parsed.valid,
+    "unknown and malformed dimensions do not invalidate valid dimensions",
+  )
+  run Testing.expect(
+    match &parsed.temporal {
+      Option<view_fragment.TimeSegment>.Some { value } => value.start == 62.5
+        && match &value.end {
+          Option<f64>.Some { value: end } => end == 70.0
+          _ => false
+        }
+      _ => false
+    },
+    "last valid NPT occurrence retained",
+  )
+  run Testing.expect(
+    match &parsed.spatial {
+      Option<view_fragment.SpatialView>.Some { value } => value.unit == SpatialUnit.Percent
+        && value.x == 25
+        && value.width == 50
+      _ => false
+    },
+    "typed percent rectangle retained despite later invalid rectangle",
+  )
+  let escaped = run view_fragment.parse(b"%74=%31%30%26t=20", b"t=10&t=20", &mut store, &limits)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &escaped.temporal {
+      Option<view_fragment.TimeSegment>.None => true
+      _ => false
+    },
+    "escaped ampersand remains inside one invalid time value",
+  )
+}
+
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#error-uri-temporal
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#error-uri-spatial
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+test effect fn mediaSyntaxAndNumericBoundsDoNotBecomeIds() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let cases: [&[u8]; 10] = [
+    b"t=10,",
+    b"t=2,1",
+    b"t=1e2",
+    b"t=clock:2026-01-01",
+    b"t=00:60",
+    b"t=-1",
+    b"xywh=1,2,3.5,4",
+    b"xywh=0,0,18446744073709551616,1",
+    b"xywh=percent:400,0,1,1",
+    b"xywh=0,0,0,1",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let parsed = run decoded(cases[i], &mut store) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(parsed.valid, "invalid media dimension is ignored")
+    run Testing.expect(
+      match &parsed.id {
+        Option<&[u8]>.None => true
+        _ => false
+      },
+      "media syntax never becomes an ordinary target",
+    )
+    run Testing.expect(
+      match &parsed.temporal {
+        Option<view_fragment.TimeSegment>.None => true
+        _ => false
+      },
+      "invalid time absent",
+    )
+    run Testing.expect(
+      match &parsed.spatial {
+        Option<view_fragment.SpatialView>.None => true
+        _ => false
+      },
+      "invalid space absent",
+    )
+    i = i + 1
+  }
+  let combined = run decoded(b"chosen&t=,10", &mut store)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &combined.id {
+      Option<&[u8]>.Some { value } => value.length == 6
+      _ => false
+    },
+    "ordinary target composes with temporal fragment",
+  )
+  run Testing.expect(
+    match &combined.temporal {
+      Option<view_fragment.TimeSegment>.Some { value } => value.start == 0.0
+      _ => false
+    },
+    "omitted begin defaults to zero",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#processing-name-value-components
+test effect fn escapedViewSeparatorsAndMalformedMediaPairsUseDifferentRecovery() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let limits = Limits.make()
+  let escaped = run view_fragment.parse(
+    b"svgView(viewBox(0%200%204%204)%3BpreserveAspectRatio(none))&%74=2",
+    b"svgView(viewBox(0 0 4 4);preserveAspectRatio(none))&t=2",
+    &mut store,
+    &limits,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(escaped.valid, "escaped svgView spaces and semicolons are syntax")
+  run Testing.expect(
+    match &escaped.view {
+      Option<view_fragment.ViewOverrides>.Some { value } => true
+      _ => false
+    },
+    "view and time coexist",
+  )
+  run Testing.expect(
+    match &escaped.temporal {
+      Option<view_fragment.TimeSegment>.Some { value } => value.start == 2.0
+      _ => false
+    },
+    "encoded media name is decoded after literal delimiter splitting",
+  )
+  let badPercent = run decoded(b"t=1&t=%zz&xywh=1,2,3,4", &mut store)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &badPercent.temporal {
+      Option<view_fragment.TimeSegment>.Some { value } => value.start == 1.0
+      _ => false
+    },
+    "bad percent encoding discards only its pair",
+  )
+  run Testing.expect(
+    match &badPercent.spatial {
+      Option<view_fragment.SpatialView>.Some { value } => value.unit == SpatialUnit.Pixel
+        && value.height == 4
+      _ => false
+    },
+    "other dimension survives",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Limits are explicit implementation resource bounds, not fragment grammar.
+test effect fn fragmentResourceLimitsAreErrorsRatherThanInvalidFallback() -> ()
+  ! AssertionError<'static> | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let mut limits = Limits.make()
+  limits.maxInputBytes = 3
+  let attempted = run Effect.result(view_fragment.parse(b"long", b"long", &mut store, &limits))
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move attempted {
+    Result<Fragment, CssError | OutOfMemoryError>.Success { value } => {
+      run Testing.expect(false, "input exhaustion must not silently select the root")
+    }
+    Result<Fragment, CssError | OutOfMemoryError>.Failure { error } => match move error {
+      CssError reason => {
+        run Testing.expect(reason.kind == CssErrorKind.InputLimit, "typed input limit")
+      }
+      OutOfMemoryError exhausted => {
+        fail move exhausted
+      }
+    }
+  }
+  limits = Limits.make()
+  limits.maxDepth = 1
+  let nested = run Effect.result(
+    view_fragment.parse(
+      b"svgView(transform(translate(1)))",
+      b"svgView(transform(translate(1)))",
+      &mut store,
+      &limits,
+    ),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move nested {
+    Result<Fragment, CssError | OutOfMemoryError>.Success { value } => {
+      run Testing.expect(false, "nesting exhaustion must not silently select the root")
+    }
+    Result<Fragment, CssError | OutOfMemoryError>.Failure { error } => match move error {
+      CssError reason => {
+        run Testing.expect(reason.kind == CssErrorKind.NestingLimit, "typed nesting limit")
+      }
+      OutOfMemoryError exhausted => {
+        fail move exhausted
+      }
+    }
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://github.com/w3c/svgwg/issues/1170 — 2026-09-29 resolution: whitespace
+// belongs to parameter grammars, not svgView's structural punctuation.
+test effect fn whitespaceIsLimitedToComponentParameterGrammars() -> ()
+  ! AssertionError<'static> | CssError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let valid = run decoded(b"svgView(viewBox( 0 0 4 4 );preserveAspectRatio( none ))", &mut store)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(valid.valid, "attribute parameter whitespace remains accepted")
+  let invalid: [&[u8]; 5] = [
+    b"svgView( viewBox(0 0 4 4))",
+    b"svgView(viewBox(0 0 4 4) )",
+    b"svgView(viewBox(0 0 4 4) ;preserveAspectRatio(none))",
+    b"svgView(viewBox(0 0 4 4); preserveAspectRatio(none))",
+    b"svgView(viewBox (0 0 4 4))",
+  ]
+  let mut i: usize = 0
+  while i < invalid.length {
+    let parsed = run decoded(invalid[i], &mut store) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      !parsed.valid,
+      "structural spaces reject the entire fragment rather than changing its grammar",
+    )
+    i = i + 1
+  }
+}

@@ -1,0 +1,246 @@
+//! Checked tile sizing, overflow enumeration and owned native image resources.
+//! SVG2 CR2018 §14.4; overflow copies follow SVGWG issue 129 row-major order.
+import svg_core.scene { DisplayList, Pattern, RenderError }
+import svg_core.mapping { Mapping }
+import svg_geometry.geometry { Transform }
+import vector.projective { Homography }
+import vector.pixmap { Pixmap }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u32
+import silk.num.usize
+import checked
+
+pub struct Texture {
+  pub next: Option<usize>,
+  pub pixels: Pixmap,
+}
+
+pub struct Cache {
+  pub textures: List<Texture>,
+  pub heads: List<Option<usize>>,
+  pub active: List<usize>,
+  pub pixels: usize,
+  pub surfaces: usize,
+  pub surfaceLimit: usize,
+  pub work: usize,
+}
+
+pub effect fn make(count: usize) -> Cache
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut heads = run List<Option<usize>>.makeWithCapacity(count)
+  let mut i: usize = 0
+  while i < count {
+    run heads.append(Option<usize>.None)
+    i = i + 1
+  }
+  return Cache {
+    textures: List<Texture>.make(),
+    heads: move heads,
+    active: List<usize>.make(),
+    pixels: 0,
+    surfaces: 0,
+    surfaceLimit: checked.MAX_SURFACE_PIXELS,
+    work: 0,
+  }
+}
+
+pub effect fn reserve(cache: &mut Cache, pixels: usize, list: &DisplayList) -> ()
+  ! RenderError {
+  if cache.pixels > list.maxPatternPixels || pixels > list.maxPatternPixels - cache.pixels {
+    fail RenderError.TooLarge
+  }
+  run surface(&mut cache.*, pixels)
+  cache.pixels = cache.pixels + pixels
+}
+
+pub effect fn surface(cache: &mut Cache, pixels: usize) -> ()
+  ! RenderError {
+  if pixels > cache.surfaceLimit - cache.surfaces {
+    fail RenderError.TooLarge
+  }
+  cache.surfaces = cache.surfaces + pixels
+}
+
+pub struct Size {
+  pub width: u32,
+  pub height: u32,
+}
+
+impl Copy for Size {}
+
+// A column-norm bound on the forward Jacobian over the entire finite destination
+// rectangle. For projective H and its positively scaled inverse I, H*I=k*identity:
+// dX/dx=(H.xx-X*H.wx)*(I.wx*X+I.wy*Y+I.ww)/k. Both factors
+// are affine in destination coordinates; their absolute extrema lie at corners.
+// This remains finite when the inverse horizon intersects the canvas.
+pub effect fn magnification(transform: &Mapping, width: u32, height: u32) -> [f64; 2]
+  ! RenderError {
+  let mut sx: f64 = 0.0
+  let mut sy: f64 = 0.0
+  match &transform.* {
+    Mapping.Affine { value } => {
+      sx = norm(value.xx, value.yx)
+      sy = norm(value.xy, value.yy)
+    }
+    Mapping.Projective { value: h } => {
+      let inv = match &h.inverse() {
+        Option<Homography>.Some { value } => value
+        _ => {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      let k = h.wx * inv.xw + h.wy * inv.yw + h.ww * inv.ww
+      if !f64.isFinite(k) || k <= 0.0 {
+        fail RenderError.InvalidGeometry
+      }
+      let w = u32.toF64(width)
+      let v = u32.toF64(height)
+      let denominator = f64.max(
+        f64.max(f64.abs(inv.ww), f64.abs(inv.wx * w + inv.ww)),
+        f64.max(f64.abs(inv.wy * v + inv.ww), f64.abs(inv.wx * w + inv.wy * v + inv.ww)),
+      )
+        / k
+      sx = norm(
+        f64.max(f64.abs(h.xx), f64.abs(h.xx - w * h.wx)),
+        f64.max(f64.abs(h.yx), f64.abs(h.yx - v * h.wx)),
+      )
+        * denominator
+      sy = norm(
+        f64.max(f64.abs(h.xy), f64.abs(h.xy - w * h.wy)),
+        f64.max(f64.abs(h.yy), f64.abs(h.yy - v * h.wy)),
+      )
+        * denominator
+    }
+  }
+  return [sx, sy]
+}
+
+pub effect fn size(transform: &Mapping, tile: &Pattern, width: u32, height: u32) -> Size
+  ! RenderError {
+  let scale = run magnification(transform, width, height)
+  let sx = scale[0]
+  let sy = scale[1]
+  let x = f64.max(1.0, f64.ceil(tile.tile.xMax * sx))
+  let y = f64.max(1.0, f64.ceil(tile.tile.yMax * sy))
+  if !f64.isFinite(sx) || !f64.isFinite(sy) || !f64.isFinite(x) || !f64.isFinite(y) {
+    fail RenderError.InvalidGeometry
+  }
+  if x > 16777216.0 || y > 16777216.0 {
+    fail RenderError.TooLarge
+  }
+  let result = Size { width: f64.toU32(x), height: f64.toU32(y) }
+  run checked.dimensions(result.width, result.height)
+  return result
+}
+
+fn norm(x: f64, y: f64) -> f64 {
+  let large = f64.max(f64.abs(x), f64.abs(y))
+  if large == 0.0 {
+    return 0.0
+  }
+  let a = x / large
+  let b = y / large
+  return large * f64.sqrt(a * a + b * b)
+}
+
+pub struct Copies {
+  pub x: f64,
+  pub y: f64,
+  pub columns: usize,
+  pub rows: usize,
+  pub width: f64,
+  pub height: f64,
+  pub sx: f64,
+  pub sy: f64,
+}
+
+impl Copy for Copies {}
+
+pub fn root() -> Copies {
+  return Copies { x: 0.0, y: 0.0, columns: 1, rows: 1, width: 0.0, height: 0.0, sx: 1.0, sy: 1.0 }
+}
+
+pub effect fn copies(
+  pattern: &Pattern,
+  size: &Size,
+  cache: &mut Cache,
+  list: &DisplayList,
+) -> Copies
+  ! RenderError {
+  let bounds = pattern.contentBounds
+  let width = pattern.tile.xMax
+  let height = pattern.tile.yMax
+  let mut result = Copies {
+    x: 0.0,
+    y: 0.0,
+    columns: 0,
+    rows: 0,
+    width: width,
+    height: height,
+    sx: u32.toF64(size.width) / width,
+    sy: u32.toF64(size.height) / height,
+  }
+  if !f64.isFinite(result.sx) || !f64.isFinite(result.sy) {
+    fail RenderError.InvalidGeometry
+  }
+  if bounds.xMax <= bounds.xMin || bounds.yMax <= bounds.yMin || pattern.commands.length() == 0 {
+    return result
+  }
+
+  // Strict intersection avoids redundant edge-only pictures and preserves negative copies.
+  let x = f64.floor(-bounds.xMax / width) + 1.0
+  let y = f64.floor(-bounds.yMax / height) + 1.0
+  let columns = f64.ceil((width - bounds.xMin) / width) - x
+  let rows = f64.ceil((height - bounds.yMin) / height) - y
+  if !f64.isFinite(x) || !f64.isFinite(y) || !f64.isFinite(columns) || !f64.isFinite(rows)
+    || f64.abs(x) > 4503599627370496.0
+    || f64.abs(y) > 4503599627370496.0 {
+    fail RenderError.InvalidGeometry
+  }
+  if columns < 0.0 || rows < 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+  if f64.abs(x + columns) > 4503599627370496.0 || f64.abs(y + rows) > 4503599627370496.0 {
+    fail RenderError.InvalidGeometry
+  }
+  let available = list.maxPatternWork - cache.work
+  if columns > usize.toF64(available) || rows > usize.toF64(available)
+    || columns >= usize.toF64(usize.MAX)
+    || rows >= usize.toF64(usize.MAX) {
+    fail RenderError.TooLarge
+  }
+  result.x = x
+  result.y = y
+  result.columns = f64.toUsize(columns)
+  result.rows = f64.toUsize(rows)
+  if result.columns != 0 && result.rows > available / result.columns {
+    fail RenderError.TooLarge
+  }
+  let count = result.columns * result.rows
+  if count != 0 && pattern.commands.length() > available / count {
+    fail RenderError.TooLarge
+  }
+  cache.work = cache.work + count * pattern.commands.length()
+  return result
+}
+
+pub effect fn placement(copies: &Copies, column: usize, row: usize) -> Mapping
+  ! RenderError {
+  let value = Transform.new(
+    copies.sx,
+    0.0,
+    0.0,
+    copies.sy,
+    (copies.x + usize.toF64(column)) * copies.width * copies.sx,
+    (copies.y + usize.toF64(row)) * copies.height * copies.sy,
+  )
+  if !value.isFinite() {
+    fail RenderError.InvalidGeometry
+  }
+  return Mapping.Affine { value: value }
+}

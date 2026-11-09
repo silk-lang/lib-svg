@@ -1,0 +1,90 @@
+import clip_mask
+import svg_core.scene { ClipNode, FillRule, RenderError }
+import svg_core.mapping { Mapping }
+import svg_geometry.geometry { Path }
+import svg_geometry.svg
+import vector.geometry_error { GeometryError }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/css-masking-1/#ClippingPaths
+effect fn intersection() -> bool
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut paths = List<Path>.make()
+  run paths.append(run svg.rectangle(0.0, 0.0, 3.0, 4.0, 0.0, 0.0))
+  run paths.append(run svg.rectangle(1.0, 1.0, 3.0, 2.0, 0.0, 0.0))
+  let mut nodes = List<ClipNode>.make()
+  run nodes.append(
+    ClipNode.Shape { path: 0, transform: Mapping.identity(), rule: FillRule.Nonzero },
+  )
+  run nodes.append(
+    ClipNode.Shape { path: 1, transform: Mapping.identity(), rule: FillRule.Nonzero },
+  )
+  run nodes.append(ClipNode.Intersect { left: 0, right: 1 })
+  run nodes.append(ClipNode.Union { left: 0, right: 1 })
+  let combined = run clip_mask.render(
+    nodes.asSlice(),
+    paths.asSlice(),
+    3,
+    4,
+    4,
+    &Mapping.identity(),
+    64,
+  )
+  let mask = run clip_mask.render(
+    nodes.asSlice(),
+    paths.asSlice(),
+    2,
+    4,
+    4,
+    &Mapping.identity(),
+    64,
+  )
+  return combined.at(0, 0) == 255 && combined.at(3, 1) == 255 && combined.at(3, 3) == 0
+    && mask.at(1, 1) == 255
+    && mask.at(2, 2) == 255
+    && mask.at(0, 1) == 0
+    && mask.at(3, 2) == 0
+    && mask.at(1, 3) == 0
+}
+
+test effect fn nestedClipCoverageIntersects() -> ()
+  ! AssertionError<'static> | RenderError | GeometryError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let correct = run intersection() |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(correct, "nested clip paths intersect independently rasterized geometry")
+}
+
+// Each retained clip is evaluated independently even when its global arena has
+// earlier entries. An unrelated invalid path must not be evaluated or charged.
+effect fn reachableOnly() -> bool
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let paths = List<Path>.make()
+  let mut nodes = List<ClipNode>.make()
+  run nodes.append(
+    ClipNode.Shape { path: 999, transform: Mapping.identity(), rule: FillRule.Nonzero },
+  )
+  run nodes.append(ClipNode.Intersect { left: 1, right: 1 })
+  run nodes.append(ClipNode.Empty)
+  let mask = run clip_mask.render(
+    nodes.asSlice(),
+    paths.asSlice(),
+    2,
+    4,
+    4,
+    &Mapping.identity(),
+    16,
+  )
+  return mask.width() == 4 && mask.height() == 4 && mask.at(0, 0) == 0
+}
+
+test effect fn clipBudgetCountsOnlyReachableNodes() -> ()
+  ! AssertionError<'static> | RenderError | GeometryError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let correct = run reachableOnly() |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(correct, "unrelated clip arena entries consume no mask budget")
+}

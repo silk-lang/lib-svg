@@ -1,0 +1,175 @@
+//! SVG2 CR vector-effect matrices and exact stroke-host coordinate mappings.
+//! Pinned coords SHA256: 79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb.
+import mapping { Mapping }
+import svg_geometry.geometry { Point, Transform }
+import silk.core.ownership { Copy }
+import silk.num.f64
+
+// Same bits as svg_css.values.Value.VectorEffect; no parsing or style lookup here.
+pub const NON_SCALING_STROKE: u8 = 1
+
+pub const NON_SCALING_SIZE: u8 = 2
+
+pub const NON_ROTATION: u8 = 4
+
+pub const FIXED_POSITION: u8 = 8
+
+pub struct Used {
+  /// Geometry map AFTER the vector effect, also inherited by descendants.
+  pub localToHost: Mapping,
+  /// Outside the effect: preserves outer viewport transforms and device scale.
+  pub hostToDevice: Mapping,
+  /// Effective bits; zero determinant plus non-scaling-size invalidates ALL bits.
+  pub flags: u8,
+  /// Transform the path into host space, construct the stroke there, then map
+  /// its outline by hostToDevice. Stroke paint remains in local user space.
+  pub strokeInHost: bool,
+}
+
+impl Copy for Used {}
+
+pub union Resolution {
+  Used { pub value: Used },
+  InvalidInput,
+  NumericLimit,
+  /// The pinned formulas define affine CTMs only. This is NOT equivalent to
+  /// participation in a CSS preserve-3d rendering context and MUST NOT be
+  /// silently converted into vector-effect:none by the caller.
+  ProjectiveGeometry,
+}
+
+impl Copy for Resolution {}
+
+fn resolved(flags: u8, localToHost: Mapping, hostToDevice: Mapping) -> Resolution {
+  return Resolution.Used {
+    value: Used {
+      localToHost: localToHost,
+      hostToDevice: hostToDevice,
+      flags: flags,
+      strokeInHost: (flags & (NON_SCALING_STROKE | NON_SCALING_SIZE)) != 0,
+    },
+  }
+}
+
+/// Computes the seven combined formulas of SVG2 #VectorEffectsCalculation.
+/// For viewport, localToHost includes the immediate viewport's viewBox but
+/// hostToDevice excludes it. For screen, localToHost includes all viewport
+/// transforms up to root CSS pixels; hostToDevice retains device pixel scaling.
+/// See #VectorEffectProperty and #NestedVectorEffectsCalculation in the pinned CR.
+///
+/// fixedPosition is (e,f) of this element's OWN used transform, not cumulative
+/// CTM translation, geometry x/y, or a previously transformed origin. It is
+/// consumed only by fixed-position. Resolve this effect after full CSS 4x4
+/// composition and SVG-plane projection, before composing descendant geometry.
+///
+/// The caller retains physical viewport and positive-w clipping chains. The
+/// returned maps do not remove those clips or require inversion (even singular
+/// strokes retain their exact forward maps). Compose hostToDevice * localToHost
+/// for geometry; inverse paint sampling and stroke construction belong to the
+/// consumer, not this allocation-free numeric helper.
+///
+/// Genuinely projective localToHost with geometry bits has no formula in the
+/// pinned text: return ProjectiveGeometry explicitly. A projective outer host
+/// map, or projective non-scaling-stroke, is supported without approximation.
+/// CSS Transforms2 #3d-transform-rendering/#3d-rendering-contexts distinguish
+/// flat projection from preserve-3d; this renderer has no such 3D contexts.
+pub fn resolve(
+  flags: u8,
+  localToHost: &Mapping,
+  hostToDevice: &Mapping,
+  fixedPosition: Point,
+) -> Resolution {
+  if flags > 15 || !localToHost.isFinite() || !hostToDevice.isFinite()
+    || ((flags & FIXED_POSITION) != 0 && !fixedPosition.isFinite()) {
+    return Resolution.InvalidInput
+  }
+  if (flags & (NON_SCALING_SIZE | NON_ROTATION | FIXED_POSITION)) == 0 {
+    return resolved(flags, localToHost.*, hostToDevice.*)
+  }
+  let ctm = match &localToHost.* {
+    Mapping.Affine { value } => value
+    Mapping.Projective { value } => {
+      // Accept an affine map carried in homogeneous form, but do not discard
+      // negative/zero w: it has visibility semantics at the projection boundary.
+      if value.wx != 0.0 || value.wy != 0.0 || value.ww <= 0.0 {
+        return Resolution.ProjectiveGeometry
+      }
+      let affine = Transform.new(
+        value.xx / value.ww,
+        value.yx / value.ww,
+        value.xy / value.ww,
+        value.yy / value.ww,
+        value.xw / value.ww,
+        value.yw / value.ww,
+      )
+      if !affine.isFinite() {
+        return Resolution.NumericLimit
+      }
+      affine
+    }
+  }
+  let size = (flags & NON_SCALING_SIZE) != 0
+  let rotation = (flags & NON_ROTATION) != 0
+  let mut result = ctm
+  if size || rotation {
+    // Scale columns independently before taking det. Direct a*d-b*c can
+    // overflow or underflow even when sqrt(abs(det)) and the answer are finite.
+    let x = f64.max(f64.abs(ctm.xx), f64.abs(ctm.yx))
+    let y = f64.max(f64.abs(ctm.xy), f64.abs(ctm.yy))
+    let determinant = if x == 0.0 || y == 0.0 {
+      0.0
+    } else {
+      (ctm.xx / x) * (ctm.yy / y) - (ctm.yx / x) * (ctm.xy / y)
+    }
+    if size && determinant == 0.0 {
+      // Explicit SVG2 rule: not just division suppression, the entire property
+      // becomes none, including fixed-position and non-scaling-stroke.
+      return resolved(0, localToHost.*, hostToDevice.*)
+    }
+    if size && rotation {
+      result = Transform.new(1.0, 0.0, 0.0, 1.0, ctm.dx, ctm.dy)
+    } else if size {
+      let root = f64.sqrt(f64.abs(determinant))
+      let sx = f64.sqrt(x)
+      let sy = f64.sqrt(y)
+
+      // L/sqrt(abs(det(L))), not column normalization or polar decomposition.
+      // Keep the factorized scale so even subnormal uniform scales normalize
+      // correctly and an overflowing determinant does not discard valid L/s.
+      let rx = if root >= 1.0 {
+        sx / (sy * root)
+      } else {
+        (sx / sy) / root
+      }
+      let ry = if root >= 1.0 {
+        sy / (sx * root)
+      } else {
+        (sy / sx) / root
+      }
+      result = Transform.new(
+        (ctm.xx / x) * rx,
+        (ctm.yx / x) * rx,
+        (ctm.xy / y) * ry,
+        (ctm.yy / y) * ry,
+        ctm.dx,
+        ctm.dy,
+      )
+    } else {
+      // Non-rotation removes skew/reflection/nonuniformity as specified:
+      // sqrt(abs(det(L))) * I, NOT the individual column lengths.
+      let scale = f64.sqrt(x) * (f64.sqrt(y) * f64.sqrt(f64.abs(determinant)))
+      if determinant != 0.0 && scale == 0.0 {
+        return Resolution.NumericLimit
+      }
+      result = Transform.new(scale, 0.0, 0.0, scale, ctm.dx, ctm.dy)
+    }
+  }
+  if (flags & FIXED_POSITION) != 0 {
+    result.dx = fixedPosition.x
+    result.dy = fixedPosition.y
+  }
+  if !result.isFinite() {
+    return Resolution.NumericLimit
+  }
+  return resolved(flags, Mapping.Affine { value: result }, hostToDevice.*)
+}

@@ -1,0 +1,176 @@
+//! Pinned css-images-3 SHA256 74eb4b475aa0845a50ebedb4bbb3ba7bf3966f975817d1c5cf8e3d512f53447e.
+//! Pinned svg2-embedded SHA256 9f2286fa76c0d82df7f8f2f373fb1d083ee2e30c468305ae542373aedd964e8c.
+import used_images { NaturalSize, size, fit }
+import scene { RenderError }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.num.f64
+import svg_geometry.geometry { Rect, Point, Transform, Size }
+import svg_geometry.svg { AspectRatio, Alignment }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn some(value: f64) -> Option<f64> {
+  return Option<f64>.some(value)
+}
+
+fn none() -> Option<f64> {
+  return Option<f64>.None
+}
+
+effect fn dimensions(
+  w: Option<f64>,
+  h: Option<f64>,
+  iw: Option<f64>,
+  ih: Option<f64>,
+  ratio: Option<f64>,
+  ew: f64,
+  eh: f64,
+) -> ()
+  ! RenderError | AssertionError<'static> {
+  let actual = run size(w, h, NaturalSize { width: iw, height: ih, ratio: ratio })
+  run Testing.expect(actual.width == ew && actual.height == eh, "CSS default object sizing")
+}
+
+// https://www.w3.org/TR/css-images-3/#default-sizing (definite dimensions win).
+test effect fn explicitDimensions() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(some(40.0), some(90.0), some(8.0), some(4.0), some(2.0), 40.0, 90.0)
+}
+
+// https://www.w3.org/TR/css-images-3/#default-sizing (one specified dimension).
+test effect fn oneAutoDimension() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(some(40.0), none(), some(8.0), some(4.0), some(2.0), 40.0, 20.0)
+  run dimensions(none(), some(40.0), some(8.0), some(4.0), some(2.0), 80.0, 40.0)
+}
+
+// https://www.w3.org/TR/css-images-3/#default-sizing (missing ratio).
+test effect fn missingRatio() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(some(40.0), none(), none(), some(7.0), none(), 40.0, 7.0)
+  run dimensions(none(), some(40.0), some(7.0), none(), none(), 7.0, 40.0)
+  run dimensions(some(40.0), none(), none(), none(), none(), 40.0, 150.0)
+  run dimensions(none(), some(40.0), none(), none(), none(), 300.0, 40.0)
+}
+
+// https://www.w3.org/TR/css-images-3/#default-sizing (no specified constraints).
+test effect fn intrinsicDimensions() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(none(), none(), some(8.0), some(4.0), some(2.0), 8.0, 4.0)
+  run dimensions(none(), none(), some(8.0), none(), some(2.0), 8.0, 4.0)
+  run dimensions(none(), none(), none(), some(4.0), some(2.0), 8.0, 4.0)
+  run dimensions(none(), none(), some(8.0), none(), none(), 8.0, 150.0)
+}
+
+// https://www.w3.org/TR/css-images-3/#default-sizing and #cover-contain.
+test effect fn ratioOnly() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(none(), none(), none(), none(), some(4.0), 300.0, 75.0)
+  run dimensions(none(), none(), none(), none(), some(1.0), 150.0, 150.0)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#Placement (300 by 150 fallback).
+test effect fn noIntrinsicDimensions() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(none(), none(), none(), none(), none(), 300.0, 150.0)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#Placement (zero disables painting).
+test effect fn zeroDimensions() -> ()
+  ! RenderError | AssertionError<'static> {
+  run dimensions(some(0.0), none(), some(8.0), some(4.0), some(2.0), 0.0, 0.0)
+  let target = Rect { xMin: 3.0, yMin: 5.0, xMax: 3.0, yMax: 20.0 }
+  let result = fit(
+    8.0,
+    4.0,
+    target,
+    AspectRatio { alignment: Alignment.XMidYMid, slice: false, defer: false },
+  )
+  run Testing.expect(result.isNone(), "zero positioning rectangle does not paint")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute.
+test effect fn meetSliceAndNone() -> ()
+  ! AssertionError<'static> {
+  let target = Rect { xMin: 3.0, yMin: 5.0, xMax: 23.0, yMax: 25.0 }
+  let mut mode: usize = 0
+  while mode < 3 {
+    let result = fit(
+      8.0,
+      4.0,
+      target,
+      AspectRatio {
+        alignment: if mode == 2 {
+          Alignment.None
+        } else {
+          Alignment.XMidYMid
+        },
+        slice: mode == 1,
+        defer: false,
+      },
+    )
+    let valid = match &result {
+      Option<Transform>.Some { value } => {
+        let a = value * (Point.new(0.0, 0.0))
+        let b = value * (Point.new(8.0, 4.0))
+        if mode == 0 {
+          a.x == 3.0 && a.y == 10.0 && b.x == 23.0 && b.y == 20.0
+        } else if mode == 1 {
+          a.x == -7.0 && a.y == 5.0 && b.x == 33.0 && b.y == 25.0
+        } else {
+          a.x == 3.0 && a.y == 5.0 && b.x == 23.0 && b.y == 25.0
+        }
+      }
+      _ => false
+    }
+    run Testing.expect(valid, "image sample coordinates map into aligned positioning rectangle")
+    mode = mode + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#Placement:
+// invalid geometry never reaches sample mapping; finite overflow is rejected too.
+test effect fn invalidDimensions() -> ()
+  ! AssertionError<'static> {
+  // LIMITATION-10: f64.NAN fails in dev.32; https://github.com/silk-lang/silk/issues/2621.
+  let values: [f64; 4] = [-1.0, f64.INFINITY, f64.fromBits(9221120237041090560), 1.0e308]
+  let mut i: usize = 0
+  while i < values.length {
+    let outcome = run Effect.result(
+      size(
+        some(values[i]),
+        none(),
+        NaturalSize { width: none(), height: none(), ratio: some(0.01) },
+      ),
+    )
+    let rejected = match &outcome {
+      Result<Size, RenderError>.Failure { error } => error == RenderError.InvalidGeometry
+      _ => false
+    }
+    run Testing.expect(rejected, "invalid or overflowing image dimensions are rejected")
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute:
+// alignment is observable independently of meet/slice, and raster images ignore defer.
+test effect fn cornerAlignmentAndDefer() -> ()
+  ! AssertionError<'static> {
+  let target = Rect { xMin: 3.0, yMin: 5.0, xMax: 23.0, yMax: 25.0 }
+  let result = fit(
+    8.0,
+    4.0,
+    target,
+    AspectRatio { alignment: Alignment.XMaxYMax, slice: false, defer: true },
+  )
+  let valid = match &result {
+    Option<Transform>.Some { value } => {
+      let a = value * (Point.new(0.0, 0.0))
+      let b = value * (Point.new(8.0, 4.0))
+      a.x == 3.0 && a.y == 15.0 && b.x == 23.0 && b.y == 25.0
+    }
+    _ => false
+  }
+  run Testing.expect(valid, "bottom-right aligned raster placement ignores defer")
+}

@@ -1,0 +1,245 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "use-shadow-inheritance",
+      "input": "inputs/use-shadow-inheritance.svg",
+      "references": [
+        {
+          "path": "references/use-shadow-inheritance.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Repeated uses inherit independently and rematch selectors within their own shadow topology, not source or host ancestry.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance",
+      "tolerance": {}
+    },
+    {
+      "id": "symbol-instance-viewport",
+      "input": "inputs/symbol-instance-viewport.svg",
+      "references": [
+        {
+          "path": "references/symbol-instance-viewport.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Only the instanced symbol becomes display:inline through the UA-important host selector; use dimensions scale its viewBox.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SymbolNotes",
+      "tolerance": {}
+    },
+    {
+      "id": "nested-viewport-overflow",
+      "input": "inputs/nested-viewport-overflow.svg",
+      "references": [
+        {
+          "path": "references/nested-viewport-overflow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Nested viewBox mapping clips oversize content at the physical viewport and does not leak its clip to a sibling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "switch-svg2-selection",
+      "input": "inputs/switch-svg2-selection.svg",
+      "references": [
+        {
+          "path": "references/switch-svg2-selection.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG2 selection ignores requiredFeatures, evaluates requiredExtensions, and never falls through because a selected element is hidden or non-rendering.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement",
+      "tolerance": {}
+    },
+    {
+      "id": "transformed-viewport-clip",
+      "input": "inputs/transformed-viewport-clip.svg",
+      "references": [
+        {
+          "path": "references/transformed-viewport-clip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Clipping follows the transformed physical viewport polygon and remains local to its subtree.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "root-transform-reference-box",
+      "input": "inputs/root-transform-reference-box.svg",
+      "references": [
+        {
+          "path": "references/root-transform-reference-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An outer SVG uses its CSS layout box for the default transform reference, independently of its viewBox.",
+      "spec": "https://www.w3.org/TR/css-transforms-1/#transform-box",
+      "tolerance": {}
+    },
+    {
+      "id": "unknown-and-foreign-content",
+      "input": "inputs/unknown-and-foreign-content.svg",
+      "references": [
+        {
+          "path": "references/unknown-and-foreign-content.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Unknown SVG containers inherit normally; foreign private subtrees do not paint; a nested SVG inside foreignObject uses its containing block.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UnknownElement",
+      "tolerance": {}
+    },
+    {
+      "id": "asymmetric-viewport-overflow",
+      "input": "inputs/asymmetric-viewport-overflow.svg",
+      "references": [
+        {
+          "path": "references/asymmetric-viewport-overflow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each overflow axis clips independently after computed-value coupling and SVG non-scrolling auto resolution.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "projective-viewport-boundary",
+      "input": "inputs/projective-viewport-boundary.svg",
+      "references": [
+        {
+          "path": "references/projective-viewport-boundary.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Physical viewport clipping retains projective edges and positive-w orientation even when descendant geometry crosses the horizon.",
+      "spec": "https://www.w3.org/TR/css-transforms-2/#3d-transform-rendering",
+      "tolerance": {}
+    },
+    {
+      "id": "perspective-viewport-boundary",
+      "input": "inputs/perspective-viewport-boundary.svg",
+      "references": [
+        {
+          "path": "references/perspective-viewport-boundary.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Parent perspective transforms the physical clip using the full child matrix, not an already-flattened affine approximation.",
+      "spec": "https://www.w3.org/TR/css-transforms-2/#perspective-property",
+      "tolerance": {}
+    },
+    {
+      "id": "viewport-perspective-coordinate-system",
+      "input": "inputs/viewport-perspective-coordinate-system.svg",
+      "references": [
+        {
+          "path": "references/viewport-perspective-coordinate-system.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Viewport perspective resolves its origin outside viewBox placement, then composes child transforms in the correct child coordinate system.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#TransformProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "foreign-object-reference-box",
+      "input": "inputs/foreign-object-reference-box.svg",
+      "references": [
+        {
+          "path": "references/foreign-object-reference-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Overflowing embedded descendants do not enlarge the foreignObject positioning rectangle used by ancestor transform reference boxes.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#Placement",
+      "tolerance": {}
+    },
+    {
+      "id": "gzip-document",
+      "input": "inputs/gzip-document.svgz",
+      "references": [
+        {
+          "path": "references/compressed-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers",
+      "tolerance": {}
+    },
+    {
+      "id": "zlib-document",
+      "input": "inputs/zlib-document.svgz",
+      "references": [
+        {
+          "path": "references/compressed-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers",
+      "tolerance": {}
+    },
+    {
+      "id": "gzip-members",
+      "input": "inputs/gzip-members.svgz",
+      "references": [
+        {
+          "path": "references/compressed-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers",
+      "tolerance": {}
+    },
+    {
+      "id": "gzip-external-use",
+      "input": "inputs/gzip-external-use.svg",
+      "references": [
+        {
+          "path": "references/compressed-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers",
+      "tolerance": {}
+    },
+    {
+      "id": "gzip-data-use",
+      "input": "inputs/gzip-data-use.svg",
+      "references": [
+        {
+          "path": "references/compressed-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers",
+      "tolerance": {}
+    }
+  ]
+}

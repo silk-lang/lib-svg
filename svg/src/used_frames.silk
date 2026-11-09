@@ -1,0 +1,110 @@
+//! Vector-effect hosts are independent of SVG percentage-resolution viewports.
+import mapping { Mapping }
+import scene { RenderError, StrokeSpace }
+import used_vector_effects { Resolution }
+import used_vector_effects
+import svg_geometry.geometry { Point, Transform }
+import vector.projective { Homography }
+import vector.geometry_error { GeometryError, NUMERIC_LIMIT }
+import silk.core.option { Option }
+
+pub struct Frame {
+  pub localToViewport: Mapping,
+  pub viewportToScreen: Mapping,
+  pub localToScreen: Mapping,
+  pub screenToDevice: Mapping,
+}
+
+effect fn inverse(value: &Mapping) -> Mapping
+  ! GeometryError {
+  match &value.* {
+    Mapping.Affine { value: affine } => match &affine.inverse() {
+      Option<Transform>.Some { value: found } => {
+        return Mapping.Affine { value: found }
+      }
+      _ => {
+        fail GeometryError { code: NUMERIC_LIMIT }
+      }
+    }
+    Mapping.Projective { value: projective } => match &projective.inverse() {
+      Option<Homography>.Some { value: found } => {
+        return run Mapping.fromHomography(found)
+      }
+      _ => {
+        fail GeometryError { code: NUMERIC_LIMIT }
+      }
+    }
+  }
+}
+
+impl Frame {
+  // Marker/pattern surfaces start a resource-local host before final placement.
+  // This does not establish a new percentage-resolution SVG viewport.
+  pub fn root(screenToDevice: Mapping) -> Frame {
+    return Frame {
+      localToViewport: Mapping.identity(),
+      viewportToScreen: Mapping.identity(),
+      localToScreen: Mapping.identity(),
+      screenToDevice: screenToDevice,
+    }
+  }
+
+  pub effect fn advance(self: &Self, local: &Mapping, viewportHost: Option<Mapping>) -> Frame
+    ! GeometryError {
+    let screen = run self.localToScreen.compose(local)
+    match &viewportHost {
+      Option<Mapping>.Some { value } => {
+        return Frame {
+          localToViewport: run (run inverse(&value)).compose(local),
+          viewportToScreen: run self.localToScreen.compose(&value),
+          localToScreen: screen,
+          screenToDevice: self.screenToDevice,
+        }
+      }
+      _ => {
+        return Frame {
+          localToViewport: run self.localToViewport.compose(local),
+          viewportToScreen: self.viewportToScreen,
+          localToScreen: screen,
+          screenToDevice: self.screenToDevice,
+        }
+      }
+    }
+  }
+
+  pub effect fn apply(self: &mut Self, flags: u8, screen: bool, fixed: Point) -> Option<StrokeSpace>
+    ! RenderError | GeometryError {
+    let hostToDevice = if screen {
+      self.screenToDevice
+    } else {
+      run self.screenToDevice.compose(&self.viewportToScreen)
+    }
+    let localToHost = if screen {
+      self.localToScreen
+    } else {
+      self.localToViewport
+    }
+    let used = match &used_vector_effects.resolve(flags, &localToHost, &hostToDevice, fixed) {
+      Resolution.Used { value } => value
+      _ => {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    if (used.flags & 14) != 0 {
+      if screen {
+        self.localToScreen = used.localToHost
+        self.localToViewport = run (run inverse(&self.viewportToScreen)).compose(&used.localToHost)
+      } else {
+        self.localToViewport = used.localToHost
+        self.localToScreen = run self.viewportToScreen.compose(&used.localToHost)
+      }
+    }
+    return if used.strokeInHost {
+      Option<StrokeSpace>.some(
+        StrokeSpace { pathToHost: used.localToHost, hostToDevice: used.hostToDevice },
+      )
+    } else {
+      Option<StrokeSpace>.None
+    }
+  }
+}

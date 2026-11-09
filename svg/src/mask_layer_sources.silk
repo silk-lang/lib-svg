@@ -1,0 +1,99 @@
+//! url() mask layer images that do not name mask elements. CSS Masking 1
+//! #the-mask-image: such a <url> is an <image>, fetched like any other image.
+import structure { Graph, OccurrenceId }
+import document_styles { StyledGraph }
+import image_assets { LayerRequest }
+import url { Url, UrlError }
+import svg_css.computed { ComputedValue, StyleId }
+import svg_css.properties { Property }
+import svg_css.values { Value }
+import svg_css.effect_values { EffectValue, Image }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+/// Absolute image URLs for every url() mask layer without a mask element target.
+/// Fragment-only references name elements; when unresolved they stay transparent
+/// black layers. Relative URLs resolve against the declaring stylesheet's base.
+pub effect fn requests(graph: &Graph, styles: &StyledGraph<'_>) -> List<LayerRequest>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = List<LayerRequest>.make()
+  let engine = &styles.catalog.engine
+  let mut index: usize = 0
+  while index < graph.occurrences.length() {
+    let occurrence = OccurrenceId { index: index }
+    index = index + 1
+    let style = match &styles.nodeStyle(occurrence) {
+      Option<StyleId>.Some { value } => value
+      _ => {
+        continue
+      }
+    }
+    let entry = match &engine.get(style, Property.MaskImage) {
+      Option<ComputedValue>.Some { value } => value
+      _ => {
+        continue
+      }
+    }
+    let layers = match &engine.values.get(entry.value).* {
+      Value.Effect { value } => match &value {
+        EffectValue.Masks { layers, resetBorder } => layers.asSlice()
+        _ => {
+          continue
+        }
+      }
+      _ => {
+        continue
+      }
+    }
+    let source = graph.occurrences.asSlice()[occurrence.index].source
+    let document = &graph.documents.asSlice()[source.document.index]
+    let mut layer: usize = 0
+    while layer < layers.length {
+      let current = layer
+      layer = layer + 1
+      let text = match &layers[current].image {
+        Image.Url { url } => url.asSlice()
+        _ => {
+          continue
+        }
+      }
+      if text.length == 0 || text[0] == 35
+        || styles.resourceAt(occurrence, Property.MaskImage, current).isSome() {
+        continue
+      }
+      let base = match &entry.sourceBuffer {
+        Option<usize>.Some { value: buffer } => match &styles.catalog.base(buffer) {
+          Option<&Url>.Some { value } => value
+          _ => &graph.urls.asSlice()[document.nodeBases.asSlice()[source.node.index]]
+        }
+        _ => &graph.urls.asSlice()[document.nodeBases.asSlice()[source.node.index]]
+      }
+      let parsed = run Effect.result(Url.resolve(base, text))
+      match move parsed {
+        Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+          run result.append(
+            LayerRequest {
+              occurrence: occurrence.index,
+              layer: current,
+              url: move value,
+              policy: document.policy,
+            },
+          )
+        }
+        Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
+          match &error {
+            OutOfMemoryError value => {
+              fail OutOfMemoryError {}
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+  }
+  return move result
+}

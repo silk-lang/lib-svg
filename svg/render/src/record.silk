@@ -1,0 +1,321 @@
+//! Turn resolved SVG painting order into retained backend-neutral commands.
+import svg_core.scene {
+  RenderTree,
+  ResolvedNode,
+  ResolvedShape,
+  DisplayList,
+  Pattern,
+  Command,
+  Color,
+  Paint,
+  Brush,
+  Stroke,
+  RenderError,
+  HitTarget,
+  Style,
+  FillRule,
+}
+import svg_core.structure { Graph, OccurrenceId, SourceId }
+import svg_css.values { PaintLayer }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+
+fn strokeOf(style: &Style) -> Stroke {
+  return Stroke {
+    width: style.strokeWidth,
+    cap: style.lineCap,
+    join: style.lineJoin,
+    miterLimit: style.miterLimit,
+    dashIndex: style.dashIndex,
+    dashOffset: style.dashOffset,
+  }
+}
+
+struct Painting {
+  brush: Brush,
+  opacity: f64,
+}
+
+effect fn painting(paint: &Paint, currentColor: Color, opacity: f64) -> Option<Painting>
+  ! RenderError {
+  if opacity == 0.0 {
+    return Option<Painting>.None
+  }
+  let mut color = match &paint.* {
+    Paint.None => {
+      return Option<Painting>.None
+    }
+    Paint.CurrentColor => currentColor
+    Paint.Solid { color } => color
+    Paint.Server { index } => {
+      return Option<Painting>.some(
+        Painting { brush: Brush.Server { index: index }, opacity: opacity },
+      )
+    }
+    Paint.ContextFill => {
+      fail RenderError.InvalidGeometry
+    }
+    Paint.ContextStroke => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+
+  // Keep the solid-color path's single alpha quantization.
+  color.a = color.a * opacity
+  return if color.a == 0.0 {
+    Option<Painting>.None
+  } else {
+    Option<Painting>.some(Painting { brush: Brush.Solid { color: color }, opacity: 1.0 })
+  }
+}
+
+// The element a hit on `occurrence` targets: its source, and the outermost `use` element
+// whose shadow tree holds it.
+fn hitTarget(graph: &Graph, occurrence: usize) -> HitTarget {
+  let all = graph.occurrences.asSlice()
+  let mut host = Option<SourceId>.None
+  let mut at = occurrence
+  while true {
+    let entry = &all[at]
+    let parent = match &entry.parent {
+      Option<OccurrenceId>.Some { value } => value.index
+      _ => {
+        break
+      }
+    }
+    if entry.shadowRoot {
+      host = Option<SourceId>.some(all[parent].source)
+    }
+    at = parent
+  }
+  return HitTarget { source: all[occurrence].source, host: host }
+}
+
+effect fn recordCommands(
+  nodes: &[ResolvedNode],
+  shapes: &[ResolvedShape],
+  graph: &Graph,
+  targets: &mut List<HitTarget>,
+) -> List<Command>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  // Each node records at most one command.
+  let mut commands = run List<Command>.makeWithCapacity(nodes.length)
+  let mut i: usize = 0
+  while i < nodes.length {
+    match &nodes[i] {
+      ResolvedNode.Embedded { image, transform, clip } => {
+        run commands.append(Command.Embedded { image: image, transform: transform, clip: clip })
+      }
+      ResolvedNode.BeginGroup { opacity, bounds, linearRgb, blendMode } => {
+        run commands.append(
+          Command.PushLayer {
+            opacity: opacity,
+            bounds: bounds,
+            linearRgb: linearRgb,
+            blendMode: blendMode,
+          },
+        )
+      }
+      ResolvedNode.ConvertMask { luminance, linearRgb } => {
+        run commands.append(Command.ConvertMask { luminance: luminance, linearRgb: linearRgb })
+      }
+      ResolvedNode.CompositeMask { operation } => {
+        run commands.append(Command.CompositeMask { operation: operation })
+      }
+      ResolvedNode.ApplyMask { luminance, linearRgb } => {
+        run commands.append(Command.ApplyMask { luminance: luminance, linearRgb: linearRgb })
+      }
+      ResolvedNode.ApplyClip { index } => {
+        run commands.append(Command.ApplyClip { index: index })
+      }
+      ResolvedNode.EndGroup => {
+        run commands.append(Command.PopLayer)
+      }
+      ResolvedNode.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+        run commands.append(
+          Command.BeginFilter {
+            filter: filter,
+            transform: transform,
+            clip: clip,
+            beneath: beneath,
+            backdrop: backdrop,
+          },
+        )
+      }
+      ResolvedNode.EndFilter => {
+        run commands.append(Command.EndFilter)
+      }
+      ResolvedNode.BeginFilterImage => {
+        run commands.append(Command.BeginFilterImage)
+      }
+      ResolvedNode.EndFilterImage => {
+        run commands.append(Command.EndFilterImage)
+      }
+      ResolvedNode.Hit { shape, occurrence, fill, stroke } => {
+        if shape >= shapes.length || occurrence >= graph.occurrences.length() {
+          fail RenderError.InvalidGeometry
+        }
+        let resolved = &shapes[shape]
+        let style = &resolved.style
+        run commands.append(
+          Command.Hit {
+            path: resolved.path,
+            transform: resolved.transform,
+            strokeSpace: resolved.strokeSpace,
+            clip: resolved.clip,
+            rule: if fill {
+              Option<FillRule>.some(style.fillRule)
+            } else {
+              Option<FillRule>.None
+            },
+            stroke: if stroke && style.strokeWidth > 0.0 {
+              Option<Stroke>.some(strokeOf(style))
+            } else {
+              Option<Stroke>.None
+            },
+            target: targets.length(),
+          },
+        )
+        run targets.append(hitTarget(graph, occurrence))
+      }
+      ResolvedNode.Paint { shape, layer } => {
+        if shape >= shapes.length || layer == PaintLayer.Markers {
+          fail RenderError.InvalidGeometry
+        }
+        let resolved = &shapes[shape]
+        let style = &resolved.style
+        let selected = if layer == PaintLayer.Fill {
+          run painting(&style.fill, style.color, style.fillOpacity)
+        } else if style.strokeWidth > 0.0 {
+          run painting(&style.stroke, style.color, style.strokeOpacity)
+        } else {
+          Option<Painting>.None
+        }
+        match &selected {
+          Option<Painting>.Some { value } => {
+            if layer == PaintLayer.Fill {
+              run commands.append(
+                Command.FillPath {
+                  path: resolved.path,
+                  transform: resolved.transform,
+                  clip: resolved.clip,
+                  bounds: resolved.bounds,
+                  brush: value.brush,
+                  opacity: value.opacity,
+                  linearRgb: style.linearRgb,
+                  rule: style.fillRule,
+                  crispEdges: style.crispEdges,
+                },
+              )
+            } else {
+              run commands.append(
+                Command.StrokePath {
+                  path: resolved.path,
+                  transform: resolved.transform,
+                  strokeSpace: resolved.strokeSpace,
+                  clip: resolved.clip,
+                  bounds: resolved.bounds,
+                  brush: value.brush,
+                  opacity: value.opacity,
+                  linearRgb: style.linearRgb,
+                  crispEdges: style.crispEdges,
+                  stroke: strokeOf(style),
+                },
+              )
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+    i = i + 1
+  }
+  return move commands
+}
+
+pub effect fn record(tree: RenderTree<'_>) -> DisplayList
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let result = run recorded(move tree)
+  return move result.list
+}
+
+/// A display list and the graph its tree was resolved from, for callers that resolve the
+/// same graph again, such as animation frames.
+pub struct Recorded {
+  pub list: DisplayList,
+  pub graph: Graph,
+}
+
+/// Records `tree` like [`record`] and hands its graph back.
+pub effect fn recorded(tree: RenderTree<'_>) -> Recorded
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut targets = List<HitTarget>.make()
+  let commands = run recordCommands(
+    tree.nodes.asSlice(),
+    tree.shapes.asSlice(),
+    &tree.graph,
+    &mut targets,
+  )
+  let mut patterns = run List<Pattern>.makeWithCapacity(tree.patterns.length())
+  let mut i: usize = 0
+  while i < tree.patterns.length() {
+    let picture = &tree.patterns.asSlice()[i]
+    run patterns.append(
+      Pattern {
+        tile: picture.tile,
+        contentBounds: picture.contentBounds,
+        commands: run recordCommands(
+          picture.nodes.asSlice(),
+          picture.shapes.asSlice(),
+          &tree.graph,
+          &mut targets,
+        ),
+      },
+    )
+    i = i + 1
+  }
+  let mut sources = move tree.embedded
+  let mut embedded = List<Option<DisplayList>>.make()
+  i = 0
+  while i < sources.length() {
+    run embedded.append(Option<DisplayList>.None)
+    i = i + 1
+  }
+  while sources.length() != 0 {
+    let index = sources.length() - 1
+    let source = sources.remove(index)
+    match move source.tree {
+      Option<RenderTree>.Some { value } => {
+        let picture = run record(move value)
+        let entries = embedded.asMutSlice()
+        entries[index] = Option<DisplayList>.some(move picture)
+      }
+      _ => {}
+    }
+  }
+  let list = DisplayList {
+    embedded: move embedded,
+    images: move tree.images,
+    width: tree.width,
+    height: tree.height,
+    maxPatternPixels: tree.maxPixels,
+    maxPatternWork: tree.graph.limits.maxOccurrences,
+    patterns: move patterns,
+    paths: move tree.paths,
+    dashes: move tree.dashes,
+    commands: move commands,
+    targets: move targets,
+    projectionClips: move tree.projectionClips,
+    clipNodes: move tree.clipNodes,
+    filters: move tree.filters,
+    gradientStops: move tree.gradientStops,
+    gradients: move tree.gradients,
+    paints: move tree.paints,
+    strokeSpaces: move tree.strokeSpaces,
+  }
+  return Recorded { list: move list, graph: move tree.graph }
+}

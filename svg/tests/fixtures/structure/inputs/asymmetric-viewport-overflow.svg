@@ -1,0 +1,2 @@
+<!-- SVG2 render#OverflowAndClipProperties: non-scrolling auto remains visible. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><svg x="8" y="8" width="8" height="8" style="overflow-x:hidden;overflow-y:visible"><rect x="-100" y="-100" width="200" height="200"/></svg><rect x="24" width="8" height="8" fill="red"/></svg>

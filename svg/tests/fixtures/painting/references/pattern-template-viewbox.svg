@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElement -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><rect width="16" height="8" fill="blue"/><rect x="1" width="2" height="8" fill="red"/><rect x="5" width="2" height="8" fill="red"/><rect x="9" width="2" height="8" fill="red"/><rect x="13" width="2" height="8" fill="red"/></svg>

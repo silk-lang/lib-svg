@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternNotes -->
+<defs><pattern id="p" patternUnits="userSpaceOnUse" width="8" height="8"><path d="M-1 1L1 1" style="transform:matrix3d(0,0,0,1,0,1,0,0,0,0,1,0,1,0,0,0)" fill="none" stroke="red" stroke-width="2" vector-effect="non-scaling-stroke"/></pattern></defs>
+<rect width="16" height="8" fill="url(#p)"/>
+</svg>

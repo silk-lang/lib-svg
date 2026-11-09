@@ -1,0 +1,795 @@
+{
+  "format": 1,
+  "specs": {
+    "compositing-1": {
+      "resolved": "https://www.w3.org/TR/compositing-1/",
+      "sha256": "0fb91119308e706a5e4df368a91fa3b43cd5fe8cd8f192418b2df0a30ba8a62b",
+      "url": "https://www.w3.org/TR/compositing-1/"
+    },
+    "css-animations-1": {
+      "resolved": "https://www.w3.org/TR/css-animations-1/",
+      "sha256": "f725ad790abbf87f7f53b00f383b8c206a95decb27cd5c257a9725646abb4d98",
+      "url": "https://www.w3.org/TR/css-animations-1/"
+    },
+    "css-cascade-4": {
+      "resolved": "https://www.w3.org/TR/css-cascade-4/",
+      "sha256": "7787bd75c1f7187fdfdfdf9e7b5b8391faeac0e7c80dd19461de8426931138e5",
+      "url": "https://www.w3.org/TR/css-cascade-4/"
+    },
+    "css-color-4": {
+      "resolved": "https://www.w3.org/TR/css-color-4/",
+      "sha256": "43bfdad1d01d4ce47cbb350b5fdf058be5b63edc2f0416b6967de1d731ff7145",
+      "url": "https://www.w3.org/TR/css-color-4/"
+    },
+    "css-conditional-3": {
+      "resolved": "https://www.w3.org/TR/css-conditional-3/",
+      "sha256": "672eb79c78c53b9c92a460ffcfd8718af3c1e38ecf317566d955ffa1df470b35",
+      "url": "https://www.w3.org/TR/css-conditional-3/"
+    },
+    "css-conditional-3-2022": {
+      "resolved": "https://www.w3.org/TR/2022/CR-css-conditional-3-20220113/",
+      "sha256": "83661f96d78a01e99c1bfc94fb870f7e21c9fdba63a4867a6701ab4dcaaa8eb8",
+      "url": "https://www.w3.org/TR/2022/CR-css-conditional-3-20220113/"
+    },
+    "css-fonts-4": {
+      "resolved": "https://www.w3.org/TR/css-fonts-4/",
+      "sha256": "b8e2b86d61febe7a32a1bb72c308c0de428cc2c275de26445ff3305fa9205360",
+      "url": "https://www.w3.org/TR/css-fonts-4/"
+    },
+    "css-images-3": {
+      "resolved": "https://www.w3.org/TR/css-images-3/",
+      "sha256": "74eb4b475aa0845a50ebedb4bbb3ba7bf3966f975817d1c5cf8e3d512f53447e",
+      "url": "https://www.w3.org/TR/css-images-3/"
+    },
+    "css-inline-3": {
+      "resolved": "https://www.w3.org/TR/css-inline-3/",
+      "sha256": "a73a73a45bf591c5964c5d49212de94066a2e4aeda245c7eb1f984c5fd3bb152",
+      "url": "https://www.w3.org/TR/css-inline-3/"
+    },
+    "css-masking-1": {
+      "resolved": "https://www.w3.org/TR/css-masking-1/",
+      "sha256": "79ff953b47472ae5bc1eace14c0c470d7bd75d128e933806c97c50b640194671",
+      "url": "https://www.w3.org/TR/css-masking-1/"
+    },
+    "css-namespaces-3": {
+      "resolved": "https://www.w3.org/TR/css-namespaces-3/",
+      "sha256": "a23b00b30e8e3c550f35f85291cd514e0907c00899e12802569b7f977207daa8",
+      "url": "https://www.w3.org/TR/css-namespaces-3/"
+    },
+    "css-shadow-1": {
+      "resolved": "https://drafts.csswg.org/css-shadow-1/",
+      "sha256": "c84bdd0453ff210fa95fb95b118d7a8d365f189ea8fab1ee7db791f199fe1db4",
+      "url": "https://drafts.csswg.org/css-shadow-1/"
+    },
+    "css-shapes-1": {
+      "resolved": "https://www.w3.org/TR/css-shapes-1/",
+      "sha256": "f7e528fad3094f91fb9591ba6f849e2453353d50d0f136ca9e0749371fc31763",
+      "url": "https://www.w3.org/TR/css-shapes-1/"
+    },
+    "css-syntax-3": {
+      "resolved": "https://www.w3.org/TR/css-syntax-3/",
+      "sha256": "8dc3adcc2b4e8fd8fa73c0be85cec67f006874ab42010cdf4528af4aa83f2878",
+      "url": "https://www.w3.org/TR/css-syntax-3/"
+    },
+    "css-text-3": {
+      "resolved": "https://www.w3.org/TR/css-text-3/",
+      "sha256": "17c26f1b41455947f106dac81736944b12da328ee4892c7c5b601f5b65ced55a",
+      "url": "https://www.w3.org/TR/css-text-3/"
+    },
+    "css-text-4": {
+      "resolved": "https://www.w3.org/TR/css-text-4/",
+      "sha256": "106c5cd086ab23b0edea5aa3ff6876b61cc623154f728aa269b74f0527dba19d",
+      "url": "https://www.w3.org/TR/css-text-4/"
+    },
+    "css-text-decor-3": {
+      "resolved": "https://www.w3.org/TR/css-text-decor-3/",
+      "sha256": "feebf9327271a19fdffe0d6e70fb8d01e3f3c1fca78abd3b7f223646ac3b6b95",
+      "url": "https://www.w3.org/TR/css-text-decor-3/"
+    },
+    "css-transforms-1": {
+      "resolved": "https://www.w3.org/TR/css-transforms-1/",
+      "sha256": "4672e86844bfbe7af670c6702e873a36aee5a925d7fa30f374b79e88a1e18351",
+      "url": "https://www.w3.org/TR/css-transforms-1/"
+    },
+    "css-transforms-2": {
+      "resolved": "https://drafts.csswg.org/css-transforms-2/",
+      "sha256": "ae5706be318c6826179c9fb0172c35c17dcf3aa7362630974b6f8ff32020e4a8",
+      "url": "https://drafts.csswg.org/css-transforms-2/"
+    },
+    "css-values-3": {
+      "resolved": "https://www.w3.org/TR/css-values-3/",
+      "sha256": "dcce1f2ff24d66a05373696e07dda59727303a421ee4593eb433092029df0094",
+      "url": "https://www.w3.org/TR/css-values-3/"
+    },
+    "css-values-4": {
+      "resolved": "https://www.w3.org/TR/css-values-4/",
+      "sha256": "7b6b68c34d00d7f6945e66e4e2efa913266299f597d5825393cae85dac1cc78c",
+      "url": "https://www.w3.org/TR/css-values-4/"
+    },
+    "css-values-4-ed": {
+      "resolved": "https://drafts.csswg.org/css-values-4/",
+      "sha256": "26dac2780d37795863209f71d101aec95f3628d6e9affdce1bcb8f5b92ff8315",
+      "url": "https://drafts.csswg.org/css-values-4/"
+    },
+    "css-variables-1": {
+      "resolved": "https://www.w3.org/TR/css-variables-1/",
+      "sha256": "5ce7b2c106af576328f222dd622598f847881f2ba9a64d53d6681d27d07ea0db",
+      "url": "https://www.w3.org/TR/css-variables-1/"
+    },
+    "css-writing-modes-3": {
+      "resolved": "https://www.w3.org/TR/css-writing-modes-3/",
+      "sha256": "39564c2366c0d46ad5cb4bf9363f232667e2d0b6833ac79931117baa24873aec",
+      "url": "https://www.w3.org/TR/css-writing-modes-3/"
+    },
+    "css21": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/",
+      "sha256": "1e43327015ed94d3e6a3bb5b3948dc5e56f54ed76cfd2ef4918ad8f8ca86c5dd",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/"
+    },
+    "css21-box": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/box.html",
+      "sha256": "8875bbcdefe6edc0d14fbd4a8d336b1062d2feb60aa65985bef60e86c530d99f",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/box.html"
+    },
+    "css21-cascade": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/cascade.html",
+      "sha256": "c7aff33e6f0d4bbc75ffb20659afc3a413076db156259f7721be54f56184f148",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/cascade.html"
+    },
+    "css21-changes": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/changes.html",
+      "sha256": "830f199c671eea9ff2626fed1161bc4b5cbc6eb536be1f6b663cbf6fea13b589",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/changes.html"
+    },
+    "css21-colors": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/colors.html",
+      "sha256": "5784063d27780195eedcd9824d347c923803de276fb8b766825e50cbd044c490",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/colors.html"
+    },
+    "css21-conform": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/conform.html",
+      "sha256": "de58593b67d7256eaa72fc33b956c6838cd0e9fa1670d0a0e5feb8079b4ce572",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/conform.html"
+    },
+    "css21-fonts": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/fonts.html",
+      "sha256": "d52fc14f36c26c6afad471e298a8e7d574d86030bfe3b97dcfb46e89a6d1d1b1",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/fonts.html"
+    },
+    "css21-generate": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/generate.html",
+      "sha256": "37748b674cd2035de0aea765c6c504622b34b82ae8cae3bdd851b716b013e22f",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/generate.html"
+    },
+    "css21-grammar": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/grammar.html",
+      "sha256": "eeb984c469daab242d4a7ba9be10e13a8457d96dacf472800ebc8e76fe893e28",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/grammar.html"
+    },
+    "css21-intro": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/intro.html",
+      "sha256": "d4081213978405565da8b98cef9e099e450ed97d1f3a7390c474f6a1f54e19e7",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/intro.html"
+    },
+    "css21-media": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/media.html",
+      "sha256": "3a324a17037934085cc012d6730d86fdfd9beae5f02a0df9f97dd49696c98863",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/media.html"
+    },
+    "css21-page": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/page.html",
+      "sha256": "984664616bba69b3ef8a2fbbfb8da02fc67f250349fab495d39d5d1ddbbe7a2f",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/page.html"
+    },
+    "css21-sample": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/sample.html",
+      "sha256": "133769fd2555638382dda99739cea7b853bd683e46bc0ce82b7bbfbfe399d90d",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/sample.html"
+    },
+    "css21-selector": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/selector.html",
+      "sha256": "f66f7c932788118efbbe1d328ecf012a85ae2881c02464d2a1751347b1e95e14",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/selector.html"
+    },
+    "css21-syndata": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/syndata.html",
+      "sha256": "02e71c159e14aae772a52b552b4fd8dbdcd4ea5716a0004bfff5cb8897ac8002",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/syndata.html"
+    },
+    "css21-tables": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/tables.html",
+      "sha256": "201812dd6e3c9ce9133afbc8c5ac576c7033514b6748f764aa111cc563036dc1",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/tables.html"
+    },
+    "css21-text": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/text.html",
+      "sha256": "467a8857ae69f2b325394ea400d14bd1280f85956c0a2e7deabc39e612b1380f",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/text.html"
+    },
+    "css21-ui": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/ui.html",
+      "sha256": "ff1f72803ea09e98b983dc7e380a2c903d4d91fb1de017375dc9d7002ff2613d",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/ui.html"
+    },
+    "css21-visudet": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visudet.html",
+      "sha256": "12e8bc0e6b7c96d81c85f40690f296333342c0babe26ecee1fbf8a1fbd7f3834",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visudet.html"
+    },
+    "css21-visufx": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visufx.html",
+      "sha256": "2bc674cb7ab0dcd094adf970d83b8339021d66a0c473be6575049af60aa51a05",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visufx.html"
+    },
+    "css21-visuren": {
+      "resolved": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visuren.html",
+      "sha256": "3f334c530cf450f6964062e5badccc3e9f4fed9589917a0e62c6be10dabc72a4",
+      "url": "https://www.w3.org/TR/2011/REC-CSS2-20110607/visuren.html"
+    },
+    "cssom": {
+      "resolved": "https://www.w3.org/TR/cssom/",
+      "sha256": "24d77393e4ea56b04570066701d42c9ff6546a6d5e97d433a18cc1deaf6c9cd4",
+      "url": "https://www.w3.org/TR/cssom/"
+    },
+    "encoding": {
+      "resolved": "https://encoding.spec.whatwg.org/",
+      "sha256": "e1421f1791b202717883c452a6267129ce5fb3ca13652e5022a2b6d2a11fc262",
+      "url": "https://encoding.spec.whatwg.org/"
+    },
+    "fetch": {
+      "resolved": "https://fetch.spec.whatwg.org/",
+      "sha256": "63b0a018753c330adf1e40417524eb70ea02d4d3e123bcb39b6770f23bad911b",
+      "url": "https://fetch.spec.whatwg.org/"
+    },
+    "filter-effects-1": {
+      "resolved": "https://www.w3.org/TR/filter-effects-1/",
+      "sha256": "b73408da406802d4aa405c8ab1c0591732ff1403bae74f7267d53dc74b0dfb3d",
+      "url": "https://www.w3.org/TR/filter-effects-1/"
+    },
+    "icc-embedding": {
+      "resolved": "https://archive.color.org/files/technotes/ICC-Technote-ProfileEmbedding.pdf",
+      "sha256": "b5714bc115bcebb628366784c0a70b2c4dfb126e1dad5aef59f45c7a6f28b6e2",
+      "url": "https://archive.color.org/files/technotes/ICC-Technote-ProfileEmbedding.pdf"
+    },
+    "icc-v4": {
+      "resolved": "https://archive.color.org/specification/ICC.1-2022-05.pdf",
+      "sha256": "aad8e33128635893e38ae780def3b29e661e4541be03cb235c67dd94d558001b",
+      "url": "https://www.color.org/specification/ICC.1-2022-05.pdf"
+    },
+    "infra": {
+      "resolved": "https://infra.spec.whatwg.org/",
+      "sha256": "8d43350a0a36ebf7682cfe4146dcd7afb8d9f94da0d80677dcc0da16e43590d7",
+      "url": "https://infra.spec.whatwg.org/"
+    },
+    "jpeg-jfif": {
+      "resolved": "https://www.w3.org/Graphics/JPEG/jfif3.pdf",
+      "sha256": "1135325aa12ee6b3def5a374fecdf3d6d0de88dc4f205af7de8d25a9c949e173",
+      "url": "https://www.w3.org/Graphics/JPEG/jfif3.pdf"
+    },
+    "jpeg-t81": {
+      "resolved": "https://www.w3.org/Graphics/JPEG/itu-t81.pdf",
+      "sha256": "631031d4ba56b06abee3e312a0f235b9422da9c7267d1c8f7604418795768bf0",
+      "url": "https://www.w3.org/Graphics/JPEG/itu-t81.pdf"
+    },
+    "media-frags": {
+      "resolved": "https://www.w3.org/TR/2012/REC-media-frags-20120925/",
+      "sha256": "ecbaffe292d75c6d70f31b406475dd6e678440f92be34aa468fda67fb4217d9e",
+      "url": "https://www.w3.org/TR/2012/REC-media-frags-20120925/"
+    },
+    "mediaqueries-4": {
+      "resolved": "https://www.w3.org/TR/mediaqueries-4/",
+      "sha256": "41310724809c30304b674442d35e09ec59b0b7b74ba6104bb1d90334953522e0",
+      "url": "https://www.w3.org/TR/mediaqueries-4/"
+    },
+    "mediaqueries-5": {
+      "resolved": "https://www.w3.org/TR/mediaqueries-5/",
+      "sha256": "9e761f96f6a9935591264b470bdf5e4c1b5b15874c376b9de70e670171671c95",
+      "url": "https://www.w3.org/TR/mediaqueries-5/"
+    },
+    "png-3": {
+      "resolved": "https://www.w3.org/TR/png-3/",
+      "sha256": "a3ac82bb9eb8664b93961a2a9ff6def3d70e3a9f63d92721143c1f391d04edec",
+      "url": "https://www.w3.org/TR/png-3/"
+    },
+    "rfc1950": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc1950.html",
+      "sha256": "d3c9d031292be13c93f0bacc854b71c1654f8995df4865eb119748592a6a1cc9",
+      "url": "https://www.rfc-editor.org/rfc/rfc1950.html"
+    },
+    "rfc1951": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc1951.html",
+      "sha256": "c9f66817477f02bff589f0afa05a654d730e979930f0e9c2a82644a3ebc7a3e4",
+      "url": "https://www.rfc-editor.org/rfc/rfc1951.html"
+    },
+    "rfc1952": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc1952.html",
+      "sha256": "fb98ac09af618ee985c5a48798dc874957bf89be1fd4984c8cac57cc84756fb6",
+      "url": "https://www.rfc-editor.org/rfc/rfc1952.html"
+    },
+    "rfc2397": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc2397.html",
+      "sha256": "f57196bfd10b6f1169453a3705fe444844b83318721fe153fb127fd8d0f5ec3b",
+      "url": "https://www.rfc-editor.org/rfc/rfc2397.html"
+    },
+    "rfc3492": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc3492.html",
+      "sha256": "75bd0eacf25e05792356185156060d9861af3ce0c19c4d858f3be905eba28b26",
+      "url": "https://www.rfc-editor.org/rfc/rfc3492.html"
+    },
+    "rfc5892": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc5892.html",
+      "sha256": "f933a07a32d7d88a2504fcb06c75a5ead2ea2124b8e9ee20952f78561cf1d388",
+      "url": "https://www.rfc-editor.org/rfc/rfc5892.html"
+    },
+    "rfc5893": {
+      "resolved": "https://www.rfc-editor.org/rfc/rfc5893.html",
+      "sha256": "52b177192747217f1530569d0aaeeced8d06d068ec17ac67566786ae17d63a98",
+      "url": "https://www.rfc-editor.org/rfc/rfc5893.html"
+    },
+    "selectors-4": {
+      "resolved": "https://www.w3.org/TR/selectors-4/",
+      "sha256": "5d3b3f7e1fcc562dcec1a01ad2c5651e9f0bac294b255a75352e9df202604e6d",
+      "url": "https://www.w3.org/TR/selectors-4/"
+    },
+    "smil-animation": {
+      "resolved": "https://www.w3.org/TR/2001/REC-smil-animation-20010904/",
+      "sha256": "6753f320784df517b0d149752071cc4bb581a6d9194e928ef2e4171b6ec1519e",
+      "url": "https://www.w3.org/TR/2001/REC-smil-animation-20010904/"
+    },
+    "smil-content": {
+      "resolved": "https://www.w3.org/TR/REC-smil/smil-content.html",
+      "sha256": "16e9b80c4e7cd48c3509482d4313348276a0a98f4ef287f9ea2328d6a7cabe93",
+      "url": "https://www.w3.org/TR/REC-smil/smil-content.html"
+    },
+    "svg-animations-2": {
+      "resolved": "https://svgwg.org/specs/animations/",
+      "sha256": "bbca19ae9b0f85a59bd1298981a37981d42d93f294c406f0ba220f5fcdd9f792",
+      "url": "https://svgwg.org/specs/animations/"
+    },
+    "svg-integration": {
+      "resolved": "https://www.w3.org/TR/svg-integration/",
+      "sha256": "d4ce4277f6f294aecc7e674b667f896ea43517434dfdcdb865facfcb4c08c971",
+      "url": "https://www.w3.org/TR/svg-integration/"
+    },
+    "svg11": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/",
+      "sha256": "c558313b7129c2c6b75aacd282cc28a6c3e2f61d36b7fdd8cb02452330e1f1a9",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/"
+    },
+    "svg11-access": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/access.html",
+      "sha256": "ef9fb465b791c336b3019754192c649998d0246940a00b95d25c87b49a91f513",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/access.html"
+    },
+    "svg11-animate": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/animate.html",
+      "sha256": "ab70a88b357181ba7ca2727f1f211b8ae3b0f7cd0c0257c800fc3e217d235224",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/animate.html"
+    },
+    "svg11-backward": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/backward.html",
+      "sha256": "03f768b881069b32f7872bb7dbdcc289ab681c8d74ff06c9b5381aad0616682c",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/backward.html"
+    },
+    "svg11-changes": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/changes.html",
+      "sha256": "c65de555714893616fb82ce0506af848377a194f123ea39552d2ac9406976706",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/changes.html"
+    },
+    "svg11-color": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/color.html",
+      "sha256": "930223547117e1136ea64dd8a3d9a315e74dc1a66462bcbfd3f1ed2fd8635192",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/color.html"
+    },
+    "svg11-concepts": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/concepts.html",
+      "sha256": "6ea2523d99733c52dc1f3331cc1b757f3859e860ebd4858d24a4005e2a8d4576",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/concepts.html"
+    },
+    "svg11-conform": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html",
+      "sha256": "4cfaf410c41fa02ee31db3d1578f6a883aab85ffc036b0ceed95ccee6ddb4da7",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html"
+    },
+    "svg11-coords": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/coords.html",
+      "sha256": "6d4b07008f36380f18a65d06a3c5eedaa2766f4ae8efd09bfa708458954869f4",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/coords.html"
+    },
+    "svg11-errata": {
+      "resolved": "https://www.w3.org/2011/08/REC-SVG11-20110816-errata",
+      "sha256": "c8918e9f8fe331db449251d8da6433989a716411fd2274c2646d49d9cd07badd",
+      "url": "https://www.w3.org/2011/08/REC-SVG11-20110816-errata"
+    },
+    "svg11-extend": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/extend.html",
+      "sha256": "f9565dacf4f6b4755d5d5e7673e052d54e87a1a7b96c54bc12410c0bcb2225f8",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/extend.html"
+    },
+    "svg11-feature": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/feature.html",
+      "sha256": "a6556927212c6405df825b2ee4723f1ce200ac91fdc58e2b5b73cb17c483d384",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/feature.html"
+    },
+    "svg11-filters": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html",
+      "sha256": "46820a2a1537dfe2f4f63499edeb68dda7f126129a0cd08b7c9d62eff1bb569e",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html"
+    },
+    "svg11-fonts": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/fonts.html",
+      "sha256": "bb4a4e271a0972f4a5ade9e7c8978956d8eec8db14efd80563bdd8330f71a00e",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/fonts.html"
+    },
+    "svg11-implnote": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/implnote.html",
+      "sha256": "8c6edf7d7d52aa3d8c11f38276d090105f2504fd557edc2f5d4348e58d58e3e5",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/implnote.html"
+    },
+    "svg11-interact": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/interact.html",
+      "sha256": "d8dec0a2ab5bcfd348547f2702a12d07c6b4f789dd0e4fe183806c938b882d58",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/interact.html"
+    },
+    "svg11-intro": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/intro.html",
+      "sha256": "d0fe40614aff13d18750e6f449ba2a033209713e2b73be09a0bad73c90bcb894",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/intro.html"
+    },
+    "svg11-linking": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html",
+      "sha256": "5193a1c1f8f27af90fc4da7d74d76de989f810bcc205197f62ae62ad93f91d05",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html"
+    },
+    "svg11-masking": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html",
+      "sha256": "03e88856fda50b1c9ef727b6b8ec12d0c79150a9a548d1c1464b518c83e49727",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html"
+    },
+    "svg11-metadata": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/metadata.html",
+      "sha256": "5848f374fa65588f4b364920312c6eaa8bea872ca046692c265e35be502dba94",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/metadata.html"
+    },
+    "svg11-painting": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/painting.html",
+      "sha256": "8705784776f7ae94cf8a17b56fe0fdacc8a2b5ae2993d8f507176b5c729c247c",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/painting.html"
+    },
+    "svg11-paths": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/paths.html",
+      "sha256": "bd8e7b9789962497a6b2ca2b8012a4f824905a89b40beaa3b29cc9eabf5d6fc7",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/paths.html"
+    },
+    "svg11-pservers": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/pservers.html",
+      "sha256": "4b39507123dd0e0e392f3e2b3282f76346483748c1fa9f1ea76288dc95661572",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/pservers.html"
+    },
+    "svg11-refs": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/refs.html",
+      "sha256": "78b537fd99b9d8a6d93315e7ba1509db8a3370fbbb9bae9f3daf69ac5c7c9968",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/refs.html"
+    },
+    "svg11-render": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/render.html",
+      "sha256": "abc65fc8a21092050f42cac214963dfa725dbfa76c7ea1f89b49633e36bb4d55",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/render.html"
+    },
+    "svg11-script": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/script.html",
+      "sha256": "a261855cc66c12bb75bc7e7750f5d6d724206500dab7741bae16161e4b0904ac",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/script.html"
+    },
+    "svg11-shapes": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/shapes.html",
+      "sha256": "5a50db4cc8536db1dc1c245871df5cea6819f5c8316e97664abd6d336f940517",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/shapes.html"
+    },
+    "svg11-struct": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/struct.html",
+      "sha256": "1bb1f22ffe9184c27a085e0ddb93bdeae0fd6b662bba146e14fc19fba615ba5f",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/struct.html"
+    },
+    "svg11-styling": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/styling.html",
+      "sha256": "d0915ac045b575e1efba9be4d377c299b0c4377b3c45cc50e656b2c1a94e38d0",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/styling.html"
+    },
+    "svg11-svgdom": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/svgdom.html",
+      "sha256": "64070e7f69205137184c6a4750a491d1681b0f3706b84527eee53f48e51b555c",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/svgdom.html"
+    },
+    "svg11-text": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/text.html",
+      "sha256": "c9f595b12427f0b9675eb256f608e4a5709ea2c4e9d6640841440ec8b2964948",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/text.html"
+    },
+    "svg11-types": {
+      "resolved": "https://www.w3.org/TR/2011/REC-SVG11-20110816/types.html",
+      "sha256": "92e6a601c7ee9946e6eec116fbbc31d226272d8853c1a73a2735f7e247fa1551",
+      "url": "https://www.w3.org/TR/2011/REC-SVG11-20110816/types.html"
+    },
+    "svg2": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/",
+      "sha256": "462109d31d230c4345071b99a70ac06253453551f92409f2eddc64d49f00bca9",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/"
+    },
+    "svg2-access": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/access.html",
+      "sha256": "3a023fa9f179c0a1c9940f0a2f630a978a1a2ef69bdb36ced96726affab3ab45",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/access.html"
+    },
+    "svg2-animate": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/animate.html",
+      "sha256": "66e715b0c1f34fbce216540ee0aa1b24b1153e826a3f46af90af90edc9f727eb",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/animate.html"
+    },
+    "svg2-changes": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/changes.html",
+      "sha256": "5763fde57c431fc77c0b4ebf517042c55057aedf06cc33ca173ff36d1f1c6290",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/changes.html"
+    },
+    "svg2-conform": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html",
+      "sha256": "94f335ddfbf7f84376916938ad34f026d7f22928b5a7674c1ee3228213929dcd",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html"
+    },
+    "svg2-coords": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html",
+      "sha256": "79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html"
+    },
+    "svg2-ed": {
+      "resolved": "https://svgwg.org/svg2-draft/",
+      "sha256": "60c07a57500cef88c7cd0b8b19ac4e50c0c2f4d1836e48248893a1e84433b87e",
+      "url": "https://svgwg.org/svg2-draft/"
+    },
+    "svg2-ed-access": {
+      "resolved": "https://svgwg.org/svg2-draft/access.html",
+      "sha256": "ee39019cf8931aba0f040bc9f66158220af25522ae325d0191ed444e110bd700",
+      "url": "https://svgwg.org/svg2-draft/access.html"
+    },
+    "svg2-ed-animate": {
+      "resolved": "https://svgwg.org/svg2-draft/animate.html",
+      "sha256": "411f875cad32441015f92cf6f80d7209d26e75624df430bfd07191e110817c9d",
+      "url": "https://svgwg.org/svg2-draft/animate.html"
+    },
+    "svg2-ed-changes": {
+      "resolved": "https://svgwg.org/svg2-draft/changes.html",
+      "sha256": "3aeaa5d3efb0e4e4e888ce9e5871e1fd6e6240ff66fa2f0f498bd7caa8a24ebf",
+      "url": "https://svgwg.org/svg2-draft/changes.html"
+    },
+    "svg2-ed-conform": {
+      "resolved": "https://svgwg.org/svg2-draft/conform.html",
+      "sha256": "bf11b66a8ab7a51bed55d65948877908f73bd1ecad098a12b5307abff582c138",
+      "url": "https://svgwg.org/svg2-draft/conform.html"
+    },
+    "svg2-ed-coords": {
+      "resolved": "https://svgwg.org/svg2-draft/coords.html",
+      "sha256": "d4cf2cf3520de1cc0a28335e5c1e56d7637c79ff02dbb2ddad8ea6fbc11b614f",
+      "url": "https://svgwg.org/svg2-draft/coords.html"
+    },
+    "svg2-ed-embedded": {
+      "resolved": "https://svgwg.org/svg2-draft/embedded.html",
+      "sha256": "b4d7ac29bb87a1e83a4ff9c7caf3a41a33cffc5344e51c97c5c36f6940d9e90f",
+      "url": "https://svgwg.org/svg2-draft/embedded.html"
+    },
+    "svg2-ed-geometry": {
+      "resolved": "https://svgwg.org/svg2-draft/geometry.html",
+      "sha256": "9fa94532119a57ba1d0b0b9ba45c4f33bfe88f545dd8641d8af2c6aff7eedb0b",
+      "url": "https://svgwg.org/svg2-draft/geometry.html"
+    },
+    "svg2-ed-implnote": {
+      "resolved": "https://svgwg.org/svg2-draft/implnote.html",
+      "sha256": "88179b76bd0f1e8d4b7693fb2ce965f95a6c1acd2bceed74b537af37fdd1e653",
+      "url": "https://svgwg.org/svg2-draft/implnote.html"
+    },
+    "svg2-ed-interact": {
+      "resolved": "https://svgwg.org/svg2-draft/interact.html",
+      "sha256": "47d07973584a2475dfe0cdfe44b0ad446aae32f45a0a4c8e92d11b7230133213",
+      "url": "https://svgwg.org/svg2-draft/interact.html"
+    },
+    "svg2-ed-intro": {
+      "resolved": "https://svgwg.org/svg2-draft/intro.html",
+      "sha256": "1b004bdf3bf4d54c78c14f669dbc5da8d0edd4c3cbabe62635f6e67daef36bfe",
+      "url": "https://svgwg.org/svg2-draft/intro.html"
+    },
+    "svg2-ed-linking": {
+      "resolved": "https://svgwg.org/svg2-draft/linking.html",
+      "sha256": "86d5c6daf7b9309205145b65f6196fd7a652d373a641d9cca2c94c029ca5855d",
+      "url": "https://svgwg.org/svg2-draft/linking.html"
+    },
+    "svg2-ed-painting": {
+      "resolved": "https://svgwg.org/svg2-draft/painting.html",
+      "sha256": "692217a183c054ed4bb11474ac81d2091942d8e4a2a2abfabf13c1f85d5146a2",
+      "url": "https://svgwg.org/svg2-draft/painting.html"
+    },
+    "svg2-ed-paths": {
+      "resolved": "https://svgwg.org/svg2-draft/paths.html",
+      "sha256": "1ae6e09b4ff5a05a9665fc17ec057a19eb72d1b8f71b032a3e7a8b6cccaea5c1",
+      "url": "https://svgwg.org/svg2-draft/paths.html"
+    },
+    "svg2-ed-pservers": {
+      "resolved": "https://svgwg.org/svg2-draft/pservers.html",
+      "sha256": "e8cb39edb16ef165e3bd513ff9c3448f0594b8eb2d1cc0f94e50f30bde35461a",
+      "url": "https://svgwg.org/svg2-draft/pservers.html"
+    },
+    "svg2-ed-refs": {
+      "resolved": "https://svgwg.org/svg2-draft/refs.html",
+      "sha256": "fa99ad62f31ffdf33c63974f3aef7cd512968da15c80697b3e0466aa344c2026",
+      "url": "https://svgwg.org/svg2-draft/refs.html"
+    },
+    "svg2-ed-render": {
+      "resolved": "https://svgwg.org/svg2-draft/render.html",
+      "sha256": "a2c42ebc30488e483ff6f2c6391e1a85f7f91a479ad69140dfd839bf786d1c79",
+      "url": "https://svgwg.org/svg2-draft/render.html"
+    },
+    "svg2-ed-shapes": {
+      "resolved": "https://svgwg.org/svg2-draft/shapes.html",
+      "sha256": "7cef373dc008ecc203faf5cb82584cfd2ff9c78f1f7bf5f1b12e2610f04d9640",
+      "url": "https://svgwg.org/svg2-draft/shapes.html"
+    },
+    "svg2-ed-struct": {
+      "resolved": "https://svgwg.org/svg2-draft/struct.html",
+      "sha256": "a8d18a1a84230026b43f58518aee9ba9ca4a50f073591739c6ead6e05d728060",
+      "url": "https://svgwg.org/svg2-draft/struct.html"
+    },
+    "svg2-ed-styling": {
+      "resolved": "https://svgwg.org/svg2-draft/styling.html",
+      "sha256": "dbbc1f8bcb1a3b05777d1ec03dac8040738b02941142018e44e2e02dad691195",
+      "url": "https://svgwg.org/svg2-draft/styling.html"
+    },
+    "svg2-ed-text": {
+      "resolved": "https://svgwg.org/svg2-draft/text.html",
+      "sha256": "c43ef49f82d8df5c0809f14dfdef0dc394c97aa4bb637c9e4e7c2299b474965e",
+      "url": "https://svgwg.org/svg2-draft/text.html"
+    },
+    "svg2-ed-types": {
+      "resolved": "https://svgwg.org/svg2-draft/types.html",
+      "sha256": "de922a5ef28c5c970f3a78b52f8cf428f1918a9a48a40bc547eb0832740a026b",
+      "url": "https://svgwg.org/svg2-draft/types.html"
+    },
+    "svg2-embedded": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html",
+      "sha256": "9f2286fa76c0d82df7f8f2f373fb1d083ee2e30c468305ae542373aedd964e8c",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html"
+    },
+    "svg2-geometry": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/geometry.html",
+      "sha256": "dc8ee5b12b65669b2a1ea0cd375b84c04529bf5e47784d125057db24c695326e",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/geometry.html"
+    },
+    "svg2-implnote": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/implnote.html",
+      "sha256": "9bffd1852584ec20208af02e40f5f6f6114166565f5594251aa6e07de2a52dd2",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/implnote.html"
+    },
+    "svg2-interact": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/interact.html",
+      "sha256": "a7a1c197effa3643231cbef7ac4a835f199cc329509b6e5c81fff98c469df7f2",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/interact.html"
+    },
+    "svg2-intro": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/intro.html",
+      "sha256": "9e966ecff6ead486959fda2df197e58c56f3d9941268507d0b3fdcd4d95945ce",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/intro.html"
+    },
+    "svg2-linking": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html",
+      "sha256": "4c02b675057347a4ca8ace37339186830e6d7be3a64a887051d1a88ba3a1d02f",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html"
+    },
+    "svg2-painting": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html",
+      "sha256": "7d6def7e874c400920e09c534ed52307c66ec7f4275c15a8c7f08c54bf73dca7",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html"
+    },
+    "svg2-paths": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html",
+      "sha256": "6213e9b47b068443841fc840dde69afdd188a25aa6ea066e284b612b28f44a8d",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html"
+    },
+    "svg2-pservers": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html",
+      "sha256": "25529cd8fee8d915fdd673f3a2a8053ba3ee060661c07e6a0f52ba16babf607f",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html"
+    },
+    "svg2-refs": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/refs.html",
+      "sha256": "1e641b1c9344c5e1906c90e20e4a9e2004c6a77fe368a08724c798e036a1ed43",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/refs.html"
+    },
+    "svg2-render": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html",
+      "sha256": "9d7770271e4e8b3e0b852a7efce0c974e8bfb6463672b013ca89c43cfa3820dd",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html"
+    },
+    "svg2-shapes": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html",
+      "sha256": "b1d2d2c87ec4d3542ee136b3f85fbbe2c03c74649b67dcdc0e36c508bdc7f4a0",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html"
+    },
+    "svg2-struct": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html",
+      "sha256": "abca334257fb3646e1ae5a5645a08621b4738a44e05c6d470bae03f5fd21ff62",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html"
+    },
+    "svg2-styling": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/styling.html",
+      "sha256": "66a21db8037944850c05dbd67d4c65162115b415302bd4c641e5f2a65b02ffc5",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/styling.html"
+    },
+    "svg2-text": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html",
+      "sha256": "165699deaff93e452e33e23ecd6d912d35e9307847264697e4a731a0e6ad1ee1",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html"
+    },
+    "svg2-types": {
+      "resolved": "https://www.w3.org/TR/2018/CR-SVG2-20181004/types.html",
+      "sha256": "6761c7b46c14539e4c157e3c5457ea337556c8c7fc8477126dc89e9f29a9cf85",
+      "url": "https://www.w3.org/TR/2018/CR-SVG2-20181004/types.html"
+    },
+    "unicode-uax14": {
+      "resolved": "https://www.unicode.org/reports/tr14/",
+      "sha256": "296df5332aefe695b4951b511288b118bc6a7b43db7fadfd60f6062096acc7c0",
+      "url": "https://www.unicode.org/reports/tr14/"
+    },
+    "unicode-uax24": {
+      "resolved": "https://www.unicode.org/reports/tr24/",
+      "sha256": "009e2e6db21ac136223966d3fb8d146c527e7f7714a22231ad3b812ad7827ded",
+      "url": "https://www.unicode.org/reports/tr24/"
+    },
+    "unicode-uax29": {
+      "resolved": "https://www.unicode.org/reports/tr29/",
+      "sha256": "60fb49ee640a154d9e40468306c6b283edcef73be3af5ede778107b4787bdec8",
+      "url": "https://www.unicode.org/reports/tr29/"
+    },
+    "unicode-uax50": {
+      "resolved": "https://www.unicode.org/reports/tr50/",
+      "sha256": "e8662f3394d20212beaa1862b505582cee5383c4b502a46966e317967f7bc65e",
+      "url": "https://www.unicode.org/reports/tr50/"
+    },
+    "unicode-uax9": {
+      "resolved": "https://www.unicode.org/reports/tr9/",
+      "sha256": "3c281b38800bad85b16bf3a169b8cb693d8a2dbceb60903feb26e68a2659ee8a",
+      "url": "https://www.unicode.org/reports/tr9/"
+    },
+    "unicode-uts46": {
+      "resolved": "https://www.unicode.org/reports/tr46/",
+      "sha256": "c7fa2526acfd49f431ef0473c1278133b6194f6c08ff778b4ce183c8bc221fc4",
+      "url": "https://www.unicode.org/reports/tr46/"
+    },
+    "url": {
+      "resolved": "https://url.spec.whatwg.org/",
+      "sha256": "08cb42a9a8575dab006676378c846fdd8a72d06897c27929aa51eaf099656be4",
+      "url": "https://url.spec.whatwg.org/"
+    },
+    "xlink11": {
+      "resolved": "https://www.w3.org/TR/xlink11/",
+      "sha256": "9088c069884a5426c93ec5e56ee43e0e77027f32b4f5cad3144358c24b68fbb6",
+      "url": "https://www.w3.org/TR/xlink11/"
+    },
+    "xml": {
+      "resolved": "https://www.w3.org/TR/xml/",
+      "sha256": "f58a4b9e1e5b8bac13fb55c4e5c7c8c5e2c176aa45ee68e2f1ab2498511927ec",
+      "url": "https://www.w3.org/TR/xml/"
+    },
+    "xml-names": {
+      "resolved": "https://www.w3.org/TR/xml-names/",
+      "sha256": "b4a649e5fdab9852d68eca21442481599164949bcdee5549f2ec7e38fb3cd3a8",
+      "url": "https://www.w3.org/TR/xml-names/"
+    },
+    "xml-stylesheet": {
+      "resolved": "https://www.w3.org/TR/xml-stylesheet/",
+      "sha256": "a0e1a5198a21c2aa4b623fc35b3c890d6e51c6c14ee126aed71cf3b93157515a",
+      "url": "https://www.w3.org/TR/xml-stylesheet/"
+    },
+    "xmlbase": {
+      "resolved": "https://www.w3.org/TR/xmlbase/",
+      "sha256": "eaaad6ec9b137b4e5c7058fe45c1f6b3d05457dca19019bd9201d60b8b96d277",
+      "url": "https://www.w3.org/TR/xmlbase/"
+    }
+  }
+}

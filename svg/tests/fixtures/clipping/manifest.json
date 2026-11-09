@@ -1,0 +1,385 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "user-space",
+      "input": "inputs/user-space.svg",
+      "references": [
+        {
+          "path": "references/user-space.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "User-space clipping intersects the full rectangle with a literal 4 by 5 rectangle.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "object-bounds",
+      "input": "inputs/object-bounds.svg",
+      "references": [
+        {
+          "path": "references/object-bounds.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The object bounding box maps normalized coordinates to the referring shape, including its origin.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "union",
+      "input": "inputs/union.svg",
+      "references": [
+        {
+          "path": "references/union.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Sibling clip shapes form a union, including their overlap.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "evenodd",
+      "input": "inputs/evenodd.svg",
+      "references": [
+        {
+          "path": "references/evenodd.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "clip-rule determines the interior independently of fill-rule.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-independent",
+      "input": "inputs/paint-independent.svg",
+      "references": [
+        {
+          "path": "references/paint-independent.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Fill, stroke and opacity do not affect clip geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "use",
+      "input": "inputs/use.svg",
+      "references": [
+        {
+          "path": "references/use.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A use child contributes the referenced shape with its placement.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "transform",
+      "input": "inputs/transform.svg",
+      "references": [
+        {
+          "path": "references/transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Clip-path and child transforms compose in user space.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "empty",
+      "input": "inputs/empty.svg",
+      "references": [
+        {
+          "path": "references/empty.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An empty valid clipping path clips away all output.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "invalid-child",
+      "input": "inputs/invalid-child.svg",
+      "references": [
+        {
+          "path": "references/invalid-child.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A group is not a permitted clipPath child and contributes no clipping geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "nested",
+      "input": "inputs/nested.svg",
+      "references": [
+        {
+          "path": "references/nested.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The clipping path applied to a clipPath intersects its union.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "child-clip",
+      "input": "inputs/child-clip.svg",
+      "references": [
+        {
+          "path": "references/child-clip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Child clipping intersects that child before the sibling union.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "missing",
+      "input": "inputs/missing.svg",
+      "references": [
+        {
+          "path": "references/missing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A missing clip reference leaves the element unclipped.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "duplicate-aa",
+      "input": "inputs/duplicate-aa.svg",
+      "references": [
+        {
+          "path": "references/duplicate-aa.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Duplicating a clip shape does not change its geometric union.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "use-group",
+      "input": "inputs/use-group.svg",
+      "references": [
+        {
+          "path": "references/use-group.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A use child referencing a group contributes no clipping shape.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "group-bounds",
+      "input": "inputs/group-bounds.svg",
+      "references": [
+        {
+          "path": "references/group-bounds.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A group clip uses the union of its children for its object bounding box.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "visibility",
+      "input": "inputs/visibility.svg",
+      "references": [
+        {
+          "path": "references/visibility.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Hidden clip children do not contribute to the clipping region.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "adjacent-aa",
+      "input": "inputs/adjacent-aa.svg",
+      "references": [
+        {
+          "path": "references/adjacent-aa.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Adjacent clipping triangles form a rectangle without an internal antialias seam.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "intersect-aa",
+      "input": "inputs/intersect-aa.svg",
+      "references": [
+        {
+          "path": "references/intersect-aa.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Intersecting the same clipping region preserves its antialias edge coverage.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "opposite-winding",
+      "input": "inputs/opposite-winding.svg",
+      "references": [
+        {
+          "path": "references/opposite-winding.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Oppositely oriented sibling shapes union without winding cancellation.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClippingPaths",
+      "tolerance": {}
+    },
+    {
+      "id": "missing-isolation",
+      "input": "inputs/missing-isolation.svg",
+      "references": [
+        {
+          "path": "references/missing-isolation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A computed clip-path other than none establishes a stacking context even when its URL is unresolved.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "object-transform",
+      "input": "inputs/object-transform.svg",
+      "references": [
+        {
+          "path": "references/object-transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "clipPath transforms act in the clipping-path coordinate space established by clipPathUnits.",
+      "spec": "https://www.w3.org/TR/css-transforms-1/#svg-transform",
+      "tolerance": {}
+    },
+    {
+      "id": "object-transform-outside",
+      "input": "inputs/object-transform-outside.svg",
+      "references": [
+        {
+          "path": "references/object-transform-outside.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "clipPath transforms act in the clipping-path coordinate space established by clipPathUnits.",
+      "spec": "https://www.w3.org/TR/css-transforms-1/#svg-transform",
+      "tolerance": {}
+    },
+    {
+      "id": "legacy-viewport",
+      "input": "inputs/legacy-viewport.svg",
+      "references": [
+        {
+          "path": "references/legacy-viewport.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG 1.1 clip applies to viewport elements, using child user coordinates and viewport extents for auto edges.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "legacy-auto",
+      "input": "inputs/legacy-auto.svg",
+      "references": [
+        {
+          "path": "references/legacy-auto.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG 1.1 clip applies to viewport elements, using child user coordinates and viewport extents for auto edges.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "legacy-ignored-on-shape",
+      "input": "inputs/legacy-ignored-on-shape.svg",
+      "references": [
+        {
+          "path": "references/legacy-ignored-on-shape.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG 1.1 clip applies to viewport elements, using child user coordinates and viewport extents for auto edges.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "image-child-ignored",
+      "input": "inputs/image-child-ignored.svg",
+      "references": [
+        {
+          "path": "references/image-child-ignored.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "image is not in the clipPath content model, so it contributes no clipping geometry.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClipPathElement",
+      "tolerance": {}
+    },
+    {
+      "id": "conditional-clippath-referenced",
+      "input": "inputs/conditional-clippath-referenced.svg",
+      "references": [
+        {
+          "path": "references/conditional-clippath-referenced.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Conditional processing attributes affect only direct rendering; a clipPath whose systemLanguage fails is still a valid clip-path reference.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessing",
+      "tolerance": {}
+    }
+  ]
+}

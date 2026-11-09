@@ -1,0 +1,231 @@
+//! Non-inherited pathLength metadata and cached used dash distances.
+//! SVG2 CR2018 paths SHA256 6213e9b47b068443841fc840dde69afdd188a25aa6ea066e284b612b28f44a8d.
+import silk.text.string { String }
+import scene { Style, RenderError }
+import mapping { Mapping }
+import reference_bounds { Cache as GeometryCache }
+import path_length_values
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.values { Value, ValueId }
+import svg_css.properties { Property }
+import svg_css.dimensions { ExprId, Dimension, Context }
+import svg_css.dimensions
+import svg_css.value_cursor { Cursor }
+import svg_css.input { Input }
+import svg_css.tokens { Limits, CssError }
+import svg_css.lexer
+import svg_geometry.geometry { Path, Rect }
+import svg_geometry.math
+import vector.geometry_error { GeometryError }
+import silk.collections.list { List }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+pub effect fn attribute(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  limits: &Limits,
+) -> Option<f64>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = match &(XmlDocument.attribute(document, node, "", "pathLength")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => {
+      return Option<f64>.None
+    }
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let parsed = run dimensions.parse(
+    &mut engine.values.numerics,
+    &input,
+    &mut cursor,
+    Dimension.Number,
+    false,
+  )
+  if !cursor.done(&input) {
+    return Option<f64>.None
+  }
+  let expression = match &parsed {
+    Option<ExprId>.Some { value } => value
+    _ => {
+      return Option<f64>.None
+    }
+  }
+  let metrics = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let computed = run dimensions.compute(&mut engine.values.numerics, expression, &metrics)
+  let value = dimensions.evaluate(&engine.values.numerics, computed, 1.0)
+
+  // Unlike a nonnegative CSS property range, SVG explicitly makes a negative
+  // pathLength an error; it behaves as unspecified, not as infinite calibration.
+  if value < 0.0 {
+    return Option<f64>.None
+  }
+  return Option<f64>.some(f64.min(f64.fromBits(9218868437227405311), value))
+}
+
+struct Key {
+  dash: usize,
+  offset: usize,
+  basis: f64,
+  author: f64,
+  length: f64
+}
+
+impl Copy for Key {}
+
+impl HashKey for Key {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.dash == b.dash && a.offset == b.offset && a.basis == b.basis && a.author == b.author
+      && a.length == b.length
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    let a = Hash.combine(Hash.mix(seed, usize.toU64(value.dash)), usize.toU64(value.offset))
+    let b = Hash.combine(
+      a,
+      f64.toBits(
+        if value.basis == 0.0 {
+          0.0
+        } else {
+          value.basis
+        },
+      ),
+    )
+    let c = Hash.combine(
+      b,
+      f64.toBits(
+        if value.author == 0.0 {
+          0.0
+        } else {
+          value.author
+        },
+      ),
+    )
+    return Hash.combine(
+      c,
+      f64.toBits(
+        if value.length == 0.0 {
+          0.0
+        } else {
+          value.length
+        },
+      ),
+    )
+  }
+}
+
+struct Used {
+  index: usize,
+  offset: f64
+}
+
+impl Copy for Used {}
+
+pub struct Cache {
+  entries: HashMap<Key, Used>
+}
+
+impl Cache {
+  pub fn make() -> Cache {
+    return Cache { entries: HashMap<Key, Used>.make(Hash.seed(0)) }
+  }
+}
+
+fn entry(engine: &Engine<'_>, style: StyleId, property: Property) -> Option<ValueId> {
+  return match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => Option<ValueId>.some(value.value)
+    _ => Option<ValueId>.None
+  }
+}
+
+pub effect fn apply(
+  cache: &mut Cache,
+  geometry: &mut GeometryCache,
+  engine: &Engine<'_>,
+  styleId: StyleId,
+  style: &mut Style,
+  paths: &[Path],
+  path: usize,
+  space: Option<Mapping>,
+  viewport: Rect,
+  author: f64,
+  pool: &mut List<List<f64>>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let dashId = match &entry(engine, styleId, Property.StrokeDasharray) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let offsetId = match &entry(engine, styleId, Property.StrokeDashoffset) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  match &engine.values.get(dashId).* {
+    Value.Dashes { expressions } => {
+      if expressions.length() == 0 {
+        return
+      }
+      let offset = match &engine.values.get(offsetId).* {
+        Value.Numeric { expression, range: _, basis: _ } => expression
+        _ => {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      let length = run geometry.length(paths, path, space)
+      let basis = math.hypot(viewport.width(), viewport.height()) / 1.4142135623730951
+      let key = Key {
+        dash: dashId.index,
+        offset: offsetId.index,
+        basis: basis,
+        author: author,
+        length: length,
+      }
+      let cached: Option<Used> = cache.entries.get(key)
+      let used = match &cached {
+        Option<Used>.Some { value } => value
+        _ => {
+          let resolved = run path_length_values.resolve(
+            &engine.values.numerics,
+            expressions.asSlice(),
+            offset,
+            basis,
+            author,
+            length,
+          )
+          let mut index: usize = 0
+          if resolved.values.length() != 0 {
+            index = pool.length()
+            run pool.append(move resolved.values)
+          }
+          let result = Used { index: index, offset: resolved.offset }
+          drop run cache.entries.insert(key, result)
+          result
+        }
+      }
+      style.dashIndex = used.index
+      style.dashOffset = used.offset
+    }
+    _ => {}
+  }
+}

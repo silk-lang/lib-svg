@@ -1,0 +1,617 @@
+//! Stylesheet loading and cascade integration, independent of raster output.
+import stylesheets { Catalog, RuleSetId }
+import resources {
+  Resolver,
+  Response,
+  ResourceKind,
+  ResourceError,
+  DataOnly,
+  Limits as ResourceLimits,
+  Policy,
+  ProcessingMode
+}
+import url { Url, UrlError }
+import style_tree
+import silk.xml.document { XmlDocument, XmlError }
+import svg_css.tokens { Limits, CssError, CssErrorKind, equal }
+import svg_css.cascade { Origin }
+import svg_css.computed { HostContext, StyleId, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.encoding { Encoding }
+import svg_css.media_features { Environment }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_css.element { MatchContext, NO_ELEMENT }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+struct NoFetch {
+  calls: usize
+}
+
+impl NoFetch {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    fail ResourceError.Io
+  }
+}
+
+impl Resolver for NoFetch {
+  fetch: NoFetch.fetch
+}
+
+effect fn width(catalog: &mut Catalog<'_>) -> f64
+  ! CssError | XmlError | ComputedError | OutOfMemoryError
+  ? &mut Allocator {
+  return run widthFor(
+    &mut catalog.*,
+    b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+    Option<usize>.None,
+  )
+}
+
+effect fn widthFor(catalog: &mut Catalog<'_>, data: &[u8], steps: Option<usize>) -> f64
+  ! CssError | XmlError | ComputedError | OutOfMemoryError
+  ? &mut Allocator {
+  return run widthIn(&mut catalog.*, data, steps, RuleSetId { index: 1 })
+}
+
+effect fn widthIn(
+  catalog: &mut Catalog<'_>,
+  data: &[u8],
+  steps: Option<usize>,
+  rules: RuleSetId,
+) -> f64
+  ! CssError | XmlError | ComputedError | OutOfMemoryError
+  ? &mut Allocator {
+  let doc = run XmlDocument.parse(data)
+  let tree = run style_tree.make(&doc)
+  let mut context = MatchContext.make(XmlDocument.root(&doc).index, NO_ELEMENT)
+  if let Option<usize>.Some { value } = steps {
+    context.remainingSteps = value
+  }
+  let candidates = run catalog.matching(rules, &tree, XmlDocument.root(&doc).index, &mut context)
+  let buffer = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &buffer, range: buffer.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(100.0, 100.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  let style = run catalog.engine.build(
+    catalog.buffers.view(),
+    catalog.declarations.asSlice(),
+    candidates.asSlice(),
+    Option<StyleId>.None,
+    &host,
+    &Limits.make(),
+  )
+  return match &catalog.engine.number(style, Property.StrokeWidth, 100.0) {
+    Option<f64>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.StrokeWidth }
+    }
+  }
+}
+
+effect fn sheet(css: &[u8]) -> Catalog<'_>
+  ! CssError | UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut catalog = run Catalog.make()
+  let base = run Url.parseAbsolute(b"https://example.test/main.css")
+  let baseId = run catalog.registerBase(move base)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+  run catalog.addSheet(
+    rules,
+    css,
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  return move catalog
+}
+
+// https://www.w3.org/TR/css-cascade-4/#conditional-import
+// https://www.w3.org/TR/css-cascade-4/#at-import
+// https://www.w3.org/TR/css-conditional-3/#at-supports
+test effect fn disabledImportsAndRulePlacement() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = NoFetch { calls: 0 }
+  let mut catalog = run Catalog.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let base = run Url.parseAbsolute(b"https://example.test/main.css")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addSheet(
+    rules,
+    b"@import 'never.css' supports(unknown-property: yes); @import 'print.css' print; @supports (unknown-property: yes) {} @import 'late.css'; @media (width:100px) { svg {stroke-width:7px} }",
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let actual = run width(&mut catalog) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    resolver.calls == 0 && actual == 7.0,
+    "false import conditions prevent fetching; valid false supports closes import placement",
+  )
+}
+
+// https://www.w3.org/TR/css-namespaces-3/#scope
+// https://www.w3.org/TR/css-cascade-4/#at-import
+// https://www.w3.org/TR/css-cascade-4/#cascade-order
+test effect fn importOrderAndIndependentNamespaces() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut catalog = run Catalog.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let base = run Url.parseAbsolute(b"https://example.test/main.css")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addSheet(
+    rules,
+    b"@unknown ignored; @import 'data:text/css,svg%7Bstroke-width:3px!important%7D' supports(stroke-width: 1px); @namespace 'urn:not-svg'; svg {stroke-width:9px!important}",
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let actual = run width(&mut catalog) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    actual == 3.0,
+    "imported selectors do not inherit the importing sheet's default namespace",
+  )
+}
+
+// XML documents have no HTML quirks-mode MIME exception.
+// https://www.w3.org/TR/cssom/#fetch-a-css-style-sheet
+// https://fetch.spec.whatwg.org/#data-url-processor
+test effect fn dataStylesheetRequiresSupportedMediaType() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut catalog = run Catalog.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let base = run Url.parseAbsolute(b"https://example.test/main.css")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addSheet(
+    rules,
+    b"@import 'data:text/plain,svg%7Bstroke-width:99px!important%7D'; @import 'data:,svg%7Bstroke-width:98px!important%7D'; @import 'data: TEXT/cSs ;x,svg%7Bstroke-width:5px%7D'; @import 'data:te%78t/css,svg%7Bstroke-width:7px%7D';",
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let actual = run width(&mut catalog) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    actual == 5.0,
+    "data MIME metadata must identify CSS case-insensitively, without percent-decoding the header",
+  )
+}
+
+// https://www.w3.org/TR/selectors-4/#specificity-rules
+// https://www.w3.org/TR/css-cascade-4/#cascade-order
+test effect fn indexedSubjectsPreserveCompleteSelectorSemantics() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let sheets = [
+    b".h\\69t {stroke-width:7px} .Hit {stroke-width:13px}",
+    b".hit, #target {stroke-width:7px} .hit {stroke-width:13px}",
+    b".hit, * {stroke-width:7px} .Hit {stroke-width:13px}",
+    b":is(.hit, #target) {stroke-width:7px} svg {stroke-width:13px}",
+    b"@namespace s 'http://www.w3.org/2000/svg'; @namespace p 'urn:other'; s|svg {stroke-width:7px} p|svg {stroke-width:13px} .hit {stroke-width:17px}",
+    b"svg {stroke-width:13px} #target {stroke-width:7px}",
+    b".a {stroke-width:3px} .b {stroke-width:7px}",
+    b"svg {stroke-width:13px} [data-mode='ok' i] {stroke-width:7px}",
+  ]
+  let documents = [
+    b"<svg xmlns='http://www.w3.org/2000/svg' class='hit'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' id='target' class='hit hit'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' class='miss'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' id='target' class='hit'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' xmlns:p='urn:other' p:class='hit'/>",
+    b"<!DOCTYPE svg [<!ATTLIST svg ident ID #IMPLIED>]><svg xmlns='http://www.w3.org/2000/svg' ident='target'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' class='b a'/>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' data-mode='OK'/>",
+  ]
+  let reasons = [
+    "decoded class keys remain case-sensitive",
+    "all matching arms contribute their highest specificity",
+    "an unkeyed arm keeps the whole rule available",
+    "functional subjects still run the complete matcher",
+    "type namespaces and namespaced class attributes remain exact",
+    "IDs come from the document's ID typing, not just an attribute named id",
+    "candidate discovery order cannot replace stylesheet source order",
+    "attribute-only subjects retain their full matching semantics",
+  ]
+  let mut i: usize = 0
+  while i < sheets.length {
+    let mut catalog = run sheet(sheets[i]) |> Effect.provideMut<Allocator>(&mut allocator)
+    let actual = run widthFor(&mut catalog, documents[i], Option<usize>.None)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(actual == 7.0, reasons[i])
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/css-cascade-4/#cascade-order
+// Unrelated rules must not change the selected declaration under a bounded host budget.
+test effect fn unrelatedRulesDoNotExhaustSelectiveMatching() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut css = Bytes.make()
+  let mut i: usize = 0
+  while i < 64 {
+    run css.append(b".unrelated {stroke-width:99px}")
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    i = i + 1
+  }
+  run css.append(b".hit {stroke-width:7px}") |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut catalog = run sheet(css.asSlice()) |> Effect.provideMut<Allocator>(&mut allocator)
+  let actual = run widthFor(
+    &mut catalog,
+    b"<svg xmlns='http://www.w3.org/2000/svg' class='hit'/>",
+    Option<usize>.Some { value: 128 },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(actual == 7.0, "selective matching spends work on relevant rules")
+}
+
+// https://www.w3.org/TR/css-cascade-4/#cascade-order
+// Resource failure is an implementation boundary; retry and later sheets retain cascade semantics.
+test effect fn candidateStateSurvivesFailureAndLaterStylesheets() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut catalog = run sheet(b"* {stroke-width:7px} .other {stroke-width:13px}")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let document = b"<svg xmlns='http://www.w3.org/2000/svg' class='hit'/>"
+  let attempted = run Effect.result(
+    widthFor(&mut catalog, document, Option<usize>.Some { value: 1 })
+      |> Effect.provideMut<Allocator>(&mut allocator),
+  )
+  run Testing.expect(
+    match &attempted {
+      Result<f64, CssError | XmlError | ComputedError | OutOfMemoryError>.Failure { error } => {
+        match &error {
+          CssError limit => limit.kind == CssErrorKind.MatchLimit
+          _ => false
+        }
+      }
+      _ => false
+    },
+    "candidate discovery preserves typed work-limit failures",
+  )
+  let retried = run widthFor(&mut catalog, document, Option<usize>.None)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    retried == 7.0,
+    "failed discovery cannot leave a rule marked as already matched",
+  )
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let base = run Url.parseAbsolute(b"https://example.test/later.css")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addSheet(
+    RuleSetId { index: 1 },
+    b".hit {stroke-width:9px}",
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let extended = run widthFor(&mut catalog, document, Option<usize>.None)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(extended == 9.0, "later stylesheet rules invalidate candidate discovery")
+}
+
+enum TransportCase {
+  Charset,
+  Redirect,
+  WrongMime,
+  RedirectCycle,
+}
+
+struct Transport {
+  kind: TransportCase,
+  calls: usize,
+}
+
+effect fn badTransportUrl(error: UrlError) -> never
+  ! ResourceError {
+  drop error
+  fail ResourceError.InvalidData
+}
+
+impl Transport {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    if equal(address.bytes(), b"https://cdn.test/theme/next.css") {
+      return Response.fromBytes(run Bytes.copy(b"svg {stroke-width:9px}"))
+    }
+    if !equal(address.bytes(), b"https://origin.test/start.css") {
+      fail ResourceError.Io
+    }
+    if self.kind == TransportCase.Charset {
+      let payload: [u8; 24] = [
+        46,
+        99,
+        97,
+        102,
+        233,
+        32,
+        123,
+        115,
+        116,
+        114,
+        111,
+        107,
+        101,
+        45,
+        119,
+        105,
+        100,
+        116,
+        104,
+        58,
+        55,
+        112,
+        120,
+        125,
+      ]
+      let mut response = Response.fromBytes(run Bytes.copy(&payload))
+      response.charset = Option<Bytes>.Some { value: run Bytes.copy(b"windows-1252") }
+      return move response
+    }
+    if self.kind == TransportCase.WrongMime {
+      let mut response = Response.fromBytes(run Bytes.copy(b"svg {stroke-width:13px}"))
+      response.mediaType = Option<Bytes>.Some { value: run Bytes.copy(b"text/plain") }
+      return move response
+    }
+    let css = if self.kind == TransportCase.RedirectCycle {
+      b"@import 'main.css'; svg {stroke-width:11px}"
+    } else {
+      b"@import 'next.css';"
+    }
+    let mut response = Response.fromBytes(run Bytes.copy(css))
+    response.finalUrl = Option<Url>.Some {
+      value: run Effect.catch<UrlError>(
+        Url.parseAbsolute(b"https://cdn.test/theme/main.css"),
+        badTransportUrl,
+      )
+    }
+    return move response
+  }
+}
+
+impl Resolver for Transport {
+  fetch: Transport.fetch
+}
+
+effect fn transported(kind: TransportCase, expected: f64, expectedCalls: usize) -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut transport = Transport { kind: kind, calls: 0 }
+  let mut catalog = run Catalog.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let address = run Url.parseAbsolute(b"https://origin.test/start.css")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let base = run Url.parseAbsolute(b"https://origin.test/document.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addExternal(
+    rules,
+    move address,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut transport)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let actual = run widthFor(
+    &mut catalog,
+    b"<svg xmlns='http://www.w3.org/2000/svg' class='café'/>",
+    Option<usize>.None,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    actual == expected,
+    "transport metadata affects actual decoding, matching and cascade",
+  )
+  run Testing.expect(
+    transport.calls == expectedCalls,
+    "redirect aliases and cycles do not refetch or recurse",
+  )
+}
+
+// https://www.w3.org/TR/css-syntax-3/#input-byte-stream
+test effect fn protocolCharsetControlsExternalSelectorDecoding() -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  run transported(TransportCase.Charset, 7.0, 1)
+}
+
+// https://www.w3.org/TR/css-values-3/#relative-urls
+// https://www.w3.org/TR/css-cascade-4/#at-import
+test effect fn redirectedStylesheetsUseResponseBaseAndBreakAliasCycles() -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  run transported(TransportCase.Redirect, 9.0, 2)
+  run transported(TransportCase.RedirectCycle, 11.0, 1)
+}
+
+// https://www.w3.org/TR/cssom/#fetch-a-css-style-sheet
+test effect fn aNonCssResponseCannotSupplyAuthorDeclarations() -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  run transported(TransportCase.WrongMime, 1.0, 1)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance
+// https://www.w3.org/TR/css-scoping-1/#shadow-cascading
+test effect fn documentRulesStaySeparateInTheSharedComputedArena() -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut catalog = run sheet(b"svg {stroke-width:7px}")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let base = run Url.parseAbsolute(b"https://example.test/other.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+  let rules = run catalog.createRuleSet(
+    baseId,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run catalog.addSheet(
+    rules,
+    b"svg {stroke-width:9px}",
+    baseId,
+    Encoding.Utf8,
+    Origin.Author,
+    &Environment.headless(100.0, 100.0),
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let original = run width(&mut catalog) |> Effect.provideMut<Allocator>(&mut allocator)
+  let other = run widthIn(
+    &mut catalog,
+    b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+    Option<usize>.None,
+    rules,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    original == 7.0 && other == 9.0,
+    "source documents cannot contaminate each other's author cascade",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-static-mode
+test effect fn secureDocumentsCannotReuseAnExternallyFetchedStylesheet() -> ()
+  ! AssertionError<'static> | CssError | UrlError | XmlError | ComputedError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut catalog = run sheet(b"") |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut transport = Transport { kind: TransportCase.Charset, calls: 0 }
+  let mut index: usize = 0
+  while index < 2 {
+    let base = run Url.parseAbsolute(b"https://origin.test/start.css")
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let baseId = run catalog.registerBase(move base) |> Effect.provideMut<Allocator>(&mut allocator)
+    let rules = run catalog.createRuleSet(
+      baseId,
+      Policy {
+        mode: if index == 0 {
+          ProcessingMode.Static
+        } else {
+          ProcessingMode.SecureStatic
+        },
+        limits: ResourceLimits.defaults(),
+      },
+    )
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let address = run Url.parseAbsolute(b"https://origin.test/start.css")
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run catalog.addExternal(
+      rules,
+      move address,
+      Encoding.Utf8,
+      Origin.Author,
+      &Environment.headless(100.0, 100.0),
+      &Limits.make(),
+    )
+      |> Effect.provideMut<Resolver>(&mut transport)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let actual = run widthIn(
+      &mut catalog,
+      b"<svg xmlns='http://www.w3.org/2000/svg' class='café'/>",
+      Option<usize>.None,
+      rules,
+    )
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      actual
+        == if index == 0 {
+          7.0
+        } else {
+          1.0
+        },
+      "cached bytes do not bypass the consuming document's mode",
+    )
+    index = index + 1
+  }
+  run Testing.expect(
+    transport.calls == 1,
+    "secure authorization happens before external dispatch and cache reuse",
+  )
+}

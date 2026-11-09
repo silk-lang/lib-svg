@@ -1,0 +1,2 @@
+<!-- Parent perspective composes the full child translation before flattening. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><g style="perspective:32px;perspective-origin:0 0"><svg x="8" y="8" width="8" height="8" viewBox="0 0 4 4" style="transform:translateZ(16px)"><rect x="-100" y="-100" width="200" height="200"/></svg></g><rect x="40" width="8" height="8" fill="red"/></svg>

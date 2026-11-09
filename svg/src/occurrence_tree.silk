@@ -1,0 +1,316 @@
+//! Selector topology for immutable source nodes instantiated in independent scopes.
+import silk.text.string { String }
+import structure { Graph, SourceId, OccurrenceId }
+import style_tree { Metadata }
+import style_tree
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.element { ElementTree, NO_ELEMENT, AttributeText }
+import svg_css.tokens { equal }
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+
+struct Language {
+  source: SourceId,
+  attribute: usize,
+}
+
+impl Copy for Language {}
+
+pub struct Cache {
+  metadata: List<Metadata>,
+  languages: List<Option<Language>>,
+}
+
+pub struct Tree<'a> {
+  pub graph: &'a Graph,
+  cache: &'a Cache,
+}
+
+fn index(id: Option<OccurrenceId>) -> usize {
+  return match &id {
+    Option<OccurrenceId>.Some { value } => value.index
+    _ => NO_ELEMENT
+  }
+}
+
+impl Cache {
+  pub fn make() -> Cache {
+    return Cache { metadata: List<Metadata>.make(), languages: List<Option<Language>>.make() }
+  }
+
+  pub effect fn extend(self: &mut Self, graph: &Graph) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    while self.metadata.length() < graph.documents.length() {
+      let document = self.metadata.length()
+      run self.metadata.append(
+        run style_tree.makeMetadata(&graph.documents.asSlice()[document].document),
+      )
+    }
+    while self.languages.length() < graph.occurrences.length() {
+      let i = self.languages.length()
+      let occurrence = &graph.occurrences.asSlice()[i]
+      let own = self.metadata.asSlice()[occurrence.source.document.index].localLanguageAttribute(
+        occurrence.source.node,
+      )
+      let language = match &own {
+        Option<usize>.Some { value } => Option<Language>.Some {
+          value: Language { source: occurrence.source, attribute: value }
+        }
+        _ => match &occurrence.parent {
+          Option<OccurrenceId>.Some { value } => self.languages.asSlice()[value.index]
+          _ => Option<Language>.None
+        }
+      }
+      run self.languages.append(language)
+    }
+  }
+}
+
+pub fn make<'a>(graph: &'a Graph, cache: &'a Cache) -> Tree<'a> {
+  return Tree { graph: graph, cache: cache }
+}
+
+impl<'a> Tree<'a> {
+  fn source(self: &Self, node: usize) -> Option<SourceId> {
+    return if node < self.graph.occurrences.length() {
+      Option<SourceId>.some(self.graph.occurrences.asSlice()[node].source)
+    } else {
+      Option<SourceId>.None
+    }
+  }
+}
+
+impl<'a> ElementTree for Tree<'a> {
+  fn parent(self: &Self, node: usize) -> usize {
+    if node >= self.graph.occurrences.length() {
+      return NO_ELEMENT
+    }
+    return index(self.graph.occurrences.asSlice()[node].parent)
+  }
+
+  fn containingHost(self: &Self, node: usize) -> usize {
+    if node >= self.graph.occurrences.length() {
+      return NO_ELEMENT
+    }
+    let scope = self.graph.occurrences.asSlice()[node].scope
+    return index(self.graph.scopes.asSlice()[scope].host)
+  }
+
+  // The matcher filters this virtual merged child inventory by containingHost.
+  // Normal :host() argument matching sees light children; shadow-context :has()
+  // sees the instance root. The retained graph's links remain separate.
+  fn firstChild(self: &Self, node: usize) -> usize {
+    if node >= self.graph.occurrences.length() {
+      return NO_ELEMENT
+    }
+    let occurrence = &self.graph.occurrences.asSlice()[node]
+    return match &occurrence.shadow {
+      Option<OccurrenceId>.Some { value } => value.index
+      _ => index(occurrence.firstChild)
+    }
+  }
+
+  fn nextSibling(self: &Self, node: usize) -> usize {
+    if node >= self.graph.occurrences.length() {
+      return NO_ELEMENT
+    }
+    let occurrence = &self.graph.occurrences.asSlice()[node]
+    if occurrence.shadowRoot && occurrence.nextSibling.isNone() {
+      let parent = index(occurrence.parent)
+      return if parent == NO_ELEMENT {
+        NO_ELEMENT
+      } else {
+        index(self.graph.occurrences.asSlice()[parent].firstChild)
+      }
+    }
+    return index(occurrence.nextSibling)
+  }
+
+  fn previousSibling(self: &Self, node: usize) -> usize {
+    if node >= self.graph.occurrences.length() {
+      return NO_ELEMENT
+    }
+    let occurrence = &self.graph.occurrences.asSlice()[node]
+    let previous = index(occurrence.previousSibling)
+    if previous != NO_ELEMENT || occurrence.shadowRoot {
+      return previous
+    }
+    let parent = index(occurrence.parent)
+    if parent == NO_ELEMENT {
+      return NO_ELEMENT
+    }
+    let mut last = index(self.graph.occurrences.asSlice()[parent].shadow)
+    while last != NO_ELEMENT {
+      let next = index(self.graph.occurrences.asSlice()[last].nextSibling)
+      if next == NO_ELEMENT {
+        break
+      }
+      last = next
+    }
+    return last
+  }
+
+  fn localName(self: &Self, node: usize) -> &[u8] {
+    return match &self.source(node) {
+      Option<SourceId>.Some { value } => String.utf8Bytes(
+        XmlDocument.localName(
+          &self.graph.documents.asSlice()[value.document.index].document,
+          value.node,
+        ),
+      )
+      _ => b""
+    }
+  }
+
+  fn namespaceUri(self: &Self, node: usize) -> &[u8] {
+    return match &self.source(node) {
+      Option<SourceId>.Some { value } => String.utf8Bytes(
+        XmlDocument.namespaceUri(
+          &self.graph.documents.asSlice()[value.document.index].document,
+          value.node,
+        ),
+      )
+      _ => b""
+    }
+  }
+
+  fn attributeCount(self: &Self, node: usize) -> usize {
+    return match &self.source(node) {
+      Option<SourceId>.Some { value } => XmlDocument.attributes(
+        &self.graph.documents.asSlice()[value.document.index].document,
+        value.node,
+      ).length
+      _ => 0
+    }
+  }
+
+  fn attributeName(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let source = match &self.source(node) {
+      Option<SourceId>.Some { value } => value
+      _ => {
+        return b""
+      }
+    }
+    let document = &self.graph.documents.asSlice()[source.document.index].document
+    let attrs = XmlDocument.attributes(document, source.node)
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeLocalName(document, attrs[attribute]))
+    } else {
+      b""
+    }
+  }
+
+  fn attributeNamespace(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let source = match &self.source(node) {
+      Option<SourceId>.Some { value } => value
+      _ => {
+        return b""
+      }
+    }
+    let document = &self.graph.documents.asSlice()[source.document.index].document
+    let attrs = XmlDocument.attributes(document, source.node)
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeNamespaceUri(document, attrs[attribute]))
+    } else {
+      b""
+    }
+  }
+
+  fn attributeValue(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let source = match &self.source(node) {
+      Option<SourceId>.Some { value } => value
+      _ => {
+        return b""
+      }
+    }
+    let document = &self.graph.documents.asSlice()[source.document.index].document
+    let attrs = XmlDocument.attributes(document, source.node)
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeValue(document, attrs[attribute]))
+    } else {
+      b""
+    }
+  }
+
+  fn attribute<'t>(self: &'t Self, node: usize, attribute: usize) -> AttributeText<'t> {
+    let source = match &self.source(node) {
+      Option<SourceId>.Some { value } => value
+      _ => {
+        return AttributeText<'t> { namespace: b"", name: b"", value: b"" }
+      }
+    }
+    let document = &self.graph.documents.asSlice()[source.document.index].document
+    let attrs = XmlDocument.attributes(document, source.node)
+    if attribute >= attrs.length {
+      return AttributeText<'t> { namespace: b"", name: b"", value: b"" }
+    }
+    let attr = attrs[attribute]
+    return AttributeText<'t> {
+      namespace: String.utf8Bytes(XmlDocument.attributeNamespaceUri(document, attr)),
+      name: String.utf8Bytes(XmlDocument.attributeLocalName(document, attr)),
+      value: String.utf8Bytes(XmlDocument.attributeValue(document, attr)),
+    }
+  }
+
+  fn attributeIsId(self: &Self, node: usize, attribute: usize) -> bool {
+    let source = match &self.source(node) {
+      Option<SourceId>.Some { value } => value
+      _ => {
+        return false
+      }
+    }
+    let document = &self.graph.documents.asSlice()[source.document.index].document
+    let attrs = XmlDocument.attributes(document, source.node)
+    if attribute >= attrs.length {
+      return false
+    }
+    let attr = attrs[attribute]
+    return XmlDocument.attributeIsId(document, attr)
+      || (String.utf8Bytes(XmlDocument.attributeNamespaceUri(document, attr)).length == 0
+        && equal(String.utf8Bytes(XmlDocument.attributeLocalName(document, attr)), b"id")
+        && equal(
+          String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)),
+          b"http://www.w3.org/2000/svg",
+        ))
+  }
+
+  fn language(self: &Self, node: usize) -> &[u8] {
+    if node >= self.cache.languages.length() {
+      return b""
+    }
+    return match &self.cache.languages.asSlice()[node] {
+      Option<Language>.Some { value } => {
+        let document = &self.graph.documents.asSlice()[value.source.document.index].document
+        let attrs = XmlDocument.attributes(document, value.source.node)
+        return String.utf8Bytes(XmlDocument.attributeValue(document, attrs[value.attribute]))
+      }
+      _ => b""
+    }
+  }
+
+  fn isRoot(self: &Self, node: usize) -> bool {
+    return node < self.graph.occurrences.length()
+      && self.graph.occurrences.asSlice()[node].parent.isNone()
+  }
+
+  fn isEmpty(self: &Self, node: usize) -> bool {
+    return match &self.source(node) {
+      Option<SourceId>.Some {
+        value
+      } => self.cache.metadata.asSlice()[value.document.index].isEmpty(value.node)
+      _ => false
+    }
+  }
+
+  fn isLink(self: &Self, node: usize) -> bool {
+    return match &self.source(node) {
+      Option<SourceId>.Some { value } => self.cache.metadata.asSlice()[value.document.index].isLink(
+        value.node,
+      )
+      _ => false
+    }
+  }
+}

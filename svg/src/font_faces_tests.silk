@@ -1,0 +1,71 @@
+//! @font-face descriptor parsing.
+import font_faces { Rule }
+import font_faces
+import svg_css.tokens { Limits, CssError, TokenBuffer }
+import svg_css.lexer
+import svg_fonts.database { Range, FaceStyle }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn rule(css: &[u8]) -> Option<Rule>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let buffer = run lexer.tokenize(css, &Limits.make())
+  return run font_faces.parse(&buffer, buffer.all(), &Limits.make())
+}
+
+fn range(value: Option<Range>, min: f64, max: f64) -> bool {
+  return match value {
+    Option<Range>.Some { value: bounds } => bounds.min == min && bounds.max == max
+    _ => false
+  }
+}
+
+// https://www.w3.org/TR/css-fonts-4/#font-face-rule
+effect fn parsesDescriptors() -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let parsed = run rule(
+    b"font-family: My  Font; src: local(x), url(a.woff2) format(woff2), url('b.ttf') format('truetype'), url(c.otf); font-weight: 700 300; font-stretch: condensed 125%; font-style: oblique 20deg 10deg",
+  )
+  if let Option<Rule>.Some { value } = &parsed {
+    run Testing.expect(Bytes.length(&value.family) == 7, "identifiers join with one space")
+    run Testing.expect(value.sources.length() == 3, "unreadable formats are skipped")
+    run Testing.expect(range(value.weight, 300.0, 700.0), "weight ranges are ordered")
+    run Testing.expect(range(value.width, 75.0, 125.0), "width keywords and percentages")
+    let oblique = match value.style {
+      Option<FaceStyle>.Some { value: FaceStyle.Oblique { min, max } } => min == 10.0 && max == 20.0
+      _ => false
+    }
+    run Testing.expect(oblique, "oblique angle range")
+  } else {
+    run Testing.expect(false, "a rule with a family and a source parses")
+  }
+  run Testing.expect(
+    (run rule(b"font-family: 'A'; src: url(a.woff) format(woff), local()")).isNone(),
+    "a rule without a usable source defines nothing",
+  )
+  run Testing.expect((run rule(b"src: url(a.ttf)")).isNone(), "a rule needs a family")
+  let defaults = run rule(
+    b"font-family: A; src: url(a.ttf); font-weight: auto; font-style: oblique",
+  )
+  if let Option<Rule>.Some { value } = &defaults {
+    run Testing.expect(value.weight.isNone(), "auto keeps the font's own weight")
+    let oblique = match value.style {
+      Option<FaceStyle>.Some { value: FaceStyle.Oblique { min, max } } => min == 14.0 && max == 14.0
+      _ => false
+    }
+    run Testing.expect(oblique, "oblique defaults to 14deg")
+  } else {
+    run Testing.expect(false, "defaults parse")
+  }
+}
+
+test effect fn fontFaceDescriptors() -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run parsesDescriptors() |> Effect.provideMut<Allocator>(&mut allocator)
+}

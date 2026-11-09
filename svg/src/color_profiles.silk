@@ -1,0 +1,295 @@
+//! SVG 1.1 colour profiles (1.1 ch. 12): `color-profile` elements, `icc-color()`
+//! specifications and the `color-profile` property's profile choice.
+import silk.text.string { String }
+import structure { Graph }
+import document_styles { StyledGraph }
+import resources { ResourceKind, ResourceError, Response, fetchWithPolicy }
+import url { Url, UrlError }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.tokens { equal }
+import svg_css.colors { Color }
+import svg_css.values { Store, Value, Paint, Fallback, IccId }
+import svg_image.icc
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.usize
+import resources { Resolver }
+
+/// One loaded `color-profile` element. Unavailable profiles keep empty data, so a
+/// name that matches them still selects "no usable profile" rather than a later one.
+pub struct Entry {
+  pub document: usize,
+  pub node: usize,
+  pub name: Bytes,
+  pub id: Bytes,
+  pub data: Bytes,
+  /// `rendering-intent` as an ICC intent 0 to 3, or 4 for `auto` (the header's).
+  pub intent: u32,
+}
+
+impl Entry {
+  /// The ICC rendering intent this profile is evaluated with.
+  pub fn renderingIntent(self: &Self) -> u32 {
+    return if self.intent > 3 {
+      icc.headerIntent(self.data.asSlice())
+    } else {
+      self.intent
+    }
+  }
+}
+
+/// Maps a `rendering-intent` keyword to an ICC intent, 4 for `auto` and unknown values.
+pub fn intentOf(keyword: &[u8]) -> u32 {
+  return if equal(keyword, b"perceptual") {
+    0
+  } else if equal(keyword, b"relative-colorimetric") {
+    1
+  } else if equal(keyword, b"saturation") {
+    2
+  } else if equal(keyword, b"absolute-colorimetric") {
+    3
+  } else {
+    4
+  }
+}
+
+pub struct Profiles {
+  pub entries: List<Entry>,
+}
+
+impl Profiles {
+  pub fn empty() -> Profiles {
+    return Profiles { entries: List<Entry>.make() }
+  }
+
+  /// The first profile in document order whose `name` matches (1.1 §12.3.1), in the
+  /// given document.
+  pub fn named(self: &Self, document: usize, name: &[u8]) -> Option<usize> {
+    let entries = self.entries.asSlice()
+    let mut index: usize = 0
+    while index < entries.length {
+      let entry = &entries[index]
+      if (entry.document == document || entry.document == usize.MAX)
+        && equal(entry.name.asSlice(), name) {
+        return Option<usize>.Some { value: index }
+      }
+      index = index + 1
+    }
+    return Option<usize>.None
+  }
+
+  /// The profile element with the given `id` in a document.
+  pub fn element(self: &Self, document: usize, id: &[u8]) -> Option<usize> {
+    let entries = self.entries.asSlice()
+    let mut index: usize = 0
+    while index < entries.length {
+      let entry = &entries[index]
+      if entry.document == document && entry.id.length() > 0 && equal(entry.id.asSlice(), id) {
+        return Option<usize>.Some { value: index }
+      }
+      index = index + 1
+    }
+    return Option<usize>.None
+  }
+}
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  return match &(XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+/// Fetches every `color-profile` element's `href` (1.1 §12.3.2), then adds the
+/// stylesheets' @color-profile rules. Profiles that fail
+/// to load, or exceed the document byte budget, stay empty. `local` names a
+/// platform profile store this renderer does not have, so it is ignored.
+pub effect fn load(graph: &Graph, styles: &StyledGraph<'_>) -> Profiles
+  ! OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut profiles = Profiles.empty()
+  let mut remaining = graph.limits.maxTotalBytes
+  let mut documentIndex: usize = 0
+  while documentIndex < graph.documents.length() {
+    let source = &graph.documents.asSlice()[documentIndex]
+    let document = &source.document
+    let current = documentIndex
+    documentIndex = documentIndex + 1
+    let mut n: usize = 0
+    while n < XmlDocument.nodes(document).length {
+      let node = XmlNodeId { index: n }
+      n = n + 1
+      if !equal(
+        String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+        b"http://www.w3.org/2000/svg",
+      )
+        || !equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"color-profile") {
+        continue
+      }
+      let href = match &(XmlDocument.attribute(document, node, "", "href")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => value
+        _ => match &(XmlDocument.attribute(document, node, "http://www.w3.org/1999/xlink", "href")
+          |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+          Option<&[u8]>.Some { value } => value
+          _ => b""
+        }
+      }
+      let mut data = Bytes.make()
+      if href.length > 0 {
+        let parsed = run Effect.result(
+          Url.resolve(&graph.urls.asSlice()[source.nodeBases.asSlice()[node.index]], href),
+        )
+        match move parsed {
+          Result<Url, UrlError | OutOfMemoryError>.Success { value: url } => {
+            let fetched = run Effect.result(
+              fetchWithPolicy(&url, ResourceKind.ColorProfile, &source.policy),
+            )
+            match move fetched {
+              Result<Response, ResourceError | OutOfMemoryError>.Success { value } => {
+                let count = value.bytes.length()
+                if count <= remaining {
+                  remaining = remaining - count
+                  data = move value.bytes
+                }
+              }
+              Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => {
+                match &error {
+                  OutOfMemoryError problem => {
+                    fail OutOfMemoryError {}
+                  }
+                  _ => {}
+                }
+              }
+            }
+          }
+          Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
+            match &error {
+              OutOfMemoryError problem => {
+                fail OutOfMemoryError {}
+              }
+              _ => {}
+            }
+          }
+        }
+      }
+      run profiles.entries.append(
+        Entry {
+          document: current,
+          node: node.index,
+          name: run Bytes.copy(attribute(document, node, "name")),
+          id: run Bytes.copy(attribute(document, node, "id")),
+          data: move data,
+          intent: intentOf(attribute(document, node, "rendering-intent")),
+        },
+      )
+    }
+  }
+
+  // @color-profile rules apply to every document of the render.
+  let rules = styles.catalog.colorProfiles.asSlice()
+  let mut r: usize = 0
+  while r < rules.length {
+    run profiles.entries.append(
+      Entry {
+        document: usize.MAX,
+        node: usize.MAX,
+        name: run Bytes.copy(rules[r].name.asSlice()),
+        id: Bytes.make(),
+        data: run Bytes.copy(rules[r].data.asSlice()),
+        intent: rules[r].intent,
+      },
+    )
+    r = r + 1
+  }
+  return move profiles
+}
+
+/// The sRGB colour an `icc-color()` specification names, or None to use its sRGB
+/// fallback (1.1 §12.2): unknown or unusable profiles and component counts that do
+/// not match the profile's colour space.
+pub fn iccColor(store: &Store<'_>, profiles: &Profiles, id: IccId, fallback: Color) -> Option<
+  Color
+> {
+  let value = store.icc(id)
+  let name = store.text(value.profile)
+
+  // Profiles are document-scoped by name; the style store is shared by all documents,
+  // so names resolve in the first document that declares them.
+  let entries = profiles.entries.asSlice()
+  let mut index: usize = 0
+  while index < entries.length {
+    let entry = &entries[index]
+    index = index + 1
+    if !equal(entry.name.asSlice(), name) {
+      continue
+    }
+    return match &icc.deviceColor(
+      entry.data.asSlice(),
+      entry.renderingIntent(),
+      value.channels.asSlice(),
+    ) {
+      Option<[f64; 3]>.Some { value: rgb } => Option<Color>.Some {
+        value: Color.srgb(rgb[0], rgb[1], rgb[2], fallback.alpha),
+      }
+      Option<[f64; 3]>.None => Option<Color>.None
+    }
+  }
+  return Option<Color>.None
+}
+
+/// Replaces the sRGB fallback of every `icc-color()` specification whose profile can
+/// be evaluated with the colour the profile defines. Run once after the cascade.
+pub fn applyColors(store: &mut Store<'_>, profiles: &Profiles) -> () {
+  if profiles.entries.length() == 0 {
+    return
+  }
+  let mut index: usize = 0
+  while index < store.values.length() {
+    let current = index
+    index = index + 1
+    let replaced = match &store.values.asSlice()[current] {
+      Value.IccColor { color, icc } => match &iccColor(&store.*, profiles, icc, color) {
+        Option<Color>.Some { value } => Option<Value>.Some {
+          value: Value.IccColor { color: value, icc: icc },
+        }
+        _ => Option<Value>.None
+      }
+      Value.Paint { paint } => match &paint {
+        Paint.IccColor { color, icc } => match &iccColor(&store.*, profiles, icc, color) {
+          Option<Color>.Some { value } => Option<Value>.Some {
+            value: Value.Paint { paint: Paint.IccColor { color: value, icc: icc } },
+          }
+          _ => Option<Value>.None
+        }
+        Paint.Server { url, fallback } => match &fallback {
+          Fallback.IccColor { color, icc } => match &iccColor(&store.*, profiles, icc, color) {
+            Option<Color>.Some { value } => Option<Value>.Some {
+              value: Value.Paint {
+                paint: Paint.Server {
+                  url: url,
+                  fallback: Fallback.IccColor { color: value, icc: icc },
+                },
+              },
+            }
+            _ => Option<Value>.None
+          }
+          _ => Option<Value>.None
+        }
+        _ => Option<Value>.None
+      }
+      _ => Option<Value>.None
+    }
+    match move replaced {
+      Option<Value>.Some { value } => {
+        store.values.set(current, move value)
+      }
+      Option<Value>.None => {}
+    }
+  }
+}

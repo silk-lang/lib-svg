@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="60" height="60"><polygon points="0,0 20,0 20,20" fill="green"><animate attributeName="points" from="0,0 20,0 20,20" to="0,0 40,0 40,40" dur="2s"/></polygon></svg>

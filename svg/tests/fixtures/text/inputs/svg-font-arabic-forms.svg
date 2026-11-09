@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="110">
+<defs><font horiz-adv-x="600"><font-face font-family="Forms" ascent="800" descent="200"/><glyph unicode="&#x628;" arabic-form="initial" d="M300 100L600 100L600 500L300 500Z"/><glyph unicode="&#x628;" arabic-form="medial" d="M0 100L600 100L600 200L0 200Z"/><glyph unicode="&#x628;" arabic-form="terminal" d="M0 100L300 100L300 500L0 500Z"/><glyph unicode="&#x628;" d="M100 0L200 0L200 700L100 700Z"/></font></defs>
+<text x="10" y="50" font-family="Forms" font-size="30">&#x628;&#x628;&#x628; <tspan x="10" y="90">&#x628;</tspan></text>
+</svg>

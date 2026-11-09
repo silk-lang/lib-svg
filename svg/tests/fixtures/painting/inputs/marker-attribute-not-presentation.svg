@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <marker id="m" markerWidth="20" markerHeight="20" refX="10" refY="10" markerUnits="userSpaceOnUse"><rect width="20" height="20" fill="red"/></marker><path d="M20 50 H80" stroke="#008000" stroke-width="10" marker="url(#m)"/>
+</svg>

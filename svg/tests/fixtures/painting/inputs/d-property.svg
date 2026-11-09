@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+<style>#b { d: path("M50 10 H90 V90 H50 Z") }</style>
+<path d="M0 0 H100 V100 H0 Z" fill="red" style="d: path('M10 10 H50 V90 H10 Z')"/>
+<path id="b" d="M0 0 H100 V100 H0 Z" fill="green"/>
+<path d="M10 10 H50 V90 H10 Z" fill="green"/>
+</svg>

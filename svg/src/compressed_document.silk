@@ -1,0 +1,87 @@
+//! Bounded gzip/zlib wrappers for SVG source documents; RFC 1950/1952.
+import structure { StructureError }
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.compress.inflate { Decoder, DecodeError, ErrorKind, Format, Limits, Progress, Status }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.u8
+import silk.num.usize
+
+effect fn invalid(error: DecodeError) -> never
+  ! StructureError {
+  run invalidKind(error.kind)
+}
+
+effect fn invalidKind(kind: ErrorKind) -> never
+  ! StructureError {
+  if kind == ErrorKind.InputLimit || kind == ErrorKind.OutputLimit || kind == ErrorKind.HeaderLimit
+    || kind == ErrorKind.MemberLimit
+    || kind == ErrorKind.MemoryLimit {
+    fail StructureError.TooLarge
+  }
+  fail StructureError.InvalidXml
+}
+
+/// Returns None for ordinary XML, otherwise verified decompressed bytes.
+/// The caller separately charges compressed input against its resource budget.
+pub effect fn expand(data: &[u8], maximum: usize) -> Option<Bytes>
+  ! StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  if data.length < 2 {
+    return Option<Bytes>.None
+  }
+  let gzip = data[0] == 31 && data[1] == 139
+  let zlib = data[0] % 16 == 8 && data[0] / 16 <= 7
+    && (u8.toU32(data[0]) * 256 + u8.toU32(data[1])) % 31 == 0
+  if !gzip && !zlib {
+    return Option<Bytes>.None
+  }
+  let format = if gzip {
+    Format.Gzip
+  } else {
+    Format.Zlib
+  }
+  let limits = Limits {
+    maxInputBytes: usize.toU64(data.length),
+    maxOutputBytes: usize.toU64(maximum),
+    maxMembers: 1024,
+    maxHeaderBytes: 65536,
+    maxMemoryBytes: 65536,
+  }
+  let mut decoder = run Effect.catch<DecodeError>(Decoder.make(format, move limits), invalid)
+  let mut bytes = Bytes.make()
+  let mut buffer: [u8; 8192] = [0; 8192]
+  let mut consumed: usize = 0
+  while true {
+    let next = Decoder.step(
+      &mut decoder,
+      Slice.view<u8>(data, consumed, data.length - consumed),
+      &mut buffer,
+      true,
+    )
+    let progress = match &next {
+      Result<Progress, DecodeError>.Success { value } => Progress {
+        consumed: value.consumed,
+        written: value.written,
+        status: value.status,
+      }
+      Result<Progress, DecodeError>.Failure { error } => {
+        run invalidKind(error.kind)
+      }
+    }
+    consumed = consumed + progress.consumed
+    run bytes.append(Slice.view<u8>(&buffer, 0, progress.written))
+    if progress.status == Status.Finished {
+      if consumed != data.length {
+        fail StructureError.InvalidXml
+      }
+      return Option<Bytes>.Some { value: move bytes }
+    }
+    if progress.status != Status.NeedOutput || (progress.consumed == 0 && progress.written == 0) {
+      fail StructureError.InvalidXml
+    }
+  }
+}

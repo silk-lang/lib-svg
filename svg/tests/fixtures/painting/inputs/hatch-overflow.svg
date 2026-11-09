@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="24">
+<defs><hatch id="hidden" hatchUnits="userSpaceOnUse" pitch="6" overflow="hidden">
+  <hatchpath offset="5" stroke="#202020" stroke-width="4"/>
+</hatch></defs>
+<rect y="0" width="36" height="10" fill="url(#hidden)"/>
+<defs><hatch id="visible" hatchUnits="userSpaceOnUse" pitch="6" overflow="visible">
+  <hatchpath offset="5" stroke="#202020" stroke-width="4"/>
+</hatch></defs>
+<rect y="14" width="36" height="10" fill="url(#visible)"/>
+
+</svg>

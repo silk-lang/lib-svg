@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="60" height="60"><path id="p" d="M0 0 V40" fill="none"/><rect width="10" height="10" fill="green"><animateMotion path="M0 0 H40" dur="1s"><mpath href="#p"/></animateMotion></rect></svg>

@@ -1,0 +1,213 @@
+//! Basic shape geometry consumes computed CSS; line coordinates remain XML attributes.
+import silk.text.string { String }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.values { Value }
+import svg_css.properties { Property }
+import svg_css.dimensions { ExprId, Dimension, Context }
+import svg_css.dimensions
+import svg_css.value_cursor { Cursor }
+import svg_css.input { Input }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.lexer
+import svg_geometry.geometry { Path, Point, Segment }
+import svg_geometry.svg
+import svg_geometry.math
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+
+fn attribute<'a>(document: &'a XmlDocument, id: XmlNodeId, name: string) -> &'a [u8] {
+  return match &(XmlDocument.attribute(document, id, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+fn numeric(engine: &Engine<'_>, style: StyleId, property: Property, basis: f64) -> f64 {
+  return match &engine.number(style, property, basis) {
+    Option<f64>.Some { value } => value
+    _ => 0.0
+  }
+}
+
+fn radius(
+  engine: &Engine<'_>,
+  style: StyleId,
+  property: Property,
+  other: Property,
+  basis: f64,
+  otherBasis: f64,
+) -> f64 {
+  return match &engine.number(style, property, basis) {
+    Option<f64>.Some { value } => value
+    _ => numeric(engine, style, other, otherBasis)
+  }
+}
+
+effect fn lineCoordinate(
+  document: &XmlDocument,
+  id: XmlNodeId,
+  name: string,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  basis: f64,
+  limits: &Limits,
+) -> f64
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = attribute(document, id, name)
+  if bytes.length == 0 {
+    return 0.0
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let expression = run dimensions.parse(
+    &mut engine.values.numerics,
+    &input,
+    &mut cursor,
+    Dimension.LengthPercentage,
+    true,
+  )
+  if !cursor.done(&input) {
+    return 0.0
+  }
+  let parsed = match &expression {
+    Option<ExprId>.Some { value } => value
+    _ => {
+      return 0.0
+    }
+  }
+  let context = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let computed = run dimensions.compute(&mut engine.values.numerics, parsed, &context)
+  let bound = f64.fromBits(9218868437227405311)
+  return f64.max(
+    -bound,
+    f64.min(bound, dimensions.evaluate(&engine.values.numerics, computed, basis)),
+  )
+}
+
+pub struct Shape {
+  pub path: Option<usize>,
+  // Zero-sized basic shapes retain geometry for reference boxes but never paint,
+  // even with round stroke caps. A zero-length path is different and may paint.
+  pub paintable: bool,
+}
+
+effect fn degenerate(path: &mut Path, x0: f64, y0: f64, x1: f64, y1: f64) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if !f64.isFinite(x0) || !f64.isFinite(y0) || !f64.isFinite(x1) || !f64.isFinite(y1) {
+    fail RenderError.InvalidGeometry
+  }
+  let moved = run path.append(Segment.MoveTo { to: Point.new(x0, y0) })
+  let lined = run path.append(Segment.LineTo { to: Point.new(x1, y1) })
+}
+
+// The resolver transfers the CSS path arena into `paths` before calling this:
+// d:path() handles remain stable, so repeated inherited path values need no copies.
+pub effect fn shape(
+  document: &XmlDocument,
+  id: XmlNodeId,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  width: f64,
+  height: f64,
+  paths: &mut List<Path>,
+  limits: &Limits,
+) -> Shape
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let name = String.utf8Bytes(XmlDocument.localName(document, id))
+  if equal(name, b"path") {
+    let entry = match &engine.get(style, Property.D) {
+      Option<ComputedValue>.Some { value } => value
+      _ => {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    return match &engine.values.get(entry.value).* {
+      Value.Path { index } => {
+        if index >= paths.length() {
+          fail RenderError.InvalidGeometry
+        }
+        Shape { path: Option<usize>.Some { value: index }, paintable: true }
+      }
+      _ => Shape { path: Option<usize>.None, paintable: false }
+    }
+  }
+  let mut path = Path.make()
+  let mut paintable = true
+  if equal(name, b"rect") {
+    let x = numeric(&engine.*, style, Property.X, width)
+    let y = numeric(&engine.*, style, Property.Y, height)
+    let w = numeric(&engine.*, style, Property.Width, width)
+    let h = numeric(&engine.*, style, Property.Height, height)
+    if !f64.isFinite(x + w) || !f64.isFinite(y + h) {
+      fail RenderError.InvalidGeometry
+    }
+    if w == 0.0 || h == 0.0 {
+      run degenerate(&mut path, x, y, x + w, y + h)
+      paintable = false
+    } else {
+      path = run svg.rectangle(
+        x,
+        y,
+        w,
+        h,
+        radius(&engine.*, style, Property.Rx, Property.Ry, width, height),
+        radius(&engine.*, style, Property.Ry, Property.Rx, height, width),
+      )
+    }
+  } else if equal(name, b"circle") || equal(name, b"ellipse") {
+    let circle = equal(name, b"circle")
+    let rx = if circle {
+      numeric(&engine.*, style, Property.R, math.hypot(width, height) / 1.4142135623730951)
+    } else {
+      radius(&engine.*, style, Property.Rx, Property.Ry, width, height)
+    }
+    let ry = if circle {
+      rx
+    } else {
+      radius(&engine.*, style, Property.Ry, Property.Rx, height, width)
+    }
+    let cx = numeric(&engine.*, style, Property.Cx, width)
+    let cy = numeric(&engine.*, style, Property.Cy, height)
+    if !f64.isFinite(cx - rx) || !f64.isFinite(cx + rx) || !f64.isFinite(cy - ry)
+      || !f64.isFinite(cy + ry) {
+      fail RenderError.InvalidGeometry
+    }
+    if rx == 0.0 || ry == 0.0 {
+      run degenerate(&mut path, cx - rx, cy - ry, cx + rx, cy + ry)
+      paintable = false
+    } else {
+      path = run svg.ellipse(cx, cy, rx, ry)
+    }
+  } else if equal(name, b"polyline") || equal(name, b"polygon") {
+    path = run svg.points(attribute(document, id, "points"), equal(name, b"polygon"))
+  } else if equal(name, b"line") {
+    let x1 = run lineCoordinate(document, id, "x1", &mut engine.*, style, width, limits)
+    let y1 = run lineCoordinate(document, id, "y1", &mut engine.*, style, height, limits)
+    let x2 = run lineCoordinate(document, id, "x2", &mut engine.*, style, width, limits)
+    let y2 = run lineCoordinate(document, id, "y2", &mut engine.*, style, height, limits)
+    let moved = run path.append(Segment.MoveTo { to: Point.new(x1, y1) })
+    let lined = run path.append(Segment.LineTo { to: Point.new(x2, y2) })
+  } else {
+    return Shape { path: Option<usize>.None, paintable: false }
+  }
+  if path.isEmpty() {
+    return Shape { path: Option<usize>.None, paintable: false }
+  }
+  let index = paths.length()
+  run paths.append(move path)
+  return Shape { path: Option<usize>.Some { value: index }, paintable: paintable }
+}

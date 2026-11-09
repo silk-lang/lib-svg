@@ -1,0 +1,672 @@
+//! Host-extensible, allocation-bounded resource loading. No network, filesystem, or cache.
+//! Data URLs follow Fetch's data URL processor: lenient percent-decoding, forgiving
+//! Base64 and a text/plain fallback for an invalid MIME type.
+import url { Url }
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.core.ownership { Copy }
+import silk.core.result { Result }
+import silk.encoding.base64 { Base64, Base64Error }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+
+pub enum ResourceKind {
+  StyleSheet,
+  Document,
+  Image,
+  Font,
+  ColorProfile,
+}
+
+pub enum ResourceError {
+  UnsupportedScheme,
+  InvalidData,
+  TooLarge,
+  BlockedLocation,
+  Io,
+}
+
+pub struct Limits {
+  /// Maximum decoded bytes for one resource; checked before allocating the decoded buffer.
+  pub maxResourceBytes: usize,
+}
+
+impl Copy for Limits {}
+
+impl Limits {
+  pub fn defaults() -> Limits {
+    return Limits { maxResourceBytes: 67108864 }
+  }
+}
+
+pub enum ProcessingMode {
+  Static,
+  Animated,
+  SecureStatic,
+  SecureAnimated,
+}
+
+impl ProcessingMode {
+  pub fn isSecure(self: Self) -> bool {
+    return self == ProcessingMode.SecureStatic || self == ProcessingMode.SecureAnimated
+  }
+}
+
+pub struct Policy {
+  pub mode: ProcessingMode,
+  pub limits: Limits,
+}
+
+impl Copy for Policy {}
+
+/// Transport metadata is absent when the transport supplies none. MIME types are
+/// parsed essences without parameters; charset labels are decoded parameter values.
+/// finalUrl supplies the response base after redirects; its fragment is not a target.
+/// Data-URL metadata stays in the request URL and is available through inspectData,
+/// avoiding redundant header allocation and decoding.
+pub struct Response {
+  pub bytes: Bytes,
+  pub finalUrl: Option<Url>,
+  pub mediaType: Option<Bytes>,
+  pub charset: Option<Bytes>,
+}
+
+impl Response {
+  pub fn fromBytes(bytes: Bytes) -> Response {
+    return Response {
+      bytes: move bytes,
+      finalUrl: Option<Url>.None,
+      mediaType: Option<Bytes>.None,
+      charset: Option<Bytes>.None,
+    }
+  }
+}
+
+/// Hosts can implement arbitrary schemes by supplying their own mutable provider.
+/// Callers enforce processing policy before dispatch; transports enforce their own
+/// access controls on every redirect hop. Aggregate budgets and cycles remain caller-owned.
+pub service Resolver {
+  effect fn fetch(url: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Resolver | &mut Allocator
+}
+
+/// Portable default provider: only RFC 2397 data URLs are supported.
+pub struct DataOnly {
+  pub limits: Limits,
+}
+
+impl DataOnly {
+  pub fn make(limits: Limits) -> DataOnly {
+    return DataOnly { limits: limits }
+  }
+
+  pub effect fn fetch(self: &mut Self, url: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    let metadata = run inspectData(url)
+    let bytes = if metadata.base64 {
+      run decodeBase64(metadata.payload, self.limits.maxResourceBytes)
+    } else {
+      run decodePercent(metadata.payload, self.limits.maxResourceBytes)
+    }
+    return Response.fromBytes(move bytes)
+  }
+}
+
+impl Resolver for DataOnly {
+  fetch: DataOnly.fetch
+}
+
+/// Fetches a subresource only after mode authorization. Same-document element
+/// references must be resolved in the document arena, without fetching bytes.
+/// Data URLs are always decoded locally, never delegated to arbitrary host code.
+pub effect fn fetchWithPolicy(url: &Url, kind: ResourceKind, policy: &Policy) -> Response
+  ! ResourceError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  if equal(Url.scheme(url), b"data") {
+    let mut provider = DataOnly.make(policy.limits)
+    return run provider.fetch(url, kind)
+  }
+  if policy.mode.isSecure() {
+    fail ResourceError.BlockedLocation
+  }
+  let response = run Resolver.fetch(url, kind)
+  if Bytes.length(&response.bytes) > policy.limits.maxResourceBytes {
+    fail ResourceError.TooLarge
+  }
+  return move response
+}
+
+/// Borrowed data-URL metadata from Fetch's data URL processor. `mediaType` is the
+/// parsed essence's source text (type/subtype, unescaped as Fetch never
+/// percent-decodes the header); `charset` is the charset parameter's raw value,
+/// possibly a quoted string. A header that is not a valid MIME type falls back
+/// to text/plain with US-ASCII. For repeated charset parameters, the first wins.
+pub struct DataMetadata<'a> {
+  pub mediaType: &'a [u8],
+  pub charset: Option<&'a [u8]>,
+  /// Raw semicolon-prefixed MIME parameters, excluding the terminal ;base64 marker.
+  pub parameters: &'a [u8],
+  /// Serialized URL bytes after the first comma, including any query, excluding fragment.
+  pub payload: &'a [u8],
+  pub base64: bool,
+}
+
+impl<'a> DataMetadata<'a> {
+  pub effect fn decodedMediaType(self: &Self) -> Bytes
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let mut result = run Bytes.copy(self.mediaType)
+    let mut bytes = Bytes.asMutSlice(&mut result)
+    let mut index: usize = 0
+    while index < bytes.length {
+      bytes[index] = lower(bytes[index])
+      index = index + 1
+    }
+    drop bytes
+    return move result
+  }
+
+  pub fn matchesMediaType(self: &Self, expected: &[u8]) -> bool {
+    return asciiEqual(self.mediaType, expected)
+  }
+
+  /// The charset value with a quoted string's quotes and escapes removed.
+  pub effect fn decodedCharset(self: &Self) -> Option<Bytes>
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    return match &self.charset {
+      Option<&[u8]>.Some { value } => {
+        if value.length == 0 || value[0] != 34 {
+          let bytes = run Bytes.copy(value)
+          return Option<Bytes>.Some { value: move bytes }
+        }
+
+        // https://fetch.spec.whatwg.org/#collect-an-http-quoted-string
+        let mut bytes = Bytes.make()
+        let mut index: usize = 1
+        while index < value.length && value[index] != 34 {
+          if value[index] == 92 && index + 1 < value.length {
+            index = index + 1
+          }
+          run Bytes.append(&mut bytes, Slice.view<u8>(value, index, 1))
+          index = index + 1
+        }
+        return Option<Bytes>.Some { value: move bytes }
+      }
+      Option<&[u8]>.None => Option<Bytes>.None
+    }
+  }
+}
+
+/// Splits a data URL by https://fetch.spec.whatwg.org/#data-url-processor without
+/// allocating or decoding its payload. Only a missing comma fails; the payload is
+/// percent-decoded leniently, and an invalid MIME type becomes text/plain;charset=US-ASCII
+/// (https://mimesniff.spec.whatwg.org/#parse-a-mime-type).
+pub effect fn inspectData<'a>(url: &'a Url) -> DataMetadata<'a>
+  ! ResourceError {
+  if !equal(Url.scheme(url), b"data") {
+    fail ResourceError.UnsupportedScheme
+  }
+  let serialized = Url.withoutFragment(url)
+  if serialized.length < 5 {
+    fail ResourceError.InvalidData
+  }
+  let data = Slice.view<u8>(serialized, 5, serialized.length - 5)
+  let mut comma: usize = 0
+  while comma < data.length && data[comma] != 44 {
+    comma = comma + 1
+  }
+  if comma == data.length {
+    fail ResourceError.InvalidData
+  }
+  let mut header = trim(Slice.view<u8>(data, 0, comma), true)
+  let payload = Slice.view<u8>(data, comma + 1, data.length - comma - 1)
+
+  // A trailing ";", spaces and "base64" select Base64 and leave the header.
+  let mut base64 = false
+  if header.length >= 6 && asciiEqual(Slice.view<u8>(header, header.length - 6, 6), b"base64") {
+    let mut before = header.length - 6
+    while before > 0 && header[before - 1] == 32 {
+      before = before - 1
+    }
+    if before > 0 && header[before - 1] == 59 {
+      base64 = true
+      header = Slice.view<u8>(header, 0, before - 1)
+    }
+  }
+  let fallback = DataMetadata<'a> {
+    mediaType: b"text/plain",
+    charset: Option<&[u8]>.Some { value: b"US-ASCII" },
+    parameters: b"",
+    payload: payload,
+    base64: base64,
+  }
+  if header.length == 0 {
+    return move fallback
+  }
+
+  // A header starting with ";" has the text/plain type prepended.
+  if header[0] == 59 {
+    return DataMetadata<'a> {
+      mediaType: b"text/plain",
+      charset: charsetParameter(header),
+      parameters: header,
+      payload: payload,
+      base64: base64,
+    }
+  }
+  let source = trim(header, false)
+  let mut slash: usize = 0
+  while slash < source.length && source[slash] != 47 {
+    slash = slash + 1
+  }
+  if slash == 0 || slash == source.length || !tokens(Slice.view<u8>(source, 0, slash)) {
+    return move fallback
+  }
+  let mut typeEnd = slash + 1
+  while typeEnd < source.length && source[typeEnd] != 59 {
+    typeEnd = typeEnd + 1
+  }
+  let subtype = trim(Slice.view<u8>(source, slash + 1, typeEnd - slash - 1), false)
+  if subtype.length == 0 || !tokens(subtype) {
+    return move fallback
+  }
+  let parameters = Slice.view<u8>(source, typeEnd, source.length - typeEnd)
+  return DataMetadata<'a> {
+    mediaType: Slice.view<u8>(source, 0, slash + 1 + subtype.length),
+    charset: charsetParameter(parameters),
+    parameters: parameters,
+    payload: payload,
+    base64: base64,
+  }
+}
+
+// https://mimesniff.spec.whatwg.org/#parse-a-mime-type steps 11-12: the first
+// valid charset parameter; nameless, empty or invalid parameters are skipped.
+fn charsetParameter<'a>(parameters: &'a [u8]) -> Option<&'a [u8]> {
+  let mut cursor: usize = 0
+  while cursor < parameters.length {
+    // Skip the ";" and HTTP whitespace before the name.
+    cursor = cursor + 1
+    while cursor < parameters.length && httpWhitespace(parameters[cursor]) {
+      cursor = cursor + 1
+    }
+    let nameStart = cursor
+    while cursor < parameters.length && parameters[cursor] != 59 && parameters[cursor] != 61 {
+      cursor = cursor + 1
+    }
+    let name = Slice.view<u8>(parameters, nameStart, cursor - nameStart)
+    if cursor == parameters.length || parameters[cursor] == 59 {
+      continue
+    }
+    cursor = cursor + 1
+    let valueStart = cursor
+    let mut value: &'a [u8] = b""
+    let mut valid = true
+    if cursor < parameters.length && parameters[cursor] == 34 {
+      cursor = cursor + 1
+      while cursor < parameters.length && parameters[cursor] != 34 {
+        if parameters[cursor] == 92 && cursor + 1 < parameters.length {
+          cursor = cursor + 1
+        }
+        if !quotedByte(parameters[cursor]) {
+          valid = false
+        }
+        cursor = cursor + 1
+      }
+      if cursor < parameters.length {
+        cursor = cursor + 1
+      }
+      value = Slice.view<u8>(parameters, valueStart, cursor - valueStart)
+      while cursor < parameters.length && parameters[cursor] != 59 {
+        cursor = cursor + 1
+      }
+    } else {
+      while cursor < parameters.length && parameters[cursor] != 59 {
+        cursor = cursor + 1
+      }
+      value = trim(Slice.view<u8>(parameters, valueStart, cursor - valueStart), false)
+      valid = value.length > 0 && tokens(value)
+    }
+    if valid && asciiEqual(name, b"charset") && tokens(name) {
+      return Option<&'a [u8]>.Some { value: value }
+    }
+  }
+  return Option<&'a [u8]>.None
+}
+
+// Strips HTTP whitespace (spaces, tabs, CR, LF), plus form feed as ASCII whitespace.
+fn trim<'a>(data: &'a [u8], ascii: bool) -> &'a [u8] {
+  let mut start: usize = 0
+  let mut end = data.length
+  while start < end && (httpWhitespace(data[start]) || (ascii && data[start] == 12)) {
+    start = start + 1
+  }
+  while end > start && (httpWhitespace(data[end - 1]) || (ascii && data[end - 1] == 12)) {
+    end = end - 1
+  }
+  return Slice.view<u8>(data, start, end - start)
+}
+
+fn httpWhitespace(byte: u8) -> bool {
+  return byte == 9 || byte == 10 || byte == 13 || byte == 32
+}
+
+// https://mimesniff.spec.whatwg.org/#http-quoted-string-token-code-point
+fn quotedByte(byte: u8) -> bool {
+  return byte == 9 || byte >= 32
+}
+
+fn tokens(data: &[u8]) -> bool {
+  let mut index: usize = 0
+  while index < data.length {
+    if !tokenByte(data[index]) {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn lower(value: u8) -> u8 {
+  if value >= 65 && value <= 90 {
+    return value + 32
+  }
+  return value
+}
+
+fn asciiEqual(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if lower(a[index]) != lower(b[index]) {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn hex(value: u8) -> u8 {
+  if value >= 48 && value <= 57 {
+    return value - 48
+  }
+  if value >= 65 && value <= 70 {
+    return value - 55
+  }
+  if value >= 97 && value <= 102 {
+    return value - 87
+  }
+  return 255
+}
+
+// https://url.spec.whatwg.org/#percent-decode: a "%" that does not start two hex
+// digits is a literal byte. No allocation and no unchecked lookahead.
+effect fn nextPercent(data: &[u8], cursor: &mut usize) -> u8
+  ! ResourceError {
+  if cursor.* >= data.length {
+    fail ResourceError.InvalidData
+  }
+  let byte = data[cursor.*]
+  if byte == 37 && data.length - cursor.* >= 3 {
+    let high = hex(data[cursor.* + 1])
+    let low = hex(data[cursor.* + 2])
+    if high != 255 && low != 255 {
+      cursor.* = cursor.* + 3
+      return high * 16 + low
+    }
+  }
+  cursor.* = cursor.* + 1
+  return byte
+}
+
+fn tokenByte(value: u8) -> bool {
+  // https://mimesniff.spec.whatwg.org/#http-token-code-point
+  if (value >= 48 && value <= 57) || (value >= 65 && value <= 90) || (value >= 97 && value <= 122) {
+    return true
+  }
+  return value == 33 || value == 35 || value == 36 || value == 37 || value == 38 || value == 39
+    || value == 42
+    || value == 43
+    || value == 45
+    || value == 46
+    || value == 94
+    || value == 95
+    || value == 96
+    || value == 124
+    || value == 126
+}
+
+effect fn percentLength(data: &[u8], maximum: usize) -> usize
+  ! ResourceError {
+  let mut cursor: usize = 0
+  let mut length: usize = 0
+  while cursor < data.length {
+    let byte = run nextPercent(data, &mut cursor)
+    if length == maximum {
+      fail ResourceError.TooLarge
+    }
+    length = length + 1
+  }
+  return length
+}
+
+effect fn decodePercent(data: &[u8], maximum: usize) -> Bytes
+  ! ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  let length = run percentLength(data, maximum)
+  if length == data.length {
+    return run Bytes.copy(data)
+  }
+  let mut result = run Bytes.zeroed(length)
+  let mut output = Bytes.asMutSlice(&mut result)
+  let mut cursor: usize = 0
+  let mut index: usize = 0
+  while cursor < data.length {
+    output[index] = run nextPercent(data, &mut cursor)
+    index = index + 1
+  }
+  drop output
+  return move result
+}
+
+effect fn base64Length(data: &[u8]) -> usize
+  ! ResourceError {
+  let result = Base64.decodedLength(data)
+  return match &result {
+    Result<usize, Base64Error>.Success { value } => value
+    Result<usize, Base64Error>.Failure { error } => {
+      fail ResourceError.InvalidData
+    }
+  }
+}
+
+effect fn base64Into(data: &[u8], output: &mut [u8]) -> usize
+  ! ResourceError {
+  let result = Base64.decodeInto(move output, data)
+  return match &result {
+    Result<usize, Base64Error>.Success { value } => value
+    Result<usize, Base64Error>.Failure { error } => {
+      fail ResourceError.InvalidData
+    }
+  }
+}
+
+fn asciiWhitespace(byte: u8) -> bool {
+  return byte == 9 || byte == 10 || byte == 12 || byte == 13 || byte == 32
+}
+
+effect fn base64Byte(data: &[u8], cursor: &mut usize) -> u8
+  ! ResourceError {
+  // URL serialization normally escapes spaces and removes tabs/newlines.
+  // Preserve the same rule for any raw whitespace that survives serialization.
+  if cursor.* < data.length && asciiWhitespace(data[cursor.*]) {
+    let byte = data[cursor.*]
+    cursor.* = cursor.* + 1
+    return byte
+  }
+  return run nextPercent(data, &mut cursor.*)
+}
+
+fn sextet(byte: u8) -> u8 {
+  if byte >= 65 && byte <= 90 {
+    return byte - 65
+  }
+  if byte >= 97 && byte <= 122 {
+    return byte - 97 + 26
+  }
+  if byte >= 48 && byte <= 57 {
+    return byte - 48 + 52
+  }
+  if byte == 43 {
+    return 62
+  }
+  if byte == 47 {
+    return 63
+  }
+  return 255
+}
+
+fn alphabet(value: u8) -> u8 {
+  if value < 26 {
+    return value + 65
+  }
+  if value < 52 {
+    return value - 26 + 97
+  }
+  if value < 62 {
+    return value - 52 + 48
+  }
+  return if value == 62 {
+    43
+  } else {
+    47
+  }
+}
+
+// Fetch #data-url-processor percent-decodes before Infra's forgiving Base64.
+// Normalize one quantum on the stack for the strict stdlib decoder. This keeps
+// exact validation and size preflight allocation-free even for escaped input.
+effect fn readQuantum(data: &[u8], cursor: &mut usize, quantum: &mut [u8; 4]) -> bool
+  ! ResourceError {
+  let mut index: usize = 0
+  while index < 4 && cursor.* < data.length {
+    let byte = run base64Byte(data, &mut cursor.*)
+    if asciiWhitespace(byte) {
+      continue
+    }
+    quantum[index] = byte
+    index = index + 1
+  }
+  if index == 0 {
+    return false
+  }
+  if index == 1 {
+    fail ResourceError.InvalidData
+  }
+  if index < 4 {
+    let mut i: usize = 0
+    while i < index {
+      if quantum[i] == 61 {
+        fail ResourceError.InvalidData
+      }
+      i = i + 1
+    }
+    while index < 4 {
+      quantum[index] = 61
+      index = index + 1
+    }
+  }
+  if quantum[2] == 61 || quantum[3] == 61 {
+    while cursor.* < data.length {
+      if !asciiWhitespace(run base64Byte(data, &mut cursor.*)) {
+        fail ResourceError.InvalidData
+      }
+    }
+    let tail: usize = if quantum[2] == 61 {
+      1
+    } else {
+      2
+    }
+    let value = sextet(quantum[tail])
+    if value == 255 {
+      fail ResourceError.InvalidData
+    }
+
+    // Infra explicitly discards the unused low bits of the final sextet.
+    quantum[tail] = alphabet(
+      if tail == 1 {
+        (value / 16) * 16
+      } else {
+        (value / 4) * 4
+      },
+    )
+  }
+  return true
+}
+
+effect fn decodeBase64(data: &[u8], maximum: usize) -> Bytes
+  ! ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  // Canonical unescaped input remains on the stdlib's direct path.
+  let directLength = Base64.decodedLength(data)
+  if let Result<usize, Base64Error>.Success { value: length } = &directLength {
+    if length > maximum {
+      fail ResourceError.TooLarge
+    }
+    let mut direct = run Bytes.zeroed(length)
+    let written = run base64Into(data, Bytes.asMutSlice(&mut direct))
+    return move direct
+  }
+
+  // Complete validation and exact size accounting precede every allocation.
+  // Each increment is tested against the remaining budget before addition.
+  let mut cursor: usize = 0
+  let mut length: usize = 0
+  let mut quantum: [u8; 4] = [0; 4]
+  while cursor < data.length {
+    if !(run readQuantum(data, &mut cursor, &mut quantum)) {
+      break
+    }
+    let count = run base64Length(&quantum)
+    if count > maximum - length {
+      fail ResourceError.TooLarge
+    }
+    length = length + count
+  }
+  let mut result = run Bytes.zeroed(length)
+  let mut output = Bytes.asMutSlice(&mut result)
+  cursor = 0
+  let mut written: usize = 0
+  while cursor < data.length {
+    if !(run readQuantum(data, &mut cursor, &mut quantum)) {
+      break
+    }
+    let mut available = length - written
+    if available > 3 {
+      available = 3
+    }
+    let count = run base64Into(&quantum, Slice.viewMut<u8>(&mut output, written, available))
+    written = written + count
+  }
+  drop output
+  return move result
+}

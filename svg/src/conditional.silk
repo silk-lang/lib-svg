@@ -1,0 +1,231 @@
+//! Static SVG2 conditional processing over the retained XML arena.
+//! No rendering, CSS, inherited language, resource loading, or allocation occurs here.
+import silk.text.string { String }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import svg_css.tokens { equal }
+import silk.collections.slice { Slice }
+import silk.core.option { Option }
+
+/// Borrowed host preferences, ordered from most to least preferred, and exact
+/// supported extension URI bytes. Empty slices mean no languages/extensions;
+/// an empty language preference never matches. No locale or URI normalization
+/// is performed, and requiredFeatures is intentionally ignored in SVG2.
+pub struct Config<'a> {
+  pub languages: &'a [&'a [u8]],
+  pub supportedExtensions: &'a [&'a [u8]],
+}
+
+fn whitespace(c: u8) -> bool {
+  // SVG2 references HTML's space/comma token sets (ASCII whitespace).
+  return c == 9 || c == 10 || c == 12 || c == 13 || c == 32
+}
+
+fn lower(c: u8) -> u8 {
+  return if c >= 65 && c <= 90 {
+    c + 32
+  } else {
+    c
+  }
+}
+
+fn languageMatches(preference: &[u8], tag: &[u8]) -> bool {
+  // https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingSystemLanguageAttribute
+  // The USER tag is the prefix, not the document tag. No wildcard matching.
+  if preference.length == 0 || preference.length > tag.length {
+    return false
+  }
+  if preference.length != tag.length && tag[preference.length] != 45 {
+    return false
+  }
+  let mut i: usize = 0
+  while i < preference.length {
+    if lower(preference[i]) != lower(tag[i]) {
+      return false
+    }
+
+    // i < length proves the increment cannot overflow.
+    i = i + 1
+  }
+  return true
+}
+
+fn supported(token: &[u8], config: &Config<'_>) -> bool {
+  let mut i: usize = 0
+  while i < config.supportedExtensions.length {
+    if equal(token, config.supportedExtensions[i]) {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+fn extensionsPass(document: &XmlDocument, node: XmlNodeId, config: &Config<'_>) -> bool {
+  // https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingRequiredExtensionsAttribute
+  let attribute = (XmlDocument.attribute(document, node, "", "requiredExtensions")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+  match &attribute {
+    Option<&[u8]>.Some { value } => {
+      let mut i: usize = 0
+      let mut any = false
+      while i < value.length {
+        while i < value.length && whitespace(value[i]) {
+          i = i + 1
+        }
+        let start = i
+        while i < value.length && !whitespace(value[i]) {
+          i = i + 1
+        }
+        if start < i {
+          // Both offsets are bounded by value.length; subtraction cannot underflow.
+          if !supported(Slice.view<u8>(value, start, i - start), config) {
+            return false
+          }
+          any = true
+        }
+      }
+      return any
+    }
+    _ => {
+      return true
+    }
+  }
+}
+
+fn languageRank(document: &XmlDocument, node: XmlNodeId, config: &Config<'_>) -> Option<usize> {
+  let attribute = (XmlDocument.attribute(document, node, "", "systemLanguage")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+  match &attribute {
+    Option<&[u8]>.Some { value } => {
+      let mut best = config.languages.length
+      if config.languages.length == 0 {
+        return Option<usize>.None
+      }
+      let mut i: usize = 0
+      while i < value.length {
+        let mut start = i
+        while i < value.length && value[i] != 44 {
+          i = i + 1
+        }
+        let mut end = i
+        while start < end && whitespace(value[start]) {
+          start = start + 1
+        }
+        while end > start && whitespace(value[end - 1]) {
+          end = end - 1
+        }
+        if start < end {
+          let tag = Slice.view<u8>(value, start, end - start)
+          let mut preference: usize = 0
+
+          // Only a better preference can affect the result. Equal ranks preserve
+          // document order in selectSwitchChild, not the attribute's list order.
+          while preference < best {
+            if languageMatches(config.languages[preference], tag) {
+              best = preference
+              break
+            }
+            preference = preference + 1
+          }
+          if best == 0 {
+            return Option<usize>.some(best)
+          }
+        }
+
+        // Empty comma members cannot match; HTML token splitting does not make
+        // an otherwise matching member fail merely because another is empty.
+        if i < value.length {
+          i = i + 1
+        }
+      }
+      if best < config.languages.length {
+        return Option<usize>.some(best)
+      }
+      return Option<usize>.None
+    }
+    _ => {
+      return Option<usize>.some(config.languages.length)
+    }
+  }
+}
+
+/// Tests only this element's unqualified conditional attributes. It does not
+/// prune by ancestors or impose rendering semantics on never-rendered elements;
+/// callers decide whether qualification affects a particular source occurrence.
+/// Invalid NodeIds and non-element XML nodes do not qualify.
+pub fn qualifies(document: &XmlDocument, node: XmlNodeId, config: &Config<'_>) -> bool {
+  let nodes = XmlDocument.nodes(document)
+  if node.index >= nodes.length || nodes[node.index].kind != XmlNodeKind.Element {
+    return false
+  }
+  if !extensionsPass(document, node, config) {
+    return false
+  }
+  let rank = languageRank(document, node, config)
+  return match &rank {
+    Option<usize>.Some { value } => true
+    _ => false
+  }
+}
+
+/// Returns the actual direct XML element selected by an SVG switch, or None.
+/// It intentionally does not test the switch's own conditions, display, the
+/// child's namespace/renderability, or any descendant's conditions.
+/// SVG2 always applies SMIL allowReorder=yes, regardless of an allowReorder
+/// attribute. Lowest host-language index wins; document order breaks ties.
+/// Language-less children rank after every matching language, including when
+/// placed before language-tagged children. The first such child is the fallback.
+/// The node-count bound keeps the sibling walk bounded by the parsed document.
+pub fn selectSwitchChild(document: &XmlDocument, node: XmlNodeId, config: &Config<'_>) -> Option<
+  XmlNodeId
+> {
+  // https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement
+  // https://www.w3.org/TR/REC-smil/smil-content.html#adef-allowReorder
+  let nodes = XmlDocument.nodes(document)
+  if node.index >= nodes.length || nodes[node.index].kind != XmlNodeKind.Element
+    || !equal(
+      String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+      b"http://www.w3.org/2000/svg",
+    )
+    || !equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"switch") {
+    return Option<XmlNodeId>.None
+  }
+  let mut selected = Option<XmlNodeId>.None
+  let mut hasSelected = false
+  let mut best = config.languages.length
+  let mut current = XmlDocument.firstChild(document, node)
+  let mut visited: usize = 0
+  while visited < nodes.length {
+    let child = match &current {
+      Option<XmlNodeId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    if child.index >= nodes.length {
+      break
+    }
+    if nodes[child.index].kind == XmlNodeKind.Element && extensionsPass(document, child, config) {
+      let rank = languageRank(document, child, config)
+      match &rank {
+        Option<usize>.Some { value } => {
+          if !hasSelected || value < best {
+            selected = Option<XmlNodeId>.some(child)
+            hasSelected = true
+            best = value
+
+            // No subsequent child can improve the highest-priority language;
+            // with an empty host list, zero is the unconditional fallback rank.
+            if best == 0 {
+              return selected
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+    current = XmlDocument.nextSibling(document, child)
+    visited = visited + 1
+  }
+  return selected
+}

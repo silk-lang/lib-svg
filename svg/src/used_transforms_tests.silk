@@ -1,0 +1,96 @@
+import used_transforms
+import svg_css.tokens { Limits, CssError }
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.properties { Property }
+import svg_css.values { Store, Value, ValueId, Mode, ComputeContext }
+import svg_css.values
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_geometry.geometry { Rect, Transform }
+import svg_geometry.transforms { Projection }
+import svg_geometry.transforms
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.f64
+
+effect fn transformed(source: &[u8], expected: &[f64; 6]) -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let tokens = run lexer.tokenize(source, &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut store = Store.make()
+  let parsed = run values.parse(&mut store, Property.Transform, &input, Mode.Css)
+  let id = match &parsed {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      run Testing.expect(false, "valid transform syntax")
+      return
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let palette = ColorContext.make(
+    Color.srgb(0.0, 0.0, 0.0, 1.0),
+    [Color.srgb(0.0, 0.0, 0.0, 1.0); 19],
+  )
+  let dimensions = Context.make(300.0, 150.0, 16.0)
+  let context = ComputeContext { dimensions: &dimensions, colors: &palette, systemFonts: &fonts }
+  let computed = run values.compute(&mut store, id, &context)
+  match &store.get(computed).* {
+    Value.Transform { value } => {
+      let matrix = used_transforms.value(
+        &store,
+        &value,
+        Rect { xMin: 10.0, yMin: 20.0, xMax: 110.0, yMax: 70.0 },
+      )
+      match &matrix {
+        Option<transforms.Matrix>.Some { value: result } => match &transforms.flattened(&result) {
+          Projection.Affine { value: affine } => {
+            let actual = Transform.coefficients(affine)
+            let mut i: usize = 0
+            while i < 6 {
+              run Testing.expect(
+                f64.abs(actual[i] - expected[i]) < 0.0000000001,
+                "compose complete 4x4 transform before projecting SVG plane",
+              )
+              i = i + 1
+            }
+          }
+          _ => {
+            run Testing.expect(false, "nonprojective transforms flatten to an affine SVG plane")
+          }
+        }
+        _ => {
+          run Testing.expect(false, "finite transform yields matrix")
+        }
+      }
+    }
+    _ => {
+      run Testing.expect(false, "typed transform value")
+    }
+  }
+}
+
+// https://www.w3.org/TR/css-transforms-1/#transform-rendering
+// https://www.w3.org/TR/css-transforms-1/#transform-box
+// https://drafts.csswg.org/css-transforms-2/#three-d-transform-functions
+test effect fn percentagesAndThreeDimensionalComposition() -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run transformed(b"translate(50%, 100%) scale(2)", &[2.0, 0.0, 0.0, 2.0, 50.0, 50.0])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run transformed(b"rotateX(60deg) rotateX(-60deg)", &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run transformed(b"rotateY(90deg) translateZ(12px)", &[0.0, 0.0, 0.0, 1.0, 12.0, 0.0])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

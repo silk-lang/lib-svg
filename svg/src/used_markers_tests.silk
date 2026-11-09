@@ -1,0 +1,507 @@
+//! Pinned SVG2 CR painting SHA256 7d6def7e874c400920e09c534ed52307c66ec7f4275c15a8c7f08c54bf73dca7.
+import used_markers { Layout }
+import used_markers
+import paint_metadata { Metadata }
+import paint_metadata
+import document_styles { StyledDocument }
+import document_styles
+import stylesheets { Catalog }
+import resources { Resolver, DataOnly, Limits as ResourceLimits }
+import url { Url, UrlError }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlError }
+import svg_css.computed { HostContext, StyleId, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.tokens { Limits, CssError }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_css.media_features { Environment }
+import svg_geometry.geometry { Rect, Point, Transform, Vector }
+import svg_geometry.markers { MarkerKind, MarkerPosition }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.f64
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+  return Rect { xMin: x, yMin: y, xMax: x + w, yMax: y + h }
+}
+
+fn position(kind: MarkerKind, angle: f64) -> MarkerPosition {
+  return MarkerPosition { position: Point.new(100.0, 200.0), angle: angle, kind: kind }
+}
+
+effect fn fixture(document: &XmlDocument) -> StyledDocument<'_>
+  ! CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = run Catalog.make()
+  let tokens = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(999.0, 777.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  return run document_styles.build(
+    document,
+    move catalog,
+    &host,
+    &Environment.headless(999.0, 777.0),
+    run Url.parseAbsolute(b"https://example.test/markers.svg"),
+    &Limits.make(),
+  )
+}
+
+effect fn selected(data: &[u8], stroke: f64, at: MarkerPosition, parent: Rect) -> Option<Layout>
+  ! XmlError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let document = run XmlDocument.parse(data)
+  let mut styled = run fixture(&document)
+  let node = document.root()
+  let style = match &styled.nodeStyle(node) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let metadata = match &run paint_metadata.parse(
+    &document,
+    node,
+    &mut styled.catalog.engine.values.numerics,
+    &Limits.make(),
+  ) {
+    Option<Metadata>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  match &metadata {
+    Metadata.Marker { value } => {
+      return run used_markers.resolve(&value, &mut styled.catalog.engine, style, parent, stroke, at)
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn layout(data: &[u8], stroke: f64, at: MarkerPosition) -> Option<Layout>
+  ! XmlError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  return run selected(data, stroke, at, rect(30.0, 40.0, 200.0, 100.0))
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn enabled(value: &Option<Layout>) -> Layout
+  ! RenderError {
+  return match &value.* {
+    Option<Layout>.Some { value: found } => found
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn matrix(actual: Transform, expected: Transform) -> ()
+  ! AssertionError<'static> {
+  let a = actual.coefficients()
+  let e = expected.coefficients()
+  let mut i: usize = 0
+  while i < 6 {
+    run Testing.expect(
+      f64.abs(a[i] - e[i]) <= 0.000000000001 * f64.max(1.0, f64.abs(e[i])),
+      "independently computed marker matrix",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerUnitsAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+// markerUnits' NSS note requires callers to supply the actual stroke-host space;
+// this helper never derives a scalar width from a source/device CTM.
+test effect fn markerDefaultsAndUnitsScaleViewportAndContentsTogether() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg'/>",
+      4.0,
+      position(MarkerKind.Start, 1.0),
+    ),
+  )
+  run matrix(a.mapping, Transform.new(4.0, 0.0, 0.0, 4.0, 100.0, 200.0))
+  run matrix(a.clipMapping, a.mapping)
+  run Testing.expect(
+    a.physical.width() == 3.0 && a.physical.height() == 3.0 && a.reference.width() == 3.0,
+    "default viewport is three marker units, not twelve",
+  )
+  let b = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='userSpaceOnUse'/>",
+      4.0,
+      position(MarkerKind.End, 1.0),
+    ),
+  )
+  run matrix(b.mapping, Transform.translation(Vector.new(100.0, 200.0)))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefYAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ComputingAViewportsTransform
+test effect fn markerNonzeroViewBoxDefaultReferenceIsContentZero() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  // viewBox->physical = [3 0 0 3 -30 -50]; content zero maps to (-30,-50).
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='60' markerHeight='50' viewBox='10 20 20 10'/>",
+      2.0,
+      position(MarkerKind.Start, 0.0),
+    ),
+  )
+  run matrix(a.mapping, Transform.new(6.0, 0.0, 0.0, 6.0, 100.0, 200.0))
+  run matrix(a.clipMapping, Transform.new(2.0, 0.0, 0.0, 2.0, 160.0, 300.0))
+  run Testing.expect(
+    a.reference.xMin == 10.0 && a.reference.yMin == 20.0 && a.reference.width() == 20.0
+      && a.physical.width() == 60.0,
+    "viewBox and physical viewport remain distinct",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefYAttribute
+test effect fn markerReferenceKeywordsEqualPercentagesWithoutAddingBoxMinimum() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' refX='center' refY='bottom'/>",
+      2.0,
+      position(MarkerKind.Mid, 0.0),
+    ),
+  )
+  let b = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' refX='50%' refY='100%'/>",
+      2.0,
+      position(MarkerKind.Mid, 0.0),
+    ),
+  )
+  run matrix(a.mapping, Transform.new(6.0, 0.0, 0.0, 6.0, 40.0, 140.0))
+  run matrix(a.clipMapping, Transform.new(2.0, 0.0, 0.0, 2.0, 100.0, 240.0))
+  run matrix(b.mapping, a.mapping)
+  run matrix(b.clipMapping, a.clipMapping)
+  let c = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' refX='left' refY='top'/>",
+      2.0,
+      position(MarkerKind.Mid, 0.0),
+    ),
+  )
+  run matrix(c.mapping, Transform.new(6.0, 0.0, 0.0, 6.0, 100.0, 200.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+test effect fn markerNoneAndSliceRetainPhysicalClipMapping() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='userSpaceOnUse' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' preserveAspectRatio='none' refX='12' refY='24'/>",
+      9.0,
+      position(MarkerKind.End, 0.0),
+    ),
+  )
+  run matrix(a.mapping, Transform.new(3.0, 0.0, 0.0, 5.0, 64.0, 80.0))
+  run matrix(a.clipMapping, Transform.translation(Vector.new(94.0, 180.0)))
+
+  // xMaxYMin slice: scale=5, letterbox x=-40, so viewBox transform e=-90,f=-100.
+  let b = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='userSpaceOnUse' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' preserveAspectRatio='xMaxYMin slice' refX='12' refY='24'/>",
+      9.0,
+      position(MarkerKind.End, 0.0),
+    ),
+  )
+  run matrix(b.mapping, Transform.new(5.0, 0.0, 0.0, 5.0, 40.0, 80.0))
+  run matrix(b.clipMapping, Transform.translation(Vector.new(130.0, 180.0)))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerUnitsAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ViewBoxAttribute
+test effect fn markerZeroDimensionsAndZeroStrokeDisableOnlyApplicableMarkers() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let sources = [
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='0'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerHeight='0'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='calc(1px - 2px)'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerHeight='calc(10% - 20%)'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' viewBox='1 2 0 10'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' viewBox='1 2 10 0'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    let a = run layout(sources[i], 2.0, position(MarkerKind.Mid, 0.0))
+    run Testing.expect(
+      match &a {
+        Option<Layout>.None => true
+        _ => false
+      },
+      "zero viewport disables without dividing by zero",
+    )
+    i = i + 1
+  }
+  let a = run layout(
+    b"<marker xmlns='http://www.w3.org/2000/svg'/>",
+    0.0,
+    position(MarkerKind.Mid, 0.0),
+  )
+  run Testing.expect(
+    match &a {
+      Option<Layout>.None => true
+      _ => false
+    },
+    "zero stroke disables strokeWidth marker",
+  )
+  let b = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='userSpaceOnUse'/>",
+      0.0,
+      position(MarkerKind.Mid, 0.0),
+    ),
+  )
+  run matrix(b.mapping, Transform.translation(Vector.new(100.0, 200.0)))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+test effect fn markerAutomaticOrientationUsesRadiansAndReversesStartOnly() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let kinds = [MarkerKind.Start, MarkerKind.Mid, MarkerKind.End]
+  let mut i: usize = 0
+  while i < kinds.length {
+    let a = run enabled(
+      &run layout(
+        b"<marker xmlns='http://www.w3.org/2000/svg' orient='auto'/>",
+        2.0,
+        position(kinds[i], f64.PI * 0.5),
+      ),
+    )
+    run matrix(a.mapping, Transform.new(0.0, 2.0, -2.0, 0.0, 100.0, 200.0))
+    let b = run enabled(
+      &run layout(
+        b"<marker xmlns='http://www.w3.org/2000/svg' orient='auto-start-reverse'/>",
+        2.0,
+        position(kinds[i], f64.PI * 0.5),
+      ),
+    )
+    let direction = if i == 0 {
+      -2.0
+    } else {
+      2.0
+    }
+    run matrix(b.mapping, Transform.new(0.0, direction, -direction, 0.0, 100.0, 200.0))
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+test effect fn markerExplicitAnglesCanonicalizeToDegreesBeforeRadians() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let sources = [
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='90'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='90deg'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='100grad'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='.25turn'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='1.5707963267948966rad'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='calc(1turn - 270deg)'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    let a = run enabled(&run layout(sources[i], 2.0, position(MarkerKind.Start, -1.0)))
+    run matrix(a.mapping, Transform.new(0.0, 2.0, -2.0, 0.0, 100.0, 200.0))
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#Units
+test effect fn markerPercentagesUseCurrentViewportAndFontUnitsUseMarkerStyle() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  // Parent width=200,height=100, not host 999x777; marker computed font=10.
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' style='font-size:10px' markerWidth='calc(25% + 2em)' markerHeight='50%' refX='calc(50% + 1em)' refY='25%'/>",
+      2.0,
+      position(MarkerKind.End, 0.0),
+    ),
+  )
+  run Testing.expect(
+    a.physical.width() == 70.0 && a.physical.height() == 50.0,
+    "marker dimensions evaluate in current viewport and computed font",
+  )
+  run matrix(a.mapping, Transform.new(2.0, 0.0, 0.0, 2.0, 10.0, 175.0))
+  let b = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' style='font-size:10px' markerWidth='60' markerHeight='50' viewBox='10 20 20 10' refX='1em' refY='calc(50% + 1em)' orient='90'/>",
+      2.0,
+      position(MarkerKind.End, 0.0),
+    ),
+  )
+  run matrix(b.mapping, Transform.new(0.0, 6.0, -6.0, 0.0, 190.0, 140.0))
+  run matrix(b.clipMapping, Transform.new(0.0, 2.0, -2.0, 0.0, 90.0, 200.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+test effect fn markerHugeFiniteAnglesReduceWithoutOverflow() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  // 2^1023 mod 360 = 8; neither degrees*pi nor floor-based reduction is safe.
+  let a = run enabled(
+    &run layout(
+      b"<marker xmlns='http://www.w3.org/2000/svg' orient='8.98846567431158e307'/>",
+      1.0,
+      position(MarkerKind.End, 0.0),
+    ),
+  )
+  run matrix(
+    a.mapping,
+    Transform.new(
+      0.9902680687415704,
+      0.13917310096006544,
+      -0.13917310096006544,
+      0.9902680687415704,
+      100.0,
+      200.0,
+    ),
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+test effect fn markerUnrepresentableGeometryFailsExplicitly() -> ()
+  ! XmlError | CssError | UrlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let sources = [
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='calc(infinity * 1px)'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' refX='1e308'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='1e308' viewBox='0 0 1e-300 1e-300'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerWidth='1e-300' markerHeight='1e-300' viewBox='0 0 1e300 1e300'/>",
+  ]
+  let mut i: usize = 0
+  while i < sources.length {
+    let result = run Effect.result(layout(sources[i], 4.0, position(MarkerKind.Mid, 0.0)))
+    run Testing.expect(
+      match move result {
+        Result<
+          Option<Layout>,
+          XmlError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError
+        >.Failure {
+          error
+        } => match move error {
+          RenderError problem => problem == RenderError.InvalidGeometry
+          XmlError problem => {
+            fail problem
+          }
+          CssError problem => {
+            fail move problem
+          }
+          UrlError problem => {
+            fail problem
+          }
+          ComputedError problem => {
+            fail move problem
+          }
+          OutOfMemoryError problem => {
+            fail move problem
+          }
+        }
+        _ => false
+      },
+      "numeric loss is an explicit InvalidGeometry, never a disabled marker or identity substitute",
+    )
+    i = i + 1
+  }
+}

@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120">
+<defs><rect id="area" x="20" y="10" width="160" height="100"/></defs>
+<text font-family="Noto Sans" font-size="16" style="shape-inside: url(#area); line-height: 22px">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore</text>
+</svg>

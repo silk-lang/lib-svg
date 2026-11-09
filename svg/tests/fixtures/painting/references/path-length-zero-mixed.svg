@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute -->
+<rect x="4" y="1" width="4" height="2" fill="black"/>
+<rect x="4" y="5" width="4" height="2" fill="black"/>
+<rect x="0" y="9" width="4" height="2" fill="black"/>
+<rect x="0" y="13" width="32" height="2" fill="black"/>
+<rect x="0" y="17" width="32" height="2" fill="black"/>
+<rect x="4" y="25" width="4" height="2" fill="black"/><rect x="12" y="25" width="4" height="2" fill="black"/><rect x="20" y="25" width="4" height="2" fill="black"/><rect x="28" y="25" width="4" height="2" fill="black"/>
+<rect x="0" y="29" width="4" height="2" fill="black"/><rect x="8" y="29" width="4" height="2" fill="black"/><rect x="16" y="29" width="4" height="2" fill="black"/><rect x="24" y="29" width="4" height="2" fill="black"/>
+</svg>

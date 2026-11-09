@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="130">
+<g font-family="Noto Sans" font-size="16">
+<text x="100" y="28.208" text-anchor="middle">Lorem ipsum</text>
+<text x="180" y="58.208" text-anchor="end">Lorem ipsum</text>
+<text x="20" y="88.208">Lorem ipsum</text>
+<text x="180" y="118.208" text-anchor="end">Lorem ipsum</text>
+</g>
+</svg>

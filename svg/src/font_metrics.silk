@@ -1,0 +1,273 @@
+//! Selected-face CSS font-relative metrics, without font matching or text layout.
+//! CSS Values 4 #ex, #cap, #ch, #ic, #lh (specs.lock.json, css-values-4).
+import read_fonts.lib { FontRef, ReadError, TableProvider }
+import read_fonts.model.metrics { Metrics, GlyphMetrics, GlyphExtents, LineBox }
+import read_fonts.model.charmap { Charmap }
+import read_fonts.tables.hmtx { GlyphMetricRecords }
+import font_types.lib { F48Dot16, F2Dot14, GlyphId }
+import svg_css.dimensions { Context }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u16
+
+pub enum Orientation {
+  Horizontal,
+  VerticalMixed,
+  VerticalUpright,
+  VerticalSideways
+}
+
+pub enum FontMetricsError {
+  InvalidInput,
+  InvalidFont,
+  MissingLineMetrics
+}
+
+pub struct FontContext {
+  pub unitsPerEm: u16,
+  pub dimensions: Context
+}
+
+impl Copy for FontContext {}
+
+// Read-fonts intentionally synthesizes advances when tables are absent. CSS #ch
+// and #ic prescribe different fallbacks, so establish availability independently.
+effect fn advancesAvailable(records: Result<GlyphMetricRecords<'_>, ReadError>) -> bool
+  ! FontMetricsError {
+  return match &records {
+    Result<GlyphMetricRecords, ReadError>.Success { value } => {
+      let advance = GlyphMetricRecords.advance(&value, GlyphId.new(0))
+      return match &advance {
+        Option<u16>.Some { value: amount } => true
+        _ => false
+      }
+    }
+    Result<GlyphMetricRecords, ReadError>.Failure { error } => match &error {
+      ReadError.TableIsMissing { tag } => false
+      _ => {
+        fail FontMetricsError.InvalidFont
+      }
+    }
+  }
+}
+
+fn positive(value: &Option<F48Dot16>) -> Option<f64> {
+  return match &value.* {
+    Option<F48Dot16>.Some { value: metric } => {
+      let number = F48Dot16.toF64(metric)
+      return if number > 0.0 {
+        Option<f64>.some(number)
+      } else {
+        Option<f64>.None
+      }
+    }
+    _ => Option<f64>.None
+  }
+}
+
+fn mapped(charmap: &Charmap<'_>, count: u32, codepoint: u32) -> Option<GlyphId> {
+  let glyph = Charmap.mapUnicode(charmap, codepoint)
+  return match &glyph {
+    Option<GlyphId>.Some { value } => {
+      let id = GlyphId.toU32(value)
+      return if id != 0 && id < count {
+        Option<GlyphId>.some(value)
+      } else {
+        Option<GlyphId>.None
+      }
+    }
+    _ => Option<GlyphId>.None
+  }
+}
+
+effect fn glyphHeight(
+  metrics: &GlyphMetrics<'_, '_>,
+  charmap: &Charmap<'_>,
+  codepoint: u32,
+) -> Option<f64>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let glyph = mapped(charmap, GlyphMetrics.numGlyphs(metrics), codepoint)
+  if let Option<GlyphId>.Some { value } = &glyph {
+    let extents = run GlyphMetrics.extentsExact(metrics, value)
+    if let Option<GlyphExtents<F48Dot16>>.Some { value: bounds } = &extents {
+      // x/H have flat baseline/top: use their actual ink height, not font bbox.
+      let height = F48Dot16.toF64(bounds.height)
+      if height > 0.0 {
+        return Option<f64>.some(height)
+      }
+    }
+  }
+  return Option<f64>.None
+}
+
+fn advance(
+  metrics: &GlyphMetrics<'_, '_>,
+  charmap: &Charmap<'_>,
+  codepoint: u32,
+  vertical: bool,
+  available: bool,
+  fallback: f64,
+) -> f64 {
+  if available {
+    let glyph = mapped(charmap, GlyphMetrics.numGlyphs(metrics), codepoint)
+    if let Option<GlyphId>.Some { value } = &glyph {
+      return F48Dot16.toF64(
+        if vertical {
+          GlyphMetrics.vAdvanceExact(metrics, value)
+        } else {
+          GlyphMetrics.hAdvanceExact(metrics, value)
+        },
+      )
+    }
+  }
+  return fallback
+}
+
+effect fn normalLineUnits(line: &Option<LineBox<F48Dot16>>) -> f64
+  ! FontMetricsError {
+  if let Option<LineBox<F48Dot16>>.Some { value } = &line.* {
+    // Convert separately: no fixed-point overflow or intermediate f32 rounding.
+    let height = F48Dot16.toF64(value.ascender) - F48Dot16.toF64(value.descender)
+      + F48Dot16.toF64(value.lineGap)
+    if height > 0.0 {
+      return height
+    }
+  }
+  fail FontMetricsError.MissingLineMetrics
+}
+
+/// Measures one already-selected sfnt face at normalized variation coordinates.
+/// The host must normalize user-axis coordinates (including avar) before calling.
+/// Dimensions are CSS pixels; fontSize may be zero. Parent/root initially refer
+/// to this same face and size; the CSS engine supplies their computed snapshots.
+/// Orientation selects the zero/water inline axes: mixed rotates Latin, upright
+/// rotates neither, sideways rotates both. This does not apply GSUB or matching.
+/// Missing line metrics are a host decision, not an invented normal line-height.
+pub effect fn fromFont<'a>(
+  font: &FontRef<'a>,
+  coords: &[F2Dot14],
+  fontSize: f64,
+  viewportWidth: f64,
+  viewportHeight: f64,
+  orientation: Orientation,
+) -> FontContext
+  ! FontMetricsError | OutOfMemoryError
+  ? &mut Allocator {
+  if !f64.isFinite(fontSize) || fontSize < 0.0 || !f64.isFinite(viewportWidth)
+    || viewportWidth < 0.0
+    || !f64.isFinite(viewportHeight)
+    || viewportHeight < 0.0 {
+    fail FontMetricsError.InvalidInput
+  }
+  let global = Metrics.fromSfnt(font, coords)
+
+  // Never silently accept the model's defensive 1000-UPEM substitute.
+  if global.rawUnitsPerEm < 16 || global.rawUnitsPerEm > 16384 || global.numGlyphs == 0 {
+    fail FontMetricsError.InvalidFont
+  }
+  let horizontal = Metrics.hLine(&global)
+  let verticalLine = orientation == Orientation.VerticalMixed
+    || orientation == Orientation.VerticalUpright
+  let lineUnits = if verticalLine {
+    run normalLineUnits(&global.vheaLine)
+  } else {
+    run normalLineUnits(&horizontal)
+  }
+  let hAvailable = run advancesAvailable(TableProvider.hGlyphMetricRecords(font))
+  let needVertical = orientation == Orientation.VerticalUpright
+    || orientation == Orientation.VerticalMixed
+  let vAvailable = if needVertical {
+    run advancesAvailable(TableProvider.vGlyphMetricRecords(font))
+  } else {
+    false
+  }
+  let glyphs = GlyphMetrics.new(font, coords)
+  let charmap = Charmap.new(font)
+  let upem = u16.toF64(global.unitsPerEm)
+  let mut xHeight = positive(&global.xHeight)
+  if let Option<f64>.None = &xHeight {
+    xHeight = run glyphHeight(&glyphs, &charmap, 120)
+  }
+  let xUnits = match &xHeight {
+    Option<f64>.Some { value } => value
+    _ => upem * 0.5
+  }
+  let mut capHeight = positive(&global.capHeight)
+  if let Option<f64>.None = &capHeight {
+    capHeight = run glyphHeight(&glyphs, &charmap, 72)
+  }
+  let capUnits = match &capHeight {
+    Option<f64>.Some { value } => value
+    _ => match &horizontal {
+      Option<LineBox<F48Dot16>>.Some { value } => F48Dot16.toF64(value.ascender)
+      _ => {
+        fail FontMetricsError.MissingLineMetrics
+      }
+    }
+  }
+  if capUnits <= 0.0 {
+    fail FontMetricsError.MissingLineMetrics
+  }
+
+  // https://www.w3.org/TR/css-values-4/#ch: .5em wide, 1em tall.
+  let zeroVertical = orientation == Orientation.VerticalUpright
+  let zeroUnits = advance(
+    &glyphs,
+    &charmap,
+    48,
+    zeroVertical,
+    if zeroVertical {
+      vAvailable
+    } else {
+      hAvailable
+    },
+    if zeroVertical {
+      upem
+    } else {
+      upem * 0.5
+    },
+  )
+
+  // https://www.w3.org/TR/css-values-4/#ic: U+6C34, fallback 1em.
+  let waterUnits = advance(
+    &glyphs,
+    &charmap,
+    27700,
+    needVertical,
+    if needVertical {
+      vAvailable
+    } else {
+      hAvailable
+    },
+    upem,
+  )
+  let scale = fontSize / upem
+  let mut context = Context.make(viewportWidth, viewportHeight, fontSize)
+  context.vertical = orientation != Orientation.Horizontal
+  context.xHeight = xUnits * scale
+  context.capHeight = capUnits * scale
+  context.zeroAdvance = zeroUnits * scale
+  context.ideographAdvance = waterUnits * scale
+  context.lineHeight = lineUnits * scale
+  if !f64.isFinite(context.xHeight) || !f64.isFinite(context.capHeight)
+    || !f64.isFinite(context.zeroAdvance)
+    || !f64.isFinite(context.ideographAdvance)
+    || !f64.isFinite(context.lineHeight) {
+    fail FontMetricsError.InvalidInput
+  }
+  context.rootXHeight = context.xHeight
+  context.parentXHeight = context.xHeight
+  context.rootCapHeight = context.capHeight
+  context.parentCapHeight = context.capHeight
+  context.rootZeroAdvance = context.zeroAdvance
+  context.parentZeroAdvance = context.zeroAdvance
+  context.rootIdeographAdvance = context.ideographAdvance
+  context.parentIdeographAdvance = context.ideographAdvance
+  context.rootLineHeight = context.lineHeight
+  context.parentLineHeight = context.lineHeight
+  return FontContext { unitsPerEm: global.unitsPerEm, dimensions: context }
+}

@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <filter id="f" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" x="0" y="0" width="60" height="60"><feSpecularLighting in="SourceAlpha" surfaceScale="3" specularExponent="4"><feSpotLight x="20" y="20" z="40" pointsAtX="30" pointsAtY="40" specularExponent="2" limitingConeAngle="30"/></feSpecularLighting></filter><rect x="20" y="20" width="20" height="20" fill="green" filter="url(#f)"/>
+</svg>

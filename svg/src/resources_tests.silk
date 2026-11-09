@@ -1,0 +1,387 @@
+//! Resource contracts against Fetch, URL, MIME Sniffing and Infra in specs.lock.json.
+//! Fetch SHA256 63b0a018753c330adf1e40417524eb70ea02d4d3e123bcb39b6770f23bad911b.
+//! Infra SHA256 8d43350a0a36ebf7682cfe4146dcd7afb8d9f94da0d80677dcc0da16e43590d7.
+import resources { DataOnly, DataMetadata, Limits, Resolver, Response, ResourceError, ResourceKind }
+import resources
+import url { Url, UrlError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.layout { Layout }
+import silk.mem.pointer { Pointer }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+import silk.text.string { String }
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+effect fn decoded(input: &[u8], expected: &[u8], maximum: usize) -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  let address = run Url.parseAbsolute(input)
+  let mut provider = DataOnly.make(Limits { maxResourceBytes: maximum })
+  let bytes = run Resolver.fetch(&address, ResourceKind.StyleSheet)
+    |> Effect.provideMut<Resolver>(&mut provider)
+  run Testing.expect(
+    equal(Bytes.asSlice(&bytes.bytes), expected),
+    "decoded resource is exact binary data",
+  )
+}
+
+effect fn rejected(input: &[u8], maximum: usize, expected: ResourceError) -> ()
+  ! AssertionError<'static> | UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let address = run Url.parseAbsolute(input)
+  let mut provider = DataOnly.make(Limits { maxResourceBytes: maximum })
+  let result = run Effect.result(DataOnly.fetch(&mut provider, &address, ResourceKind.Image))
+  run Testing.expect(
+    match &result {
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+        ResourceError problem => problem == expected
+        OutOfMemoryError problem => {
+          fail OutOfMemoryError {}
+        }
+      }
+      _ => false
+    },
+    "invalid or oversized resource reports its distinct typed failure",
+  )
+}
+
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-2
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-4
+// https://url.spec.whatwg.org/#percent-decode
+test effect fn binaryPercentAndBase64Resources() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run decoded(b"data:,A%20brief%20note", b"A brief note", 12)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let binary: [u8; 5] = [0, 127, 128, 255, 43]
+  run decoded(b"data:application/octet-stream,%00%7f%80%fF+", &binary, 5)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let base64Binary: [u8; 4] = [0, 255, 128, 1]
+  run decoded(b"data:application/octet-stream;base64,AP+AAQ==", &base64Binary, 4)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,%41%50%2BA%41%51%3D%3d", &base64Binary, 4)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,TWFuTWE=", b"ManMa", 5) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,TQ==", b"M", 1) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:,", b"", 0) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,", b"", 0) |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-3
+// https://url.spec.whatwg.org/#concept-url-fragment
+// https://url.spec.whatwg.org/#url-serializing
+test effect fn dataPayloadUsesSerializedQueryButNotFragment() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run decoded(b"data:,one?two,three#not-resource", b"one?two,three", 13)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:,%23%3F%2520", b"#?%20", 5) |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://fetch.spec.whatwg.org/#data-url-processor
+// https://mimesniff.spec.whatwg.org/#parse-a-mime-type
+test effect fn metadataDefaultsAndEscapedParameters() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let plain = run Url.parseAbsolute(b"data:,body") |> Effect.provideMut<Allocator>(&mut allocator)
+  let defaultMetadata = run resources.inspectData(&plain)
+  run Testing.expect(
+    equal(defaultMetadata.mediaType, b"text/plain")
+      && match &defaultMetadata.charset {
+        Option<&[u8]>.Some { value } => equal(value, b"US-ASCII")
+        _ => false
+      },
+    "omitted media type defaults to text/plain;charset=US-ASCII",
+  )
+  let explicit = run Url.parseAbsolute(b"data:text/plain,body")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let explicitMetadata = run resources.inspectData(&explicit)
+  run Testing.expect(
+    match &explicitMetadata.charset {
+      Option<&[u8]>.None => true
+      _ => false
+    },
+    "explicit media type does not invent a charset",
+  )
+  let shorthand = run Url.parseAbsolute(b"data:;CHARSET=iso-8859-7,%BE")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let shortMetadata = run resources.inspectData(&shorthand)
+  run Testing.expect(
+    equal(shortMetadata.mediaType, b"text/plain")
+      && match &shortMetadata.charset {
+        Option<&[u8]>.Some { value } => equal(value, b"iso-8859-7")
+        _ => false
+      },
+    "charset shorthand overrides the default",
+  )
+  let escaped = run Url.parseAbsolute(
+    b"data:te%78t/css;name=a%3Bb%3Dc;char%73et=UTF%2D8;CharSet=\"utf\\-8\";charset=x;base64,YQ==",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let metadata = run resources.inspectData(&escaped)
+  run Testing.expect(
+    equal(metadata.mediaType, b"te%78t/css") && metadata.base64 && equal(metadata.payload, b"YQ==")
+      && !metadata.matchesMediaType(b"text/css"),
+    "Fetch never percent-decodes the header",
+  )
+  let charset = run DataMetadata.decodedCharset(&metadata)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &charset {
+      Option<Bytes>.Some { value } => equal(Bytes.asSlice(&value), b"utf-8")
+      _ => false
+    },
+    "the first charset parameter wins and a quoted value is unescaped",
+  )
+  let svg = run Url.parseAbsolute(b"data: Image/SVG+xml ;utf8 ; charset = x;charset=utf-8,<svg/>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let svgMetadata = run resources.inspectData(&svg)
+  let svgCharset = run DataMetadata.decodedCharset(&svgMetadata)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    svgMetadata.matchesMediaType(b"image/svg+xml")
+      && match &svgCharset {
+        Option<Bytes>.Some { value } => equal(Bytes.asSlice(&value), b"utf-8")
+        _ => false
+      },
+    "nameless and spaced parameters are skipped, not errors",
+  )
+  let named = run Url.parseAbsolute(b"data:text/plain;base64=yes,not-base64")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let namedMetadata = run resources.inspectData(&named)
+  run Testing.expect(!namedMetadata.base64, "base64 with equals is a media parameter, not encoding")
+}
+
+effect fn fallback(input: &[u8]) -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  let address = run Url.parseAbsolute(input)
+  let metadata = run resources.inspectData(&address)
+  run Testing.expect(
+    equal(metadata.mediaType, b"text/plain")
+      && match &metadata.charset {
+        Option<&[u8]>.Some { value } => equal(value, b"US-ASCII")
+        _ => false
+      },
+    "an invalid MIME type falls back to text/plain;charset=US-ASCII",
+  )
+}
+
+// https://fetch.spec.whatwg.org/#data-url-processor
+// https://url.spec.whatwg.org/#percent-decode
+// Only a missing comma or invalid Base64 fails; malformed escapes stay literal.
+test effect fn forgivingDataUrls() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let literal: [string; 6] = [
+    "data:,%",
+    "data:,%0",
+    "data:,%GG",
+    "data:,a|b c",
+    "data:,%4%41",
+    "data:,<a>",
+  ]
+  let expected: [string; 6] = ["%", "%0", "%GG", "a|b c", "%4A", "<a>"]
+  let mut index: usize = 0
+  while index < literal.length {
+    let bytes = String.utf8Bytes(expected[index])
+    run decoded(String.utf8Bytes(literal[index]), bytes, bytes.length)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    index = index + 1
+  }
+  let invalidTypes: [string; 6] = [
+    "data:plain,a",
+    "data:/plain,a",
+    "data:text/,a",
+    "data:text/plain/extra,a",
+    "data:te{xt/plain,a",
+    "data:text/pl ain,a",
+  ]
+  index = 0
+  while index < invalidTypes.length {
+    run fallback(String.utf8Bytes(invalidTypes[index]))
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    index = index + 1
+  }
+
+  // ";base64" must end the header; an earlier one is a nameless parameter.
+  run decoded(b"data:;base64;charset=utf-8,YQ==", b"YQ==", 4)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64;base64,YQ==", b"a", 1) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:text/plain;  BASE64,YQ==", b"a", 1)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let cases: [string; 6] = [
+    "data:text/plain",
+    "data:;base64,%3",
+    "data:;base64,Y===",
+    "data:;base64,=AAA",
+    "data:;base64,YQ==AAAA",
+    "data:;base64,AA_A",
+  ]
+  index = 0
+  while index < cases.length {
+    run rejected(String.utf8Bytes(cases[index]), 100, ResourceError.InvalidData)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    index = index + 1
+  }
+}
+
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-6
+test effect fn decodedByteLimitsAndSchemeBoundary() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run decoded(b"data:,%41%42%43", b"ABC", 3) |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:,%41%42%43", 2, ResourceError.TooLarge)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,QUJD", b"ABC", 3) |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:;base64,QUJD", 2, ResourceError.TooLarge)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:;base64,QQ==", 0, ResourceError.TooLarge)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:,a", 0, ResourceError.TooLarge)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"https://example.test/style.css", 100, ResourceError.UnsupportedScheme)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"file:///style.css", 100, ResourceError.UnsupportedScheme)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+struct RefusingAllocator {
+  calls: usize
+}
+
+impl RefusingAllocator {
+  effect fn allocate(self: &mut Self, layout: Layout) -> Intrinsic.Allocation
+    ! OutOfMemoryError {
+    self.calls = self.calls + 1
+    fail OutOfMemoryError {}
+  }
+
+  effect fn allocateZeroed(self: &mut Self, layout: Layout) -> Intrinsic.Allocation
+    ! OutOfMemoryError {
+    self.calls = self.calls + 1
+    fail OutOfMemoryError {}
+  }
+
+  // It refuses every request, so it keeps no blocks ready.
+  unsafe effect fn takeBlock(self: &mut Self, layout: Layout) -> ?*mut u8 {
+    drop layout
+    return Pointer.null<u8>()
+  }
+}
+
+impl Allocator for RefusingAllocator {
+  allocate: RefusingAllocator.allocate
+
+  allocateZeroed: RefusingAllocator.allocateZeroed
+
+  takeBlock: RefusingAllocator.takeBlock
+}
+
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-6
+// Provider contract: preflight precedes allocation, and OOM remains distinct from bad data.
+test effect fn preflightBoundsAndAllocationFailureRemainDistinct() -> ()
+  ! AssertionError<'static> | UrlError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let address = run Url.parseAbsolute(b"data:;base64,%51%55%4A%44")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut refusing = RefusingAllocator { calls: 0 }
+  let mut provider = DataOnly.make(Limits { maxResourceBytes: 2 })
+  let oversized = run Effect.result(
+    DataOnly.fetch(&mut provider, &address, ResourceKind.Font)
+      |> Effect.provideMut<Allocator>(&mut refusing),
+  )
+  run Testing.expect(
+    match &oversized {
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+        ResourceError problem => problem == ResourceError.TooLarge
+        _ => false
+      }
+      _ => false
+    }
+      && refusing.calls == 0,
+    "oversize percent-base64 fails before any allocation",
+  )
+  provider.limits.maxResourceBytes = 3
+  let exhausted = run Effect.result(
+    DataOnly.fetch(&mut provider, &address, ResourceKind.Font)
+      |> Effect.provideMut<Allocator>(&mut refusing),
+  )
+  run Testing.expect(
+    match &exhausted {
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+        OutOfMemoryError problem => true
+        _ => false
+      }
+      _ => false
+    }
+      && refusing.calls == 1,
+    "valid bounded data propagates allocator exhaustion unchanged",
+  )
+  let invalid = run Url.parseAbsolute(b"data:;base64,Q!==")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let malformed = run Effect.result(
+    DataOnly.fetch(&mut provider, &invalid, ResourceKind.Font)
+      |> Effect.provideMut<Allocator>(&mut refusing),
+  )
+  run Testing.expect(
+    match &malformed {
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+        ResourceError problem => problem == ResourceError.InvalidData
+        _ => false
+      }
+      _ => false
+    }
+      && refusing.calls == 1,
+    "alphabet validation also completes before allocating",
+  )
+}
+
+// https://fetch.spec.whatwg.org/#data-url-processor
+// https://infra.spec.whatwg.org/#forgiving-base64-decode
+// Forgiving decoding removes ASCII whitespace, permits missing padding and
+// discards unused low bits; it does not accept arbitrary punctuation.
+test effect fn forgivingBase64Payloads() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let cases: [string; 8] = [
+    "data:;base64,YQ",
+    "data:;base64,YR==",
+    "data:;base64,YQ%20==",
+    "data:;base64, YQ== ",
+    "data:;base64,%09Y%0aQ%0c=%0d= ",
+    "data:;base64,%59%52",
+    "data:;base64,YQ==%20%09",
+    "data:;base64,YR",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    run decoded(String.utf8Bytes(cases[i]), b"a", 1) |> Effect.provideMut<Allocator>(&mut allocator)
+    i = i + 1
+  }
+  run decoded(b"data:;base64,YWF=", b"aa", 2) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,YWE", b"aa", 2) |> Effect.provideMut<Allocator>(&mut allocator)
+  run decoded(b"data:;base64,%20%09", b"", 0) |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:;base64,Y", 10, ResourceError.InvalidData)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:;base64,YQ=", 10, ResourceError.InvalidData)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run rejected(b"data:;base64,YQ==%20YQ==", 10, ResourceError.InvalidData)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

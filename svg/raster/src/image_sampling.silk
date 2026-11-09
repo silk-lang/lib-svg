@@ -1,0 +1,102 @@
+//! CSS Images 3 #the-image-rendering: nearest integer expansion before smoothing.
+import svg_core.scene { RenderError }
+import svg_core.mapping { Mapping }
+import vector.pixmap { Pixmap }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u32
+import checked
+import patterns { Size }
+import patterns
+
+struct Entry {
+  source: usize,
+  mx: u32,
+  my: u32,
+  pixels: Pixmap,
+}
+
+pub struct Cache {
+  entries: List<Entry>,
+  retained: usize,
+}
+
+impl Cache {
+  pub fn make() -> Self {
+    return Self { entries: List<Entry>.make(), retained: 0 }
+  }
+
+  pub fn get(self: &Self, index: usize) -> &Pixmap {
+    return &self.entries.asSlice()[index].pixels
+  }
+}
+
+pub effect fn multipliers(transform: &Mapping, width: u32, height: u32) -> Size
+  ! RenderError {
+  let scale = run patterns.magnification(transform, width, height)
+  if !f64.isFinite(scale[0]) || !f64.isFinite(scale[1]) {
+    fail RenderError.InvalidGeometry
+  }
+
+  // The spec leaves equal-distance ties unspecified; choose the larger integer.
+  let x = f64.max(1.0, f64.floor(scale[0] + 0.5))
+  let y = f64.max(1.0, f64.floor(scale[1] + 0.5))
+  if x > 16777216.0 || y > 16777216.0 {
+    fail RenderError.TooLarge
+  }
+  return Size { width: f64.toU32(x), height: f64.toU32(y) }
+}
+
+pub effect fn prepare(
+  cache: &mut Cache,
+  source: usize,
+  pixels: &Pixmap,
+  mx: u32,
+  my: u32,
+  budget: usize,
+) -> usize
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut i: usize = 0
+  while i < cache.entries.length() {
+    let entry = &cache.entries.asSlice()[i]
+    if entry.source == source && entry.mx == mx && entry.my == my {
+      return i
+    }
+    i = i + 1
+  }
+  if mx == 0 || my == 0 || pixels.width() == 0 || pixels.height() == 0 {
+    fail RenderError.InvalidSize
+  }
+  if mx > 16777216 / pixels.width() || my > 16777216 / pixels.height() {
+    fail RenderError.TooLarge
+  }
+  let width = pixels.width() * mx
+  let height = pixels.height() * my
+  run checked.dimensions(width, height)
+  let count = u32.toUsize(width) * u32.toUsize(height)
+  if cache.retained > budget || count > budget - cache.retained {
+    fail RenderError.TooLarge
+  }
+  let mut expanded = run Pixmap.make(width, height)
+  let input = pixels.data()
+  let output = expanded.dataMut()
+  let mut y: u32 = 0
+  while y < height {
+    let mut x: u32 = 0
+    while x < width {
+      let src = (u32.toUsize(y / my) * u32.toUsize(pixels.width()) + u32.toUsize(x / mx)) * 4
+      let dst = (u32.toUsize(y) * u32.toUsize(width) + u32.toUsize(x)) * 4
+      output[dst] = input[src]
+      output[dst + 1] = input[src + 1]
+      output[dst + 2] = input[src + 2]
+      output[dst + 3] = input[src + 3]
+      x = x + 1
+    }
+    y = y + 1
+  }
+  run cache.entries.append(Entry { source: source, mx: mx, my: my, pixels: move expanded })
+  cache.retained = cache.retained + count
+  return i
+}

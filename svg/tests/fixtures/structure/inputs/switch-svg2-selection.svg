@@ -1,0 +1,8 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement -->
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#RequiredExtensionsAttribute -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <switch><rect requiredExtensions="urn:unsupported:test" width="8" height="8" fill="red"/><rect width="8" height="8" fill="blue"/></switch>
+  <switch><rect requiredFeatures="urn:unsupported:legacy" x="16" width="8" height="8" fill="green"/><rect x="16" width="8" height="8" fill="red"/></switch>
+  <switch><rect display="none" y="8" width="8" height="8"/><rect y="8" width="8" height="8" fill="red"/></switch>
+  <switch><foreign xmlns="urn:unsupported:content"/><rect x="24" width="8" height="8" fill="red"/></switch>
+</svg>

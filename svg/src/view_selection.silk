@@ -1,0 +1,205 @@
+//! Owned document-view selection, independent of occurrence construction and sizing.
+//! Optional fields are ROOT overrides, not computed values: absence preserves the
+//! root SVG's corresponding value even when a selected view is nested in an SVG.
+//! SVG2 linking.html#SVGFragmentIdentifiersDefinitions requires viewBox followed
+//! by the view transform regardless of fragment component order. The caller
+//! applies that geometry and resolves spatial percentages against the used size.
+import silk.text.string { String }
+import structure { Graph, SourceId, DocumentId }
+import url { UrlError }
+import url
+import view_fragment { ViewOverrides, SpatialView, TimeSegment, ZoomAndPan }
+import view_fragment
+import silk.xml.document { XmlDocument }
+import svg_geometry.geometry { Rect }
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.svg
+import svg_geometry.numeric
+import svg_css.values { Store, ValueId }
+import svg_css.tokens { Limits, CssError, CssErrorKind, equal }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+pub struct Selection {
+  pub target: Option<SourceId>,
+  pub viewBox: Option<Rect>,
+  pub aspectRatio: Option<AspectRatio>,
+  pub transform: Option<ValueId>,
+  pub spatial: Option<SpatialView>,
+  pub temporal: Option<TimeSegment>,
+  pub zoomAndPan: Option<ZoomAndPan>,
+  pub viewTargets: List<SourceId>,
+}
+
+impl Selection {
+  pub fn empty() -> Selection {
+    return Selection {
+      target: Option<SourceId>.None,
+      viewBox: Option<Rect>.None,
+      aspectRatio: Option<AspectRatio>.None,
+      transform: Option<ValueId>.None,
+      spatial: Option<SpatialView>.None,
+      temporal: Option<TimeSegment>.None,
+      zoomAndPan: Option<ZoomAndPan>.None,
+      viewTargets: List<SourceId>.make(),
+    }
+  }
+}
+
+effect fn checkInput(data: &[u8], limits: &Limits) -> ()
+  ! CssError {
+  if data.length > limits.maxInputBytes {
+    fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+  }
+}
+
+// The shared fragment parser has already validated this complete token list.
+// Slice views avoid allocating strings or copying source-document records.
+effect fn targets(graph: &Graph, document: DocumentId, names: &[u8], out: &mut List<SourceId>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut at: usize = 0
+  while at < names.length {
+    while at < names.length && numeric.whitespace(names[at]) {
+      at = at + 1
+    }
+    let start = at
+    while at < names.length && !numeric.whitespace(names[at]) {
+      at = at + 1
+    }
+    if at > start {
+      match graph.findId(document, Slice.view<u8>(names, start, at - start)) {
+        Option<SourceId>.Some { value } => {
+          run out.append(value)
+        }
+        _ => {}
+      }
+    }
+  }
+}
+
+// SVG1.1 viewTarget and zoomAndPan are retained only as metadata. They neither
+// select :target nor request highlighting, panning, zooming or subtree cropping.
+effect fn viewElement(
+  graph: &Graph,
+  source: SourceId,
+  result: &mut Selection,
+  limits: &Limits,
+) -> ()
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let document = graph.sourceDocument(source)
+  if !equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)),
+    b"http://www.w3.org/2000/svg",
+  )
+    || !equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"view") {
+    return
+  }
+  match (XmlDocument.attribute(document, source.node, "", "viewBox")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => {
+      run checkInput(value, limits)
+      result.viewBox = svg.viewBox(value)
+    }
+    _ => {}
+  }
+  match (XmlDocument.attribute(document, source.node, "", "preserveAspectRatio")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => {
+      run checkInput(value, limits)
+      result.aspectRatio = svg.aspectRatio(value)
+    }
+    _ => {}
+  }
+  match (XmlDocument.attribute(document, source.node, "", "zoomAndPan")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => {
+      run checkInput(value, limits)
+      result.zoomAndPan = view_fragment.zoomAndPan(value)
+    }
+    _ => {}
+  }
+  match (XmlDocument.attribute(document, source.node, "", "viewTarget")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => {
+      match run view_fragment.viewTarget(value, limits) {
+        Option<&[u8]>.Some { value: names } => {
+          run targets(graph, source.document, names, &mut result.viewTargets)
+        }
+        _ => {}
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Selects a fragment without '#', leaving the graph and its root unchanged.
+/// Invalid syntax returns empty selection; resource bounds remain CssError and
+/// allocator failures propagate. No returned field borrows the decoded buffer.
+pub effect fn select(
+  graph: &Graph,
+  encoded: &[u8],
+  store: &mut Store<'_>,
+  limits: &Limits,
+) -> Selection
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  run checkInput(encoded, limits)
+  let decodedResult = run Effect.result(url.percentDecode(encoded))
+  let decoded = match move decodedResult {
+    Result<Bytes, UrlError | OutOfMemoryError>.Success { value } => move value
+    Result<Bytes, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+      UrlError reason => {
+        if reason == UrlError.InputLimit {
+          fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+        }
+        return Selection.empty()
+      }
+      OutOfMemoryError exhausted => {
+        fail move exhausted
+      }
+    }
+  }
+  let fragment = run view_fragment.parse(encoded, Bytes.asSlice(&decoded), &mut store.*, limits)
+  if !fragment.valid {
+    return Selection.empty()
+  }
+  let mut result = Selection.empty()
+  result.spatial = fragment.spatial
+  result.temporal = fragment.temporal
+  let document = graph.occurrences.asSlice()[graph.root.index].source.document
+  match &fragment.id {
+    Option<&[u8]>.Some { value } => {
+      result.target = graph.findId(document, value)
+      match &result.target {
+        Option<SourceId>.Some { value: source } => {
+          run viewElement(graph, source, &mut result, limits)
+        }
+        _ => {}
+      }
+    }
+    _ => {}
+  }
+  match &fragment.view {
+    Option<ViewOverrides>.Some { value } => {
+      result.viewBox = value.viewBox
+      result.aspectRatio = value.aspectRatio
+      result.transform = value.transform
+      result.zoomAndPan = value.zoomAndPan
+      match &value.viewTarget {
+        Option<&[u8]>.Some { value: names } => {
+          run targets(graph, document, names, &mut result.viewTargets)
+        }
+        _ => {}
+      }
+    }
+    _ => {}
+  }
+  return move result
+}

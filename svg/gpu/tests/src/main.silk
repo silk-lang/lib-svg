@@ -1,0 +1,417 @@
+//! Renders the SVG reftest inputs with the CPU executor and through gpu_scene, and compares.
+//! Usage: svg-gpu-tests FIXTURES SUITE... where FIXTURES is svg/tests/fixtures.
+//!
+//! Each input is also lowered onto `svg_raster.lower.PixmapCanvas`, the CPU model of the GPU
+//! canvas. The GPU must match that model byte for byte, except within 2 levels where a
+//! gradient's parameter lands on a neighbouring ramp entry in f32. The model must match the
+//! CPU executor byte for byte unless the lowering made masks, whose rounding differs by at most
+//! one level per mask.
+import svg_render.lib { RenderOptions, RenderError, DisplayList }
+import svg_render.lib as renderer
+import svg_render.environment { Environment, noHostStyles }
+import svg_core.structure { Options as StructureOptions }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, ResourceError, Limits as ResourceLimits }
+import svg_core.resources_native { FileSystem as NativeFileSystem }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import svg_fonts.database { FontDatabase }
+import svg_raster.cpu
+import svg_raster.lower { Lowering, PixmapCanvas }
+import svg_raster.lower
+import svg_gpu.scene as svgGpu
+import gpu_scene.renderer { SceneRenderer, FORMAT }
+import vector.pixmap { Pixmap }
+import webgpu.runtime { Instance, RequestAdapterOptions, Device, GpuError }
+import webgpu.runtime as runtime
+import webgpu.resources as gpu
+import webgpu.resources { Queue }
+import webgpu.descriptors {
+  DeviceDescriptor,
+  BufferDescriptor,
+  TextureDescriptor,
+  TextureViewDescriptor,
+  Extent3D,
+  TexelCopyTextureInfo,
+  TexelCopyBufferInfo,
+  TexelCopyBufferLayout,
+}
+import webgpu_sys.generated_webgpu as flags
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer_native { StderrWriter }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { Path, FileSystem, FileError, DirectoryEntry }
+import silk.system.filesystem_machine { MachineFileSystem }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.num.u8
+import silk.num.u32
+import silk.num.u64
+import silk.num.usize
+
+fn environmentFor<'a>(base: &'a Url, fonts: &'a FontDatabase) -> Environment<'a, 'a> {
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  return Environment<'a, 'a> {
+    base: base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: fonts,
+    styles: noHostStyles(),
+  }
+}
+
+effect fn parsed(data: &[u8], file: &[u8], directory: &[u8]) -> Option<DisplayList>
+  ! RenderError | UrlError | FileError | ResourceError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.fromFilePath(file)
+  let fonts = FontDatabase.make()
+  let environment = environmentFor(&base, &fonts)
+  let mut resolver = run NativeFileSystem.make(directory, ResourceLimits.defaults())
+  let options = RenderOptions.make()
+  let tree = run renderer.parse(data, &options, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  return Option<DisplayList>.some(run renderer.record(move tree))
+}
+
+effect fn rejected<E>(error: E) -> Option<DisplayList> {
+  drop error
+  return Option<DisplayList>.None
+}
+
+/// The input as a display list, or None when the renderer rejects it.
+effect fn displayList(data: &[u8], file: &[u8], directory: &[u8]) -> Option<DisplayList>
+  ? &mut Allocator {
+  return run Effect.catchAll(parsed(data, file, directory), rejected)
+}
+
+effect fn executed(list: &DisplayList) -> Option<Pixmap>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return Option<Pixmap>.some(run cpu.execute(list))
+}
+
+effect fn failedExecution<E>(error: E) -> Option<Pixmap> {
+  drop error
+  return Option<Pixmap>.None
+}
+
+fn extent(width: u32, height: u32) -> Extent3D {
+  let mut size = Extent3D.default()
+  size.setWidth(width)
+  size.setHeight(height)
+  size.setDepthOrArrayLayers(1)
+  return size
+}
+
+/// Renders `list` through gpu_scene and reads the pixels back, rows packed.
+effect fn renderOnGpu(
+  device: &Device,
+  queue: &Queue,
+  sceneRenderer: &mut SceneRenderer,
+  list: &DisplayList,
+) -> List<u8>
+  ! RenderError | GpuError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = list.width
+  let height = list.height
+  let mut descriptor = TextureDescriptor.default().withLabel(b"svg target")
+  descriptor.setSize(extent(width, height))
+  descriptor.setFormat(FORMAT)
+  descriptor.setDimension(flags.WGPUTextureDimension_2D)
+  descriptor.setMipLevelCount(1)
+  descriptor.setSampleCount(1)
+  descriptor.setUsage(flags.WGPUTextureUsage_RenderAttachment | flags.WGPUTextureUsage_CopySrc)
+  let texture = run gpu.createTexture(device, &descriptor)
+  let view = run texture.createView(&TextureViewDescriptor.default())
+  drop run svgGpu.render(&mut sceneRenderer.*, device, queue, list, &view)
+
+  // Texture copies need 256-byte row strides.
+  let row = width * 4
+  let stride = (row + 255) / 256 * 256
+  let size = u32.toUsize(stride) * u32.toUsize(height)
+  let readback = run gpu.createBuffer(
+    device,
+    &BufferDescriptor.make(
+      b"svg readback",
+      usize.toU64(size),
+      flags.WGPUBufferUsage_CopyDst | flags.WGPUBufferUsage_MapRead,
+      false,
+    ),
+  )
+  let mut encoder = run gpu.createCommandEncoder(device, b"svg readback")
+  let source = TexelCopyTextureInfo.default().withTexture(&texture)
+  let mut layout: TexelCopyBufferLayout = TexelCopyBufferLayout.default()
+  layout.setBytesPerRow(stride)
+  layout.setRowsPerImage(height)
+  let mut destination = TexelCopyBufferInfo.default().withBuffer(&readback)
+  destination.setLayout(layout)
+  encoder.copyTextureToBuffer(&source, &destination, &extent(width, height))
+  drop destination
+  drop source
+  let commands = run encoder.finish(b"svg readback")
+  queue.submit(&[commands.reference()])
+  run device.checkErrors()
+  let padded = run runtime.mapRead(device, &readback, 0, size)
+  let mut pixels = run List<u8>.makeWithCapacity(u32.toUsize(row) * u32.toUsize(height))
+  let bytes = padded.asSlice()
+  let mut y: u32 = 0
+  while y < height {
+    let start = u32.toUsize(y) * u32.toUsize(stride)
+    let mut x: usize = 0
+    while x < u32.toUsize(row) {
+      run pixels.append(bytes[start + x])
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return move pixels
+}
+
+/// The largest channel difference between `a` and `b`.
+fn delta(a: &[u8], b: &[u8]) -> u32 {
+  if a.length != b.length {
+    return 256
+  }
+  let mut worst: u32 = 0
+  let mut i: usize = 0
+  while i < a.length {
+    let x = u8.toU32(a[i])
+    let y = u8.toU32(b[i])
+    let d = if x > y {
+      x - y
+    } else {
+      y - x
+    }
+    if d > worst {
+      worst = d
+    }
+    i = i + 1
+  }
+  return worst
+}
+
+struct Totals {
+  inputs: u32,
+  skipped: u32,
+  exact: u32,
+  masked: u32,
+  fallbacks: u32,
+  whole: u32,
+  failures: u32,
+}
+
+fn isSvg(name: &[u8]) -> bool {
+  return name.length > 4 && name[name.length - 4] == 46 && name[name.length - 3] == 115
+    && name[name.length - 2] == 118
+    && name[name.length - 1] == 103
+}
+
+fn before(left: &[u8], right: &[u8]) -> bool {
+  let mut index: usize = 0
+  while index < left.length && index < right.length {
+    if left[index] != right[index] {
+      return left[index] < right[index]
+    }
+    index = index + 1
+  }
+  return left.length < right.length
+}
+
+/// Indices of the SVG files in `listed`, in byte order of their paths.
+effect fn svgFiles(listed: &[DirectoryEntry]) -> List<usize>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut order = List<usize>.make()
+  let mut index: usize = 0
+  while index < listed.length {
+    if listed[index].kind.code == 0 && isSvg(Path.rawBytes(&listed[index].path)) {
+      let mut at = order.length()
+      run order.append(index)
+      let slots = order.asMutSlice()
+      while at > 0
+        && before(Path.rawBytes(&listed[index].path), Path.rawBytes(&listed[slots[at - 1]].path)) {
+        slots[at] = slots[at - 1]
+        slots[at - 1] = index
+        at = at - 1
+      }
+    }
+    index = index + 1
+  }
+  return move order
+}
+
+effect fn suite(
+  device: &Device,
+  queue: &Queue,
+  sceneRenderer: &mut SceneRenderer,
+  fixtures: &Path,
+  name: &[u8],
+  totals: &mut Totals,
+) -> ()
+  ! RenderError | GpuError | FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  let directory = run Path.joinBytes(&run Path.joinBytes(fixtures, name), b"inputs")
+  let entries = run FileSystem.listDirectory(&directory)
+  let listed = entries.asSlice()
+  let order = run svgFiles(listed)
+  let mut k: usize = 0
+  while k < order.length() {
+    let path = &listed[order.asSlice()[k]].path
+    k = k + 1
+    totals.inputs = totals.inputs + 1
+    let data = run FileSystem.readFile(path)
+    let found = run displayList(
+      Bytes.asSlice(&data),
+      Path.rawBytes(path),
+      Path.rawBytes(&directory),
+    )
+    let list = match move found {
+      Option<DisplayList>.Some { value } => move value
+      _ => {
+        totals.skipped = totals.skipped + 1
+        continue
+      }
+    }
+    let expected = match move run Effect.catchAll(executed(&list), failedExecution) {
+      Option<Pixmap>.Some { value } => move value
+      _ => {
+        totals.skipped = totals.skipped + 1
+        continue
+      }
+    }
+    let mut model = run PixmapCanvas.make(list.width, list.height)
+    let lowering = run lower.lower(&list, &mut model)
+    let modelled = model.finish()
+    let actual = run renderOnGpu(device, queue, &mut sceneRenderer.*, &list)
+    let toModel = delta(modelled.data(), actual.asSlice())
+    let toCpu = delta(expected.data(), modelled.data())
+    let gpuToCpu = delta(expected.data(), actual.asSlice())
+    let maskBudget = if lowering.masks > 0 {
+      usize.toU32(lowering.masks)
+    } else {
+      0
+    }
+    let ok = toModel <= 2 && toCpu <= maskBudget
+    if lowering.whole {
+      totals.whole = totals.whole + 1
+    } else if lowering.fallbacks > 0 {
+      totals.fallbacks = totals.fallbacks + 1
+    }
+    if lowering.masks > 0 {
+      totals.masked = totals.masked + 1
+    }
+    if gpuToCpu == 0 {
+      totals.exact = totals.exact + 1
+    }
+    if !ok {
+      totals.failures = totals.failures + 1
+    }
+    if !ok || gpuToCpu != 0 {
+      StderrWriter.print(
+        "{} {:?}: gpu-model {} model-cpu {} gpu-cpu {} (masks {}, fallbacks {}, whole {})\n",
+        &(
+          if ok {
+            "  "
+          } else {
+            "FAIL"
+          },
+          Path.rawBytes(path),
+          toModel,
+          toCpu,
+          gpuToCpu,
+          usize.toU32(lowering.masks),
+          usize.toU32(lowering.fallbacks),
+          lowering.whole,
+        ),
+      )
+    }
+  }
+}
+
+effect fn program() -> i32
+  ! RenderError | GpuError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  let count = run HostInput.argumentCount()
+  if count < 3 {
+    StderrWriter.print("usage: svg-gpu-tests FIXTURES SUITE...\n", &())
+    return 2
+  }
+  let root = match move run HostInput.argument(1) {
+    Option<Bytes>.Some { value } => move value
+    _ => {
+      return 2
+    }
+  }
+  let fixtures = run Path.fromBytes(Bytes.asSlice(&root))
+  let instance = run Instance.create()
+  let adapter = run instance.requestAdapter(&RequestAdapterOptions.default())
+  let device = run adapter.requestDevice(
+    &DeviceDescriptor.default().withRequiredFeatures(SceneRenderer.requiredFeatures(&adapter)),
+  )
+  let queue = run gpu.getQueue(&device)
+  let mut sceneRenderer = run SceneRenderer.make(&device)
+  let mut files = run MachineFileSystem.make()
+  let mut totals = Totals {
+    inputs: 0,
+    skipped: 0,
+    exact: 0,
+    masked: 0,
+    fallbacks: 0,
+    whole: 0,
+    failures: 0,
+  }
+  let mut index: usize = 2
+  while index < count {
+    if let Option<Bytes>.Some { value } = move run HostInput.argument(index) {
+      run suite(&device, &queue, &mut sceneRenderer, &fixtures, Bytes.asSlice(&value), &mut totals)
+        |> Effect.provideMut<FileSystem>(&mut files)
+    }
+    index = index + 1
+  }
+  StderrWriter.print(
+    "{} inputs, {} skipped; {} byte-identical to the CPU executor; {} with masks, {} with CPU elements, {} wholly on the CPU; {} failed\n",
+    &(
+      totals.inputs,
+      totals.skipped,
+      totals.exact,
+      totals.masked,
+      totals.fallbacks,
+      totals.whole,
+      totals.failures,
+    ),
+  )
+  return if totals.failures == 0 && totals.inputs > totals.skipped {
+    0
+  } else {
+    1
+  }
+}
+
+effect fn gpuFailed(error: GpuError) -> i32 {
+  StderrWriter.print(
+    "svg gpu test failed with GPU error {}: {:?}\n",
+    &(error.code, error.message.asSlice()),
+  )
+  return 2
+}
+
+effect fn failed<E>(error: E) -> i32 {
+  drop error
+  StderrWriter.print("svg gpu test failed with a render, file, input or allocation error\n", &())
+  return 2
+}
+
+pub effect fn main() -> i32
+  ? &mut HostInput {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  return run Effect.catchAll(Effect.catch<GpuError>(program(), gpuFailed), failed)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

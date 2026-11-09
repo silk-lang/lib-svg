@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="60" height="60"><style>@keyframes t { from { transform: translate(0px, 0px) } to { transform: translate(40px, 20px) } } rect { animation: t 2s linear }</style><rect width="10" height="10" fill="green"/></svg>

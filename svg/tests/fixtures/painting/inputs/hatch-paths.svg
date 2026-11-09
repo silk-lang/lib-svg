@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="92" height="62">
+<defs><hatch id="a" hatchUnits="userSpaceOnUse" pitch="10">
+  <hatchpath d="M 2,0 L 8,5 L 2,10" fill="none" stroke="#c03000"/>
+</hatch>
+<hatch id="b" hatchUnits="userSpaceOnUse" pitch="14">
+  <hatchpath d="L 4,0 10,6" stroke="#0040c0" stroke-width="2"/>
+</hatch></defs>
+<rect width="40" height="30" fill="url(#a)"/>
+<rect width="48" height="30" fill="url(#b)" transform="translate(0 32)"/>
+</svg>

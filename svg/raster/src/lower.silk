@@ -1,0 +1,775 @@
+//! Lowers a display list onto a [`Canvas`]: coverage stays on the CPU (the same strips the
+//! CPU executor draws), and paints, groups, clips and masks become canvas operations, so a
+//! `gpu_scene.Scene` can paint and composite them.
+//!
+//! Fills, strokes, gradients, images, patterns and normal or blended groups lower directly.
+//! Clips and masks become canvas masks applied when their group composites. What a canvas
+//! cannot express runs on the CPU executor and is drawn as one image:
+//!
+//! - filters and embedded SVG images, each on its own;
+//! - linearRGB painting or compositing, linearRGB luminance masks and composited CSS mask
+//!   layers, through their innermost enclosing group with normal blending, which then
+//!   composites as an image;
+//! - the whole list, when no such group exists or a filter reads the backdrop.
+import svg_core.scene { DisplayList, Command, RenderError, FillRule, BlendMode }
+import svg_core.mapping { Mapping }
+import vector.path { Path as VectorPath }
+import vector.geometry { Affine, rectAt }
+import silk.geometry.vector { Vector2 }
+import vector.geometry_error { GeometryError }
+import vector.pixmap { Pixmap, Rgba8 }
+import vector.strips { Rasterizer, Coverage, NONZERO, EVENODD }
+import vector.flatten { Line, TOLERANCE }
+import vector.layer { Mask, BLEND_NORMAL }
+import vector.layer as layers
+import vector.paint { Gradient, ImagePattern, Solid, SAMPLE_NEAREST, EXTEND_CLAMP }
+import vector.paint as painting
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+import canvas { Surface, Canvas, NO_MASK }
+import cpu { Prepared, ClipPlanes, Strokes }
+import cpu
+import clip_mask
+import checked
+import paints
+import patterns
+
+/// What [`lower`] ran on the CPU.
+pub struct Lowering {
+  /// Element ranges executed on the CPU and drawn as one image each.
+  pub fallbacks: usize,
+  /// The whole list was executed on the CPU and drawn as one image.
+  pub whole: bool,
+  /// Canvas masks made for clips and masks. Their rounding differs from the CPU executor's,
+  /// which scales a group's pixels by each clip and mask in turn: within one level per mask.
+  pub masks: usize,
+}
+
+impl Copy for Lowering {}
+
+/// Lowers `list` onto `canvas`, which must start empty with the list's size. Errors are the
+/// CPU executor's: invalid lists and unrepresentable geometry fail, never draw partially.
+pub effect fn lower<C: Surface + Canvas>(list: &DisplayList, canvas: &mut C) -> Lowering
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return run Effect.catch<GeometryError>(lowerChecked(list, &mut canvas.*), geometryFailure)
+}
+
+effect fn geometryFailure(error: GeometryError) -> Lowering
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidGeometry
+}
+
+const NONE: usize = 0xffffffffffffffff
+
+/// Which root commands start a CPU range, and where each range ends (inclusive).
+struct Plan {
+  whole: bool,
+  ends: List<usize>,
+}
+
+/// An open layer while planning: where it starts and whether it can stand alone.
+struct Open {
+  start: usize,
+  /// Closed by ApplyMask or CompositeMask rather than PopLayer.
+  mask: bool,
+  /// A normal, sRGB group: rendered alone, it composites onto its parent as an image.
+  standalone: bool,
+  /// A clip or mask was applied: nothing more may draw into it.
+  sealed: bool,
+}
+
+impl Copy for Open {}
+
+// The command closing the layer pushed at `begin`: PopLayer for a group, ApplyMask or
+// CompositeMask for mask content. Validation guarantees one.
+fn closing(commands: &[Command], begin: usize) -> usize {
+  let mut nested: usize = 0
+  let mut i = begin + 1
+  while i < commands.length {
+    match &commands[i] {
+      Command.PushLayer { opacity: _, bounds: _, linearRgb: _, blendMode: _ } => {
+        nested = nested + 1
+      }
+      Command.PopLayer => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      Command.CompositeMask { operation: _ } => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      Command.ApplyMask { luminance: _, linearRgb: _ } => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return commands.length
+}
+
+fn isPop(command: &Command) -> bool {
+  return match &command.* {
+    Command.PopLayer => true
+    _ => false
+  }
+}
+
+fn isApplyMask(command: &Command) -> bool {
+  return match &command.* {
+    Command.ApplyMask { luminance: _, linearRgb: _ } => true
+    _ => false
+  }
+}
+
+// Marks the innermost standalone group of `open[0 .. count]` as a CPU range. False when there
+// is none.
+effect fn enclose(
+  open: &[Open],
+  count: usize,
+  commands: &[Command],
+  ends: &mut List<usize>,
+) -> bool {
+  let mut k = count
+  while k > 0 {
+    k = k - 1
+    let entry = open[k]
+    if entry.standalone {
+      let mut marks = ends.asMutSlice()
+      marks[entry.start] = closing(commands, entry.start)
+      return true
+    }
+  }
+  return false
+}
+
+effect fn plan(list: &DisplayList, commands: &[Command]) -> Plan
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut ends = run List<usize>.makeWithCapacity(commands.length)
+  let mut i: usize = 0
+  while i < commands.length {
+    run ends.append(NONE)
+    i = i + 1
+  }
+  let mut open = List<Open>.make()
+  i = 0
+  while i < commands.length {
+    let depth = open.length()
+    let sealed = depth > 0 && open.asSlice()[depth - 1].sealed
+
+    // Whether this command can lower here; when not, the enclosing group must run on the CPU.
+    let mut lowers = true
+
+    // Within `open`, how many layers may hold the CPU range.
+    let mut candidates = depth
+    match &commands[i] {
+      Command.Embedded { image: _, transform: _, clip: _ } => {
+        if sealed {
+          lowers = false
+        } else {
+          let mut marks = ends.asMutSlice()
+          marks[i] = i
+        }
+      }
+      Command.FillPath {
+        path: _,
+        transform: _,
+        clip: _,
+        bounds: _,
+        brush: _,
+        opacity: _,
+        linearRgb,
+        rule: _,
+        crispEdges: _
+      } => {
+        lowers = !linearRgb && !sealed
+      }
+      Command.StrokePath {
+        path: _,
+        transform: _,
+        strokeSpace: _,
+        clip: _,
+        bounds: _,
+        brush: _,
+        opacity: _,
+        linearRgb,
+        stroke: _,
+        crispEdges: _
+      } => {
+        lowers = !linearRgb && !sealed
+      }
+      Command.PushLayer { opacity, bounds: _, linearRgb, blendMode } => {
+        if opacity == 0.0 {
+          i = cpu.layerEnd(commands, i)
+        } else {
+          let close = closing(commands, i)
+          let mask = close < commands.length && !isPop(&commands[close])
+          if (!mask && sealed) || linearRgb {
+            lowers = false
+          }
+          run open.append(
+            Open {
+              start: i,
+              mask: mask,
+              standalone: !mask && !linearRgb && blendMode == BlendMode.Normal,
+              sealed: false,
+            },
+          )
+        }
+      }
+      Command.PopLayer => {
+        drop open.pop()
+      }
+      Command.ApplyClip { index: _ } => {
+        if depth == 0 {
+          lowers = false
+        } else {
+          let mut entries = open.asMutSlice()
+          entries[depth - 1].sealed = true
+        }
+      }
+      Command.ConvertMask { luminance, linearRgb } => {
+        // Lowered by the ApplyMask that must follow at once.
+        let next = i + 1
+        if (luminance && linearRgb) || next >= commands.length || !isApplyMask(&commands[next]) {
+          lowers = false
+        }
+        candidates = if depth > 0 {
+          depth - 1
+        } else {
+          0
+        }
+      }
+      Command.ApplyMask { luminance, linearRgb } => {
+        if luminance && linearRgb {
+          lowers = false
+        }
+        drop open.pop()
+        candidates = open.length()
+        if candidates > 0 {
+          let mut entries = open.asMutSlice()
+          entries[candidates - 1].sealed = true
+        }
+      }
+      Command.CompositeMask { operation: _ } => {
+        lowers = false
+        drop open.pop()
+        candidates = open.length()
+      }
+      Command.BeginFilter { filter, transform: _, clip: _, beneath: _, backdrop: _ } => {
+        let end = cpu.filterEnd(commands, i)
+        if list.filters.asSlice()[filter].background {
+          return Plan { whole: true, ends: move ends }
+        }
+        if sealed {
+          lowers = false
+        } else {
+          let mut marks = ends.asMutSlice()
+          marks[i] = end
+        }
+        i = end
+      }
+      _ => {}
+    }
+    if !lowers {
+      // A layer that cannot lower runs inside a strictly enclosing group.
+      let within = match &commands[i] {
+        Command.PushLayer { opacity: _, bounds: _, linearRgb: _, blendMode: _ } => {
+          open.length() - 1
+        }
+        _ => candidates
+      }
+      if !(run enclose(open.asSlice(), within, commands, &mut ends)) {
+        return Plan { whole: true, ends: move ends }
+      }
+    }
+    i = i + 1
+  }
+  return Plan { whole: false, ends: move ends }
+}
+
+/// A layer open on the canvas.
+struct Frame {
+  mask: bool,
+  mode: u8,
+  opacity: u8,
+  /// The canvas mask the layer composites through: its clips and mask so far.
+  clip: u32,
+}
+
+impl Copy for Frame {}
+
+/// Draws `pixels`, a canvas-sized premultiplied image, source-over onto `canvas` within the
+/// box of its non-transparent pixels.
+effect fn drawPixels<C: Surface + Canvas>(
+  canvas: &mut C,
+  pixels: &Pixmap,
+  rasterizer: &mut Rasterizer,
+  coverage: &mut Coverage,
+  lines: &mut List<Line>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = pixels.width()
+  let height = pixels.height()
+  let data = pixels.data()
+  let mut x0 = width
+  let mut y0 = height
+  let mut x1: u32 = 0
+  let mut y1: u32 = 0
+  let mut y: u32 = 0
+  while y < height {
+    let row = u32.toUsize(y) * u32.toUsize(width)
+    let mut x: u32 = 0
+    while x < width {
+      if data[(row + u32.toUsize(x)) * 4 + 3] != 0 {
+        if x < x0 {
+          x0 = x
+        }
+        if x + 1 > x1 {
+          x1 = x + 1
+        }
+        if y < y0 {
+          y0 = y
+        }
+        y1 = y + 1
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+  if x0 >= x1 || y0 >= y1 {
+    return
+  }
+  let boxWidth = x1 - x0
+  let boxHeight = y1 - y0
+  let mut image = run Pixmap.make(boxWidth, boxHeight)
+  let into = image.dataMut()
+  let stride = u32.toUsize(boxWidth) * 4
+  y = 0
+  while y < boxHeight {
+    let from = (u32.toUsize(y + y0) * u32.toUsize(width) + u32.toUsize(x0)) * 4
+    let to = u32.toUsize(y) * stride
+    let mut b: usize = 0
+    while b < stride {
+      into[to + b] = data[from + b]
+      b = b + 1
+    }
+    y = y + 1
+  }
+  run cover(x0, y0, x1, y1, width, height, &mut rasterizer.*, &mut coverage.*, &mut lines.*)
+  let pattern = ImagePattern.make(
+    &image,
+    &Affine.translation(Vector2<f64> { x: u32.toF64(x0), y: u32.toF64(y0) }),
+    SAMPLE_NEAREST,
+    EXTEND_CLAMP,
+  )
+  run canvas.image(&coverage.*, &pattern, 255)
+}
+
+// Full coverage of the pixel box `x0 .. x1` by `y0 .. y1`.
+effect fn cover(
+  x0: u32,
+  y0: u32,
+  x1: u32,
+  y1: u32,
+  width: u32,
+  height: u32,
+  rasterizer: &mut Rasterizer,
+  coverage: &mut Coverage,
+  lines: &mut List<Line>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut rectangle = VectorPath.make()
+  run rectangle.rect(rectAt(u32.toF64(x0), u32.toF64(y0), u32.toF64(x1 - x0), u32.toF64(y1 - y0)))
+  run cpu.fill(
+    &rectangle,
+    &Mapping.identity(),
+    rectAt(0.0, 0.0, u32.toF64(width), u32.toF64(height)),
+    &[],
+    NONZERO,
+    TOLERANCE,
+    &mut rasterizer.*,
+    &mut coverage.*,
+    &mut lines.*,
+  )
+}
+
+// An opaque white image whose alpha is `mask`, for drawing a CPU clip mask as layer content.
+effect fn maskImage(mask: &Mask) -> Pixmap
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut image = run Pixmap.make(mask.width(), mask.height())
+  let into = image.dataMut()
+  let from = mask.data()
+  let mut i: usize = 0
+  while i < from.length {
+    into[i * 4] = from[i]
+    into[i * 4 + 1] = from[i]
+    into[i * 4 + 2] = from[i]
+    into[i * 4 + 3] = from[i]
+    i = i + 1
+  }
+  return move image
+}
+
+effect fn lowerChecked<C: Surface + Canvas>(list: &DisplayList, canvas: &mut C) -> Lowering
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = list.width
+  let height = list.height
+  run cpu.validate(list, width, height)
+  let commands = list.commands.asSlice()
+  let planned = run plan(list, commands)
+  let mut cache = run cpu.preparedPaths(list)
+  let mut paintCache = run paints.make(list)
+  let mut textures = run patterns.make(list.patterns.length())
+  run patterns.surface(&mut textures, u32.toUsize(width) * u32.toUsize(height))
+  let mut rasterizer = Rasterizer.make()
+  let mut coverage = Coverage.make(width, height)
+  let mut lines = List<Line>.make()
+  if planned.whole {
+    let pixels = run cpu.executeSlice(list, commands, &mut cache, &mut paintCache, &mut textures)
+    run drawPixels(&mut canvas.*, &pixels, &mut rasterizer, &mut coverage, &mut lines)
+    return Lowering { fallbacks: 0, whole: true, masks: 0 }
+  }
+  let sourcePaths = list.paths.asSlice()
+  let clips = list.projectionClips.asSlice()
+  let viewport = rectAt(0.0, 0.0, u32.toF64(width), u32.toF64(height))
+  let mut stroking = Strokes.make(list)
+  let mut planes = ClipPlanes.make()
+  let mut frames = List<Frame>.make()
+  run frames.append(Frame { mask: false, mode: BLEND_NORMAL, opacity: 255, clip: NO_MASK })
+  let mut fallbacks: usize = 0
+  let mut masks: usize = 0
+  let mut i: usize = 0
+  while i < commands.length {
+    let end = planned.ends.asSlice()[i]
+    if end != NONE {
+      let pixels = run cpu.executeSlice(
+        list,
+        Slice.view<Command>(commands, i, end - i + 1),
+        &mut cache,
+        &mut paintCache,
+        &mut textures,
+      )
+      run drawPixels(&mut canvas.*, &pixels, &mut rasterizer, &mut coverage, &mut lines)
+      fallbacks = fallbacks + 1
+      i = end + 1
+      continue
+    }
+    match &commands[i] {
+      Command.FillPath {
+        path,
+        transform,
+        clip,
+        bounds: _,
+        brush,
+        opacity,
+        linearRgb: _,
+        rule,
+        crispEdges
+      } => {
+        let texture = run cpu.prepareBrush(
+          &brush,
+          Option<Mapping>.None,
+          width,
+          height,
+          list,
+          &mut cache,
+          &mut paintCache,
+          &mut textures,
+          0,
+        )
+        run planes.select(clip, clips, Option<Mapping>.None, &[])
+        run cpu.prepare(&sourcePaths[path], &mut cache.asMutSlice()[path])
+        run cpu.fill(
+          cache.asSlice()[path].converted(),
+          &transform,
+          viewport,
+          planes.planes.asSlice(),
+          if rule == FillRule.EvenOdd {
+            EVENODD
+          } else {
+            NONZERO
+          },
+          TOLERANCE,
+          &mut rasterizer,
+          &mut coverage,
+          &mut lines,
+        )
+        if crispEdges {
+          coverage.binarize()
+        }
+        run paints.draw(
+          &mut paintCache,
+          &mut canvas.*,
+          width,
+          height,
+          &coverage,
+          &brush,
+          opacity,
+          list,
+          Option<Mapping>.None,
+          &textures,
+          texture,
+        )
+      }
+      Command.StrokePath {
+        path,
+        transform,
+        strokeSpace,
+        clip,
+        bounds: _,
+        brush,
+        opacity,
+        linearRgb: _,
+        stroke,
+        crispEdges
+      } => {
+        let texture = run cpu.prepareBrush(
+          &brush,
+          Option<Mapping>.None,
+          width,
+          height,
+          list,
+          &mut cache,
+          &mut paintCache,
+          &mut textures,
+          0,
+        )
+        run planes.select(clip, clips, Option<Mapping>.None, &[])
+        run cpu.prepare(&sourcePaths[path], &mut cache.asMutSlice()[path])
+        let outlinePlacement = run stroking.stroke(
+          list,
+          cache.asSlice()[path].converted(),
+          stroke,
+          strokeSpace,
+          transform,
+          Option<Mapping>.None,
+          viewport,
+        )
+        run cpu.fill(
+          &stroking.outline,
+          &outlinePlacement,
+          viewport,
+          planes.planes.asSlice(),
+          NONZERO,
+          TOLERANCE * 0.5,
+          &mut rasterizer,
+          &mut coverage,
+          &mut lines,
+        )
+        if crispEdges {
+          coverage.binarize()
+        }
+        run paints.draw(
+          &mut paintCache,
+          &mut canvas.*,
+          width,
+          height,
+          &coverage,
+          &brush,
+          opacity,
+          list,
+          Option<Mapping>.None,
+          &textures,
+          texture,
+        )
+      }
+      Command.PushLayer { opacity, bounds: _, linearRgb: _, blendMode } => {
+        if opacity == 0.0 {
+          i = cpu.layerEnd(commands, i)
+        } else {
+          let close = closing(commands, i)
+          let mask = close < commands.length && !isPop(&commands[close])
+          let parent = frames.asSlice()[frames.length() - 1]
+          run canvas.pushLayer()
+          run frames.append(
+            Frame {
+              mask: mask,
+              mode: cpu.blendCode(blendMode),
+              opacity: run checked.unit(opacity),
+              // Mask content carries its target's clips, so the mask it becomes
+              // replaces them.
+              clip: if mask {
+                parent.clip
+              } else {
+                NO_MASK
+              },
+            },
+          )
+        }
+      }
+      Command.PopLayer => {
+        let last = frames.length() - 1
+        let frame = frames.remove(last)
+        run canvas.popLayer(frame.mode, frame.opacity, frame.clip)
+      }
+      Command.ApplyClip { index } => {
+        let top = frames.length() - 1
+        let available = textures.surfaceLimit - textures.surfaces
+        let mask = run clip_mask.render(
+          list.clipNodes.asSlice(),
+          sourcePaths,
+          index,
+          width,
+          height,
+          &Mapping.identity(),
+          available,
+        )
+        let image = run maskImage(&mask)
+        run canvas.pushLayer()
+        run drawPixels(&mut canvas.*, &image, &mut rasterizer, &mut coverage, &mut lines)
+        let clipped = frames.asSlice()[top].clip
+        let id = run canvas.popMask(false, clipped)
+        masks = masks + 1
+        let mut entries = frames.asMutSlice()
+        entries[top].clip = id
+      }
+      Command.ConvertMask { luminance, linearRgb: _ } => {
+        let last = frames.length() - 1
+        let frame = frames.remove(last)
+        let id = run canvas.popMask(luminance, frame.clip)
+        masks = masks + 1
+        let top = frames.length() - 1
+        let mut entries = frames.asMutSlice()
+        entries[top].clip = id
+
+        // The ApplyMask that follows is done.
+        i = i + 1
+      }
+      Command.ApplyMask { luminance, linearRgb: _ } => {
+        let last = frames.length() - 1
+        let frame = frames.remove(last)
+        let id = run canvas.popMask(luminance, frame.clip)
+        masks = masks + 1
+        let top = frames.length() - 1
+        let mut entries = frames.asMutSlice()
+        entries[top].clip = id
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return Lowering { fallbacks: fallbacks, whole: false, masks: masks }
+}
+
+/// A CPU [`Canvas`] with `gpu_scene.Scene`'s semantics, built from `vector.layer`: the
+/// reference a GPU canvas is compared with.
+pub struct PixmapCanvas {
+  layers: List<Pixmap>,
+  masks: List<Mask>,
+}
+
+impl PixmapCanvas {
+  pub effect fn make(width: u32, height: u32) -> PixmapCanvas
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let mut layers = List<Pixmap>.make()
+    run layers.append(run Pixmap.make(width, height))
+    return PixmapCanvas { layers: move layers, masks: List<Mask>.make() }
+  }
+
+  /// The composited image; every layer must be closed.
+  pub fn finish(self: PixmapCanvas) -> Pixmap {
+    let mut layers = move self.layers
+    return layers.remove(0)
+  }
+
+  fn top(self: &mut Self) -> &mut Pixmap {
+    let last = self.layers.length() - 1
+    return &mut self.layers.asMutSlice()[last]
+  }
+}
+
+impl Surface for PixmapCanvas {
+  effect fn solid(self: &mut Self, coverage: &Coverage, color: Rgba8, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    painting.fill(&mut self.top().*, coverage, &Solid.make(color), opacity)
+  }
+
+  effect fn gradient(self: &mut Self, coverage: &Coverage, gradient: &Gradient, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    painting.fill(&mut self.top().*, coverage, gradient, opacity)
+  }
+
+  effect fn image(
+    self: &mut Self,
+    coverage: &Coverage,
+    pattern: &ImagePattern<'_>,
+    opacity: u8,
+  ) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    painting.fill(&mut self.top().*, coverage, pattern, opacity)
+  }
+}
+
+impl Canvas for PixmapCanvas {
+  effect fn pushLayer(self: &mut Self) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let first = &self.layers.asSlice()[0]
+    let width = first.width()
+    let height = first.height()
+    run self.layers.append(run Pixmap.make(width, height))
+  }
+
+  effect fn popLayer(self: &mut Self, mode: u8, opacity: u8, mask: u32) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let last = self.layers.length() - 1
+    let layer = self.layers.remove(last)
+    let target = self.layers.length() - 1
+    if mask == NO_MASK {
+      layers.composite(&mut self.layers.asMutSlice()[target], &layer, mode, opacity)
+    } else {
+      layers.compositeMasked(
+        &mut self.layers.asMutSlice()[target],
+        &layer,
+        mode,
+        opacity,
+        &self.masks.asSlice()[u32.toUsize(mask)],
+      )
+    }
+  }
+
+  effect fn popMask(self: &mut Self, luminance: bool, clip: u32) -> u32
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let last = self.layers.length() - 1
+    let layer = self.layers.remove(last)
+    let mut mask = if luminance {
+      run Mask.fromLuminance(&layer)
+    } else {
+      run Mask.fromAlpha(&layer)
+    }
+    if clip != NO_MASK {
+      mask.intersect(&self.masks.asSlice()[u32.toUsize(clip)])
+    }
+    let id = usize.toU32(self.masks.length())
+    run self.masks.append(move mask)
+    return id
+  }
+}

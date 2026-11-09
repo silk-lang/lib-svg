@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "cascade-presentation-inline-variables",
+      "input": "inputs/cascade-presentation-inline-variables.svg",
+      "references": [
+        {
+          "path": "references/cascade-presentation-inline-variables.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Author important beats inline normal; a namespace-qualified child/class selector overrides a presentation attribute; custom-property substitution and modern rgb syntax produce literal reference colors, and the CSS transform positions the final rectangle.",
+      "spec": "https://www.w3.org/TR/css-cascade-4/#cascade-sort",
+      "tolerance": {}
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+//! SVG2 #ImageElement and #IntrinsicSizing: transport validation precedes layout.
+import svg_css.computed { Initials }
+import svg_fonts.database { FontDatabase }
+import document_images
+import svg_core.image_assets { Store, DocumentSource, DocumentMetadata }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits, Response }
+import svg_core.structure { Options as StructureOptions }
+import svg_core.scene { RenderError }
+import svg_core.svg_intrinsic { NaturalSize }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import environment { Environment, noHostStyles }
+import silk.collections.bytes { Bytes }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn source(mime: &[u8], charset: &[u8]) -> DocumentSource
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  return DocumentSource {
+    response: Response {
+      bytes: run Bytes.copy(
+        b"<svg xmlns='http://www.w3.org/2000/svg' id='chosen' width='2' height='1' viewBox='0 0 9 3' preserveAspectRatio='xMinYMin slice'><style>:target {width:12px;height:4px}</style></svg>",
+      ),
+      finalUrl: Option<Url>.some(run Url.parseAbsolute(b"https://example.test/assets/final.svg")),
+      mediaType: Option<Bytes>.some(run Bytes.copy(mime)),
+      charset: Option<Bytes>.some(run Bytes.copy(charset)),
+    },
+    request: run Url.parseAbsolute(b"https://example.test/image.svg#chosen"),
+    metadata: Option<DocumentMetadata>.None,
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#IntrinsicSizing
+test effect fn preparedMetadataUsesIndependentCascadeAndRequestFragment() -> ()
+  ! UrlError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let base = run Url.parseAbsolute(b"https://example.test/outer.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let fonts = FontDatabase.make()
+  let host = Environment {
+    base: &base,
+    media: MediaEnvironment.headless(1000.0, 800.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: &fonts,
+    styles: noHostStyles(),
+  }
+  let mut store = Store.empty()
+  let validSource = run source(b"image/svg+xml", b"utf-8")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let wrongMime = run source(b"text/plain", b"utf-8")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let wrongCharset = run source(b"image/svg+xml", b"utf-16")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run store.documents.append(move validSource) |> Effect.provideMut<Allocator>(&mut allocator)
+  run store.documents.append(move wrongMime) |> Effect.provideMut<Allocator>(&mut allocator)
+  run store.documents.append(move wrongCharset) |> Effect.provideMut<Allocator>(&mut allocator)
+  run document_images.prepare(&mut store, &host)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let valid = match &store.documents.asSlice()[0].metadata {
+    Option<DocumentMetadata>.Some { value } => match &value.natural.ratio {
+      Option<f64>.Some { value: ratio } => ratio == 3.0
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(
+    valid,
+    "request fragment selects the root despite a redirected base; root CSS sizes beat viewBox ratio",
+  )
+  run Testing.expect(
+    store.documents.asSlice()[1].metadata.isNone()
+      && store.documents.asSlice()[2].metadata.isNone(),
+    "wrong MIME or contradictory charset stays a broken image",
+  )
+}

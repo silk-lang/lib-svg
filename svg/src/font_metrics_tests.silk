@@ -1,0 +1,320 @@
+//! CSS Values 4 #ex, #cap, #ch, #ic, #lh, pinned in specs.lock.json.
+//! A standalone sfnt fixture: 1000 UPEM, explicit cmap, metrics and two rectangles.
+import font_metrics { FontContext, FontMetricsError, Orientation }
+import font_metrics
+import font_types.lib { F2Dot14 }
+import read_fonts.lib { FontRef, ReadError }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.u32
+
+fn put16(data: &mut [u8], at: usize, value: u32) -> () {
+  data[at] = u32.toU8(value / 256)
+  data[at + 1] = u32.toU8(value % 256)
+}
+
+fn put32(data: &mut [u8], at: usize, value: u32) -> () {
+  put16(&mut data, at, value / 65536)
+  put16(&mut data, at + 2, value % 65536)
+}
+
+fn table(data: &mut [u8], index: usize, tag: &[u8], offset: u32, length: u32) -> () {
+  let at = 12 + index * 16
+  let mut i: usize = 0
+  while i < 4 {
+    data[at + i] = tag[i]
+    i = i + 1
+  }
+  put32(&mut data, at + 8, offset)
+  put32(&mut data, at + 12, length)
+}
+
+fn rectangle(data: &mut [u8], at: usize, height: u32) -> () {
+  put16(&mut data, at, 1)
+  put16(&mut data, at + 6, 400)
+  put16(&mut data, at + 8, height)
+  put16(&mut data, at + 10, 3)
+  let mut i: usize = 0
+  while i < 4 {
+    data[at + 14 + i] = 1
+    i = i + 1
+  }
+  put16(&mut data, at + 20, 400)
+  put16(&mut data, at + 24, 65136)
+  put16(&mut data, at + 30, height)
+}
+
+fn fixture() -> [u8; 636] {
+  let mut data: [u8; 636] = [0; 636]
+  put32(&mut data, 0, 65536)
+  put16(&mut data, 4, 10)
+  put16(&mut data, 6, 128)
+  put16(&mut data, 8, 3)
+  put16(&mut data, 10, 32)
+  table(&mut data, 0, b"OS/2", 372, 96)
+  table(&mut data, 1, b"cmap", 292, 76)
+  table(&mut data, 2, b"glyf", 536, 68)
+  table(&mut data, 3, b"head", 172, 54)
+  table(&mut data, 4, b"hhea", 228, 36)
+  table(&mut data, 5, b"hmtx", 272, 20)
+  table(&mut data, 6, b"loca", 524, 12)
+  table(&mut data, 7, b"maxp", 604, 32)
+  table(&mut data, 8, b"vhea", 468, 36)
+  table(&mut data, 9, b"vmtx", 504, 20)
+  put32(&mut data, 172, 65536)
+  put32(&mut data, 184, 1594834165)
+  put16(&mut data, 190, 1000)
+  put16(&mut data, 210, 700)
+  put32(&mut data, 228, 65536)
+  put16(&mut data, 232, 800)
+  put16(&mut data, 234, 65336)
+  put16(&mut data, 236, 100)
+  put16(&mut data, 262, 5)
+  put32(&mut data, 604, 65536)
+  put16(&mut data, 608, 5)
+  put16(&mut data, 610, 4)
+  put16(&mut data, 612, 1)
+  put16(&mut data, 618, 2)
+  let widths: [u32; 5] = [500, 620, 650, 450, 980]
+  let heights: [u32; 5] = [1000, 1100, 1000, 1000, 1200]
+  let mut i: usize = 0
+  while i < 5 {
+    put16(&mut data, 272 + i * 4, widths[i])
+    put16(&mut data, 504 + i * 4, heights[i])
+    i = i + 1
+  }
+  put16(&mut data, 294, 1)
+  put16(&mut data, 296, 3)
+  put16(&mut data, 298, 10)
+  put32(&mut data, 300, 12)
+  put16(&mut data, 304, 12)
+  put32(&mut data, 308, 64)
+  put32(&mut data, 316, 4)
+  let chars: [u32; 4] = [48, 72, 120, 27700]
+  i = 0
+  while i < 4 {
+    put32(&mut data, 320 + i * 12, chars[i])
+    put32(&mut data, 324 + i * 12, chars[i])
+    put32(
+      &mut data,
+      328 + i * 12,
+      if i == 0 {
+        1
+      } else if i == 1 {
+        2
+      } else if i == 2 {
+        3
+      } else {
+        4
+      },
+    )
+    i = i + 1
+  }
+  put16(&mut data, 372, 2)
+  put16(&mut data, 440, 800)
+  put16(&mut data, 442, 65336)
+  put16(&mut data, 444, 100)
+  put16(&mut data, 446, 800)
+  put16(&mut data, 448, 200)
+  put16(&mut data, 458, 480)
+  put16(&mut data, 460, 680)
+  put32(&mut data, 468, 65536)
+  put16(&mut data, 472, 600)
+  put16(&mut data, 474, 64936)
+  put16(&mut data, 476, 50)
+  put16(&mut data, 502, 5)
+  put16(&mut data, 530, 17)
+  put16(&mut data, 532, 34)
+  put16(&mut data, 534, 34)
+  rectangle(&mut data, 536, 700)
+  rectangle(&mut data, 570, 520)
+  return data
+}
+
+effect fn face<'a>(data: &'a [u8]) -> FontRef<'a>
+  ! AssertionError<'static> {
+  let parsed = FontRef.new(data)
+  return match &parsed {
+    Result<FontRef<'a>, ReadError>.Success { value } => value
+    _ => {
+      run Testing.expect(false, "standalone metric font parses")
+      return Intrinsic.trap("assertion")
+    }
+  }
+}
+
+effect fn fromFont<'a>(
+  font: &FontRef<'a>,
+  coords: &[F2Dot14],
+  fontSize: f64,
+  viewportWidth: f64,
+  viewportHeight: f64,
+  orientation: Orientation,
+) -> FontContext
+  ! FontMetricsError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  return run font_metrics.fromFont(
+    font,
+    coords,
+    fontSize,
+    viewportWidth,
+    viewportHeight,
+    orientation,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/css-values-4/#ex and #cap: reliable table metrics first.
+// #ch and #ic: the actual mapped 0 and water advances, not average/max width.
+test effect fn selectedFaceMetricsScaleToCssPixels() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let data = fixture()
+  let font = run face(&data)
+  let measured = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.Horizontal)
+  let c = measured.dimensions
+  run Testing.expect(measured.unitsPerEm == 1000, "actual head UPEM")
+  run Testing.expect(c.xHeight == 48.0 && c.capHeight == 68.0, "OS/2 heights")
+  run Testing.expect(c.zeroAdvance == 62.0 && c.ideographAdvance == 98.0, "cmap-selected advances")
+  run Testing.expect(c.lineHeight == 110.0, "normal includes actual ascent minus descent plus gap")
+  run Testing.expect(
+    c.rootXHeight == 48.0 && c.parentZeroAdvance == 62.0,
+    "initial root and parent face agree",
+  )
+}
+
+// https://www.w3.org/TR/css-values-4/#ex and #cap permit lowercase/uppercase extents.
+test effect fn missingTableHeightsUseRealGlyphExtents() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let mut data = fixture()
+  put16(&mut data, 458, 0)
+  put16(&mut data, 460, 0)
+  let font = run face(&data)
+  let measured = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.Horizontal)
+  run Testing.expect(
+    measured.dimensions.xHeight == 52.0,
+    "x rectangle reaches 520 font units, distinct from the .5em fallback",
+  )
+  run Testing.expect(measured.dimensions.capHeight == 70.0, "H rectangle reaches 700 font units")
+}
+
+// https://www.w3.org/TR/css-values-4/#ch: inline axis depends on orientation.
+test effect fn uprightAndMixedUseDifferentZeroAxes() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let data = fixture()
+  let font = run face(&data)
+  let mixed = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.VerticalMixed)
+  let upright = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.VerticalUpright)
+  let sideways = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.VerticalSideways)
+  run Testing.expect(
+    mixed.dimensions.zeroAdvance == 62.0 && mixed.dimensions.ideographAdvance == 120.0,
+    "mixed Latin sideways and CJK upright",
+  )
+  run Testing.expect(
+    upright.dimensions.zeroAdvance == 110.0 && upright.dimensions.lineHeight == 125.0,
+    "vertical metrics, not horizontal width",
+  )
+  run Testing.expect(
+    sideways.dimensions.ideographAdvance == 98.0 && sideways.dimensions.lineHeight == 110.0,
+    "sideways uses horizontal face metrics",
+  )
+}
+
+// https://www.w3.org/TR/css-values-4/#ex #cap #ch #ic prescribe these fallbacks.
+test effect fn missingGlyphsUseNormativeFallbacks() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let mut data = fixture()
+  put16(&mut data, 458, 0)
+  put16(&mut data, 460, 0)
+  put32(&mut data, 316, 0)
+  let font = run face(&data)
+  let h = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.Horizontal)
+  let v = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.VerticalUpright)
+  run Testing.expect(
+    h.dimensions.xHeight == 50.0 && h.dimensions.capHeight == 80.0,
+    "ex half em and cap actual ascent",
+  )
+  run Testing.expect(
+    h.dimensions.zeroAdvance == 50.0 && h.dimensions.ideographAdvance == 100.0,
+    "missing ch/ic normative fallback",
+  )
+  run Testing.expect(v.dimensions.zeroAdvance == 100.0, "upright missing zero is one em")
+}
+
+test effect fn absentVerticalAdvancesDoNotUseModelLineHeightFallback() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let mut data = fixture()
+  table(&mut data, 9, b"xxxx", 504, 20)
+  let font = run face(&data)
+  let measured = run fromFont(&font, &[], 100.0, 640.0, 480.0, Orientation.VerticalUpright)
+  run Testing.expect(
+    measured.dimensions.zeroAdvance == 100.0 && measured.dimensions.ideographAdvance == 100.0,
+    "missing vmtx uses CSS fallback, not synthesized 1000-unit line",
+  )
+}
+
+test effect fn zeroFontSizeAndMalformedFaceAreHandled() -> ()
+  ! AssertionError<'static> | FontMetricsError | OutOfMemoryError {
+  let mut data = fixture()
+  let font = run face(&data)
+  let zero = run fromFont(&font, &[], 0.0, 640.0, 480.0, Orientation.Horizontal)
+  run Testing.expect(
+    zero.dimensions.xHeight == 0.0 && zero.dimensions.capHeight == 0.0
+      && zero.dimensions.lineHeight == 0.0
+      && zero.dimensions.zeroAdvance == 0.0,
+    "zero CSS font size remains valid",
+  )
+  put16(&mut data, 190, 0)
+  let broken = run face(&data)
+  let result = run Effect.result(fromFont(&broken, &[], 16.0, 640.0, 480.0, Orientation.Horizontal))
+  let rejected = match &result {
+    Result<FontContext, FontMetricsError | OutOfMemoryError>.Failure { error } => match &error {
+      FontMetricsError problem => problem == FontMetricsError.InvalidFont
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(rejected, "malformed UPEM gives typed failure instead of model substitute")
+}
+
+test effect fn missingLineMetricsAndInvalidInputsAreExplicit() -> ()
+  ! AssertionError<'static> | OutOfMemoryError {
+  let mut data = fixture()
+
+  // A missing usable vhea cannot be replaced by a guessed 1em normal line.
+  put32(&mut data, 12 + 8 * 16 + 12, 0)
+  let font = run face(&data)
+  let missing = run Effect.result(
+    fromFont(&font, &[], 16.0, 640.0, 480.0, Orientation.VerticalUpright),
+  )
+  let missingLine = match &missing {
+    Result<FontContext, FontMetricsError | OutOfMemoryError>.Failure { error } => match &error {
+      FontMetricsError problem => problem == FontMetricsError.MissingLineMetrics
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(missingLine, "host must supply missing normal line-height policy")
+  let negativeSize = run Effect.result(
+    fromFont(&font, &[], -1.0, 640.0, 480.0, Orientation.Horizontal),
+  )
+  let badViewport = run Effect.result(
+    fromFont(&font, &[], 16.0, -1.0, 480.0, Orientation.Horizontal),
+  )
+  let sizeRejected = match &negativeSize {
+    Result<FontContext, FontMetricsError | OutOfMemoryError>.Failure { error } => match &error {
+      FontMetricsError problem => problem == FontMetricsError.InvalidInput
+      _ => false
+    }
+    _ => false
+  }
+  let viewportRejected = match &badViewport {
+    Result<FontContext, FontMetricsError | OutOfMemoryError>.Failure { error } => match &error {
+      FontMetricsError problem => problem == FontMetricsError.InvalidInput
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(sizeRejected && viewportRejected, "invalid dimensions fail before measuring")
+}

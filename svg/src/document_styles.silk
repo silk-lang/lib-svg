@@ -1,0 +1,1415 @@
+//! XML stylesheet collection and parent-first computed styles over a borrowed document.
+//! Pinned SVG2ED styling.html #UAStyleSheet / #PresentationAttributes, CSSOM #add-a-css-style-sheet.
+import silk.text.string { String }
+import stylesheets { Catalog, MatchMemo, RuleSetId }
+import style_tree
+import resources { Resolver, Policy, ProcessingMode, Limits as ResourceLimits }
+import url { Url, UrlError }
+import animation
+import silk.xml.document {
+  XmlDocument,
+  XmlNodeId,
+  XmlNodeKind,
+  XmlEncoding,
+  XmlPseudoAttributes,
+  XmlError,
+  XmlReason,
+  XmlLimits,
+}
+import svg_css.tokens { Limits, CssError, CssErrorKind, TokenRange, Span, equal, insensitive }
+import svg_css.encoding { Encoding }
+import svg_css.encoding
+import svg_css.effect_values { EffectValue, ClipSource, Image, Filter }
+import svg_css.properties { Property }
+import svg_css.properties
+import svg_css.computed { HostContext, StyleId, ComputedValue, ComputedError }
+import svg_css.cascade { Candidate, Priority, Origin }
+import svg_css.media_features { Environment }
+import svg_css.element { MatchContext, NO_ELEMENT }
+import silk.collections.bytes { Bytes }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.num.usize
+import silk.num.u64
+import structure { Graph, SourceId, OccurrenceId, Options, StructureError }
+import structure
+import svg_css.values { Value, Paint, Store, ValueId }
+import occurrence_tree
+import occurrence_tree { Cache as TreeCache }
+import view_selection { Selection }
+
+struct NodeDeclarations {
+  presentation: TokenRange,
+  inline: TokenRange,
+  /// Animated property values (`animation.animated()` attributes), at the animation origin.
+  animated: TokenRange,
+}
+
+impl Copy for NodeDeclarations {}
+
+struct SourceStyles {
+  rules: RuleSetId,
+  nodes: List<NodeDeclarations>,
+  templateTransforms: HashMap<usize, usize>,
+}
+
+pub struct StyledGraph<'a> {
+  pub catalog: Catalog<'a>,
+  pub selection: Selection,
+  styles: List<StyleId>,
+  resources: HashMap<ResourceKey, OccurrenceId>,
+  templates: HashMap<usize, OccurrenceId>,
+}
+
+struct ResourceKey {
+  node: usize,
+  property: usize,
+  layer: usize,
+}
+
+impl Copy for ResourceKey {}
+
+impl HashKey for ResourceKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.node == b.node && a.property == b.property && a.layer == b.layer
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    return Hash.combine(
+      Hash.combine(Hash.mix(seed, usize.toU64(value.node)), usize.toU64(value.property)),
+      usize.toU64(value.layer),
+    )
+  }
+}
+
+impl<'a> StyledGraph<'a> {
+  pub fn resource(self: &Self, node: OccurrenceId, property: Property) -> Option<OccurrenceId> {
+    return self.resourceAt(node, property, 0)
+  }
+
+  pub fn resourceAt(self: &Self, node: OccurrenceId, property: Property, layer: usize) -> Option<
+    OccurrenceId
+  > {
+    // Most documents reference no resource; skip hashing the key for them.
+    if self.resources.length() == 0 {
+      return Option<OccurrenceId>.None
+    }
+    return self.resources.get(
+      ResourceKey { node: node.index, property: properties.index(property), layer: layer },
+    )
+  }
+
+  pub fn template(self: &Self, node: OccurrenceId) -> Option<OccurrenceId> {
+    return self.templates.get(node.index)
+  }
+
+  pub fn nodeStyle(self: &Self, node: OccurrenceId) -> Option<StyleId> {
+    return if node.index < self.styles.length() {
+      Option<StyleId>.some(self.styles.asSlice()[node.index])
+    } else {
+      Option<StyleId>.None
+    }
+  }
+}
+
+/// The computed `d` of each of `targets` in document `document` that has a styled occurrence
+/// with path data, for [`animation.sample`].
+pub effect fn motionPaths(
+  graph: &Graph,
+  styled: &StyledGraph<'_>,
+  document: usize,
+  targets: &[XmlNodeId],
+) -> List<animation.MotionPath>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<animation.MotionPath>.make()
+  let engine = &styled.catalog.engine
+  let mut t: usize = 0
+  while t < targets.length {
+    let target = targets[t]
+    t = t + 1
+    let mut i: usize = 0
+    while i < graph.occurrences.length() {
+      let source = graph.occurrences.asSlice()[i].source
+      if source.document.index == document && source.node.index == target.index {
+        if let Option<StyleId>.Some { value: style } = styled.nodeStyle(OccurrenceId { index: i }) {
+          if let Option<ComputedValue>.Some { value: entry } = engine.get(style, Property.D) {
+            match &engine.values.get(entry.value).* {
+              Value.Path { index } => {
+                let paths = engine.values.paths.asSlice()
+                if index < paths.length {
+                  run out.append(
+                    animation.MotionPath {
+                      node: target,
+                      data: run animation.pathData(&paths[index]),
+                    },
+                  )
+                }
+              }
+              _ => {}
+            }
+          }
+        }
+        break
+      }
+      i = i + 1
+    }
+  }
+  return move out
+}
+
+pub struct StyledDocument<'a> {
+  pub catalog: Catalog<'a>,
+  nodeStyles: List<Option<StyleId>>,
+}
+
+impl<'a> StyledDocument<'a> {
+  pub fn nodeStyle(self: &Self, node: XmlNodeId) -> Option<StyleId> {
+    return if node.index < self.nodeStyles.length() {
+      self.nodeStyles.asSlice()[node.index]
+    } else {
+      Option<StyleId>.None
+    }
+  }
+}
+
+// Exact stylesheet in pinned SVG2ED dbbc1f8bcb1a3b05777d1ec03dac8040738b02941142018e44e2e02dad691195.
+// https://svgwg.org/svg2-draft/styling.html#UAStyleSheet
+pub fn uaSheet() -> &'static [u8] {
+  return b"@namespace url(http://www.w3.org/2000/svg);\n@namespace xml url(http://www.w3.org/XML/1998/namespace);\n\nsvg:not(:root), image, marker, pattern, hatch, symbol { overflow: hidden; }\n\n*:not(svg),\n*:not(foreignObject) > svg {\n  transform-origin: 0 0;\n}\n\n*[xml|space=preserve] {\n  white-space-collapse: preserve-spaces;\n}\n\ndefs,\nclipPath, mask, marker,\ndesc, title, metadata,\npattern, linearGradient, radialGradient, meshgradient, hatch,\nscript, style,\nsymbol {\n  display: none !important;\n}\n:host(use) > symbol {\n  display: inline !important;\n}\n:link, :visited {\n  cursor: pointer;\n}\n"
+}
+
+fn svg(document: &XmlDocument, node: XmlNodeId) -> bool {
+  return equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+    b"http://www.w3.org/2000/svg",
+  )
+}
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  return match &(XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+fn pseudo<'a>(attributes: &'a XmlPseudoAttributes, name: string) -> &'a [u8] {
+  return match &(attributes.get(name) |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+// PI type is an advisory MIME type, unlike HTML/SVG style's type string.
+// https://www.w3.org/TR/xml-stylesheet/#PA-type
+fn cssMediaType(value: &[u8]) -> bool {
+  let mut start: usize = 0
+  while start < value.length && (value[start] == 32 || value[start] == 9) {
+    start = start + 1
+  }
+  let mut end = start
+  while end < value.length && value[end] != 59 {
+    end = end + 1
+  }
+  while end > start && (value[end - 1] == 32 || value[end - 1] == 9) {
+    end = end - 1
+  }
+  return insensitive(Slice.view<u8>(value, start, end - start), b"text/css")
+}
+
+fn documentEncoding(document: &XmlDocument) -> Encoding {
+  return match XmlDocument.encoding(document) {
+    XmlEncoding.Utf8 => Encoding.Utf8
+    XmlEncoding.Utf16Le => Encoding.Utf16Le
+    XmlEncoding.Utf16Be => Encoding.Utf16Be
+  }
+}
+
+union Sheet {
+  Embedded { node: XmlNodeId },
+  External { attributes: XmlPseudoAttributes },
+}
+
+fn title<'a>(document: &'a XmlDocument, sheet: &'a Sheet) -> &'a [u8] {
+  return match &sheet.* {
+    Sheet.Embedded { node } => attribute(document, node, "title")
+    Sheet.External { attributes } => pseudo(&attributes, "title")
+  }
+}
+
+fn alternate(sheet: &Sheet) -> bool {
+  return match &sheet.* {
+    Sheet.External { attributes } => equal(pseudo(&attributes, "alternate"), b"yes")
+    _ => false
+  }
+}
+
+// PI pseudoattributes are decoded once and retained; embedded metadata stays borrowed in XML.
+// https://www.w3.org/TR/cssom/#requirements-on-user-agents-implementing-the-xml-stylesheet-processing-instruction
+// https://www.w3.org/TR/xml-stylesheet/#pseudo-attributes
+// Malformed instructions are ignored; exhaustion remains a hard error.
+effect fn sheets(document: &XmlDocument, limits: &Limits) -> List<Sheet>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = List<Sheet>.make()
+  let mut xmlLimits = XmlLimits.make()
+  xmlLimits.maxInputBytes = limits.maxInputBytes
+  xmlLimits.maxStorageBytes = limits.maxStorageBytes
+  xmlLimits.maxExpandedBytes = limits.maxStorageBytes
+  xmlLimits.maxAttributes = limits.maxDeclarations
+  let nodes = XmlDocument.nodes(document)
+  let mut metadataBytes: usize = 0
+  let mut i: usize = 0
+  while i < nodes.length {
+    let node = XmlNodeId { index: i }
+    if nodes[i].kind == XmlNodeKind.Element && svg(document, node)
+      && equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"style") {
+      let kind = attribute(document, node, "type")
+      if kind.length == 0 || insensitive(kind, b"text/css") {
+        run result.append(Sheet.Embedded { node: node })
+      }
+    } else if i < XmlDocument.root(document).index
+      && nodes[i].kind == XmlNodeKind.ProcessingInstruction
+      && equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"xml-stylesheet") {
+      let content = XmlDocument.text(document, node)
+      let bytes = String.utf8Bytes(content)
+      if metadataBytes > limits.maxInputBytes
+        || bytes.length > limits.maxInputBytes - metadataBytes {
+        fail CssError { kind: CssErrorKind.InputLimit, offset: i }
+      }
+      metadataBytes = metadataBytes + bytes.length
+      let parsed = run Effect.result(XmlPseudoAttributes.parse(content, &xmlLimits))
+      match move parsed {
+        Result<XmlPseudoAttributes, XmlError | OutOfMemoryError>.Success { value: attributes } => {
+          let supported = match &(attributes.get("type")
+            |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+            Option<&[u8]>.Some { value } => cssMediaType(value)
+            _ => true
+          }
+          let alt = equal(pseudo(&attributes, "alternate"), b"yes")
+          if supported && (!alt || pseudo(&attributes, "title").length != 0) {
+            let hasHref = match &(attributes.get("href")
+              |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+              Option<&[u8]>.Some { value } => true
+              _ => false
+            }
+            if hasHref {
+              run result.append(Sheet.External { attributes: move attributes })
+            }
+          }
+        }
+        Result<XmlPseudoAttributes, XmlError | OutOfMemoryError>.Failure {
+          error
+        } => match move error {
+          XmlError invalid => {
+            if invalid.reason == XmlReason.Limit {
+              fail CssError { kind: CssErrorKind.StorageLimit, offset: invalid.offset }
+            }
+          }
+          OutOfMemoryError exhausted => {
+            fail move exhausted
+          }
+        }
+      }
+    }
+    if result.length() > limits.maxRules {
+      fail CssError { kind: CssErrorKind.RuleLimit, offset: i }
+    }
+    i = i + 1
+  }
+  return move result
+}
+
+// Preorder traversal of the style subtree without recursion or an arena copy.
+fn nextDescendant(document: &XmlDocument, root: XmlNodeId, current: XmlNodeId) -> Option<
+  XmlNodeId
+> {
+  match &XmlDocument.firstChild(document, current) {
+    Option<XmlNodeId>.Some { value } => {
+      return Option<XmlNodeId>.Some { value: value }
+    }
+    _ => {}
+  }
+  let mut at = current
+  while at.index != root.index {
+    match &XmlDocument.nextSibling(document, at) {
+      Option<XmlNodeId>.Some { value } => {
+        return Option<XmlNodeId>.Some { value: value }
+      }
+      _ => {}
+    }
+    at = match &XmlDocument.nodes(document)[at.index].parent {
+      Option<XmlNodeId>.Some { value } => value
+      _ => {
+        return Option<XmlNodeId>.None
+      }
+    }
+  }
+  return Option<XmlNodeId>.None
+}
+
+effect fn embedded(
+  catalog: &mut Catalog<'_>,
+  rules: RuleSetId,
+  document: &XmlDocument,
+  node: XmlNodeId,
+  base: usize,
+  environmentEncoding: Encoding,
+  environment: &Environment,
+  limits: &Limits,
+) -> ()
+  ! CssError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  // The common single text/CDATA node is passed directly to the tokenizer.
+  let first = XmlDocument.firstChild(document, node)
+  match &first {
+    Option<XmlNodeId>.Some { value } => {
+      if XmlDocument.nodes(document)[value.index].kind == XmlNodeKind.Text {
+        match &XmlDocument.nextSibling(document, value) {
+          Option<XmlNodeId>.None => {
+            run catalog.addSheet(
+              rules,
+              String.utf8Bytes(XmlDocument.text(document, value)),
+              base,
+              environmentEncoding,
+              Origin.Author,
+              environment,
+              limits,
+            )
+            return
+          }
+          _ => {}
+        }
+      }
+    }
+    _ => {
+      return
+    }
+  }
+  let mut text = Bytes.make()
+  let mut current = first
+  while true {
+    let id = match &current {
+      Option<XmlNodeId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    if XmlDocument.nodes(document)[id.index].kind == XmlNodeKind.Text {
+      let bytes = String.utf8Bytes(XmlDocument.text(document, id))
+      if Bytes.length(&text) > limits.maxInputBytes
+        || bytes.length > limits.maxInputBytes - Bytes.length(&text) {
+        fail CssError { kind: CssErrorKind.InputLimit, offset: id.index }
+      }
+      run Bytes.append(&mut text, bytes)
+    }
+    current = nextDescendant(document, node, id)
+  }
+  run catalog.addSheet(
+    rules,
+    Bytes.asSlice(&text),
+    base,
+    environmentEncoding,
+    Origin.Author,
+    environment,
+    limits,
+  )
+}
+
+/// Whether attribute `name` of element `element` is a presentation attribute.
+pub fn presentationAttribute(element: &[u8], name: &[u8]) -> bool {
+  return presentation(element, name).isSome()
+}
+
+// The property an animated attribute sets, where `presentation` is shadowed.
+fn animatedProperty(element: &[u8], name: &[u8]) -> Option<Property> {
+  return presentation(element, name)
+}
+
+fn gradientElement(element: &[u8]) -> bool {
+  return equal(element, b"linearGradient") || equal(element, b"radialGradient")
+}
+
+fn positionedElement(element: &[u8]) -> bool {
+  return equal(element, b"rect") || equal(element, b"foreignObject") || equal(element, b"image")
+    || equal(element, b"svg")
+    || equal(element, b"symbol")
+    || equal(element, b"use")
+}
+
+// https://svgwg.org/svg2-draft/styling.html#PresentationAttributes
+// SVG11 additions: https://www.w3.org/TR/2011/REC-SVG11-20110816/styling.html#UsingPresentationAttributes
+// Element tests run only for the properties that depend on the element.
+fn presentation(element: &[u8], name: &[u8]) -> Option<Property> {
+  if equal(name, b"gradientTransform") {
+    return if gradientElement(element) {
+      Option<Property>.Some { value: Property.Transform }
+    } else {
+      Option<Property>.None
+    }
+  }
+  if equal(name, b"patternTransform") {
+    return if equal(element, b"pattern") {
+      Option<Property>.Some { value: Property.Transform }
+    } else {
+      Option<Property>.None
+    }
+  }
+  let property = match &properties.lookup(name) {
+    Option<Property>.Some { value } => value
+    _ => {
+      return Option<Property>.None
+    }
+  }
+  if !equal(name, properties.name(property)) {
+    return Option<Property>.None
+  }
+  let allowed = match property {
+    Property.Cx => equal(element, b"circle") || equal(element, b"ellipse")
+    Property.Cy => equal(element, b"circle") || equal(element, b"ellipse")
+    Property.R => equal(element, b"circle")
+    Property.Rx => equal(element, b"ellipse") || equal(element, b"rect")
+    Property.Ry => equal(element, b"ellipse") || equal(element, b"rect")
+    Property.X => positionedElement(element)
+    Property.Y => positionedElement(element)
+    Property.Width => positionedElement(element)
+    Property.Height => positionedElement(element)
+    Property.D => equal(element, b"path")
+    Property.Fill => !equal(element, b"animate") && !equal(element, b"animateMotion")
+      && !equal(element, b"animateTransform")
+      && !equal(element, b"set")
+      && !equal(element, b"animateColor")
+    Property.Transform => !gradientElement(element) && !equal(element, b"pattern")
+    Property.AlignmentBaseline => true
+    Property.BaselineShift => true
+    Property.ClipPath => true
+    Property.ClipRule => true
+    Property.Color => true
+    Property.ColorInterpolation => true
+    Property.ColorInterpolationFilters => true
+    Property.Cursor => true
+    Property.Direction => true
+    Property.Display => true
+    Property.DominantBaseline => true
+    Property.FillOpacity => true
+    Property.FillRule => true
+    Property.Filter => true
+    Property.FloodColor => true
+    Property.FloodOpacity => true
+    Property.FontFamily => true
+    Property.FontSize => true
+    Property.FontSizeAdjust => true
+    Property.FontStretch => true
+    Property.FontStyle => true
+    Property.FontVariant => true
+    Property.FontWeight => true
+    Property.GlyphOrientationVertical => true
+    Property.ImageRendering => true
+    Property.LetterSpacing => true
+    Property.LightingColor => true
+    Property.MarkerEnd => true
+    Property.MarkerMid => true
+    Property.MarkerStart => true
+    Property.Mask => true
+    Property.MaskType => true
+    Property.Opacity => true
+    Property.Overflow => true
+    Property.PaintOrder => true
+    Property.PointerEvents => true
+    Property.ShapeRendering => true
+    Property.StopColor => true
+    Property.StopOpacity => true
+    Property.Stroke => true
+    Property.StrokeDasharray => true
+    Property.StrokeDashoffset => true
+    Property.StrokeLinecap => true
+    Property.StrokeLinejoin => true
+    Property.StrokeMiterlimit => true
+    Property.StrokeOpacity => true
+    Property.StrokeWidth => true
+    Property.TextAnchor => true
+    Property.TextDecoration => true
+    Property.TextOverflow => true
+    Property.TextRendering => true
+    Property.TransformOrigin => true
+    Property.UnicodeBidi => true
+    Property.VectorEffect => true
+    Property.Visibility => true
+    Property.WhiteSpace => true
+    Property.WordSpacing => true
+    Property.WritingMode => true
+    Property.Clip => true
+    Property.ColorProfile => true
+    Property.ColorRendering => true
+    Property.EnableBackground => true
+    Property.GlyphOrientationHorizontal => true
+    Property.Kerning => true
+
+    // The `marker` shorthand is a property but not a presentation attribute (SVG 2
+    // painting.html#MarkerShorthand; the 1.1 test painting-marker-04-f agrees).
+    _ => false
+  }
+  return if allowed {
+    Option<Property>.Some { value: property }
+  } else {
+    Option<Property>.None
+  }
+}
+
+effect fn collectSheets(
+  document: &XmlDocument,
+  catalog: &mut Catalog<'_>,
+  rules: RuleSetId,
+  base: usize,
+  nodeBases: &[usize],
+  mediaEnvironment: &Environment,
+  limits: &Limits,
+) -> ()
+  ! CssError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let collected = run sheets(document, limits)
+  let sourceEncoding = documentEncoding(document)
+
+  // Resolve the preferred set before applying sheets, including earlier alternate sheets.
+  // Media does not participate in selection of the preferred title.
+  let mut preferred = Option<usize>.None
+  let mut i: usize = 0
+  while i < collected.length() {
+    let sheet = &collected.asSlice()[i]
+    if !preferred.isSome() && !alternate(sheet) && title(document, sheet).length != 0 {
+      preferred = Option<usize>.Some { value: i }
+    }
+    i = i + 1
+  }
+  let preferredTitle = match &preferred {
+    Option<usize>.Some { value } => title(document, &collected.asSlice()[value])
+    _ => b""
+  }
+  i = 0
+  while i < collected.length() {
+    let sheet = &collected.asSlice()[i]
+    let name = title(document, sheet)
+    if (name.length == 0 && !alternate(sheet)) || equal(name, preferredTitle) {
+      match &sheet.* {
+        Sheet.Embedded { node } => {
+          let sheetBase = if node.index < nodeBases.length {
+            nodeBases[node.index]
+          } else {
+            base
+          }
+          if run catalog.matchesMedia(
+            attribute(document, node, "media"),
+            sheetBase,
+            mediaEnvironment,
+            limits,
+          ) {
+            run embedded(
+              &mut catalog.*,
+              rules,
+              document,
+              node,
+              sheetBase,
+              sourceEncoding,
+              mediaEnvironment,
+              limits,
+            )
+          }
+        }
+        Sheet.External { attributes } => {
+          if run catalog.matchesMedia(
+            pseudo(&attributes, "media"),
+            base,
+            mediaEnvironment,
+            limits,
+          ) {
+            let encoding = match &encoding.label(pseudo(&attributes, "charset")) {
+              Option<Encoding>.Some { value } => value
+              _ => sourceEncoding
+            }
+            let address = match &catalog.registeredBase(base) {
+              Option<&Url>.Some { value } => value
+              _ => {
+                fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+              }
+            }
+            let resolved = run Effect.result(Url.resolve(address, pseudo(&attributes, "href")))
+            match move resolved {
+              Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+                run catalog.addExternal(
+                  rules,
+                  move value,
+                  encoding,
+                  Origin.Author,
+                  mediaEnvironment,
+                  limits,
+                )
+              }
+              Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+                UrlError invalid => {
+                  if invalid == UrlError.InputLimit {
+                    fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+                  }
+                }
+                OutOfMemoryError exhausted => {
+                  fail move exhausted
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+}
+
+// Compile source attributes once; each occurrence cascades these same declarations
+// against its own inherited style and tree-scope selector matches.
+effect fn compileNodes(
+  document: &XmlDocument,
+  catalog: &mut Catalog<'_>,
+  rules: RuleSetId,
+  base: usize,
+  nodeBases: &[usize],
+  limits: &Limits,
+) -> SourceStyles
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let nodes = XmlDocument.nodes(document)
+  let mut result = run List<NodeDeclarations>.makeWithCapacity(nodes.length)
+  let mut transforms = HashMap<usize, usize>.make(Hash.seed(0))
+  let mut i: usize = 0
+  while i < nodes.length {
+    let node = XmlNodeId { index: i }
+    let nodeBase = if i < nodeBases.length {
+      nodeBases[i]
+    } else {
+      base
+    }
+    let start = catalog.declarations.length()
+    if nodes[i].kind == XmlNodeKind.Element && svg(document, node) {
+      let attrs = XmlDocument.attributes(document, node)
+      let mut a: usize = 0
+      while a < attrs.length {
+        if String.utf8Bytes(XmlDocument.attributeNamespaceUri(document, attrs[a])).length == 0 {
+          let name = String.utf8Bytes(XmlDocument.attributeLocalName(document, attrs[a]))
+          let element = String.utf8Bytes(XmlDocument.localName(document, node))
+          let template = equal(name, b"gradientTransform") || equal(name, b"patternTransform")
+            || (equal(name, b"transform")
+              && (equal(element, b"meshgradient") || equal(element, b"hatch")))
+
+          // An empty transform list is no CSS <transform-list>, so it is no
+          // declaration and does not block template inheritance (WPT
+          // *-transform-empty-attr).
+          let empty = template
+            && blank(String.utf8Bytes(XmlDocument.attributeValue(document, attrs[a])))
+          match &presentation(String.utf8Bytes(XmlDocument.localName(document, node)), name) {
+            Option<Property>.Some { value } => {
+              if empty {
+                a = a + 1
+                continue
+              }
+              let parsed = run catalog.addPresentation(
+                rules,
+                String.utf8Bytes(XmlDocument.attributeValue(document, attrs[a])),
+                nodeBase,
+                value,
+                limits,
+              )
+              if template {
+                if let Option<usize>.Some { value: declaration } = parsed {
+                  drop run transforms.insert(i, declaration)
+                }
+              }
+            }
+            _ => {}
+          }
+        }
+        a = a + 1
+      }
+    }
+    let presentation = TokenRange { start: start, end: catalog.declarations.length() }
+    let mut inline = TokenRange { start: presentation.end, end: presentation.end }
+    if nodes[i].kind == XmlNodeKind.Element && svg(document, node) {
+      match &(XmlDocument.attribute(document, node, "", "style")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => {
+          inline = run catalog.addInline(rules, value, nodeBase, limits)
+        }
+        _ => {}
+      }
+    }
+    let animatedStart = catalog.declarations.length()
+
+    // CSS Animations values come first, so later SMIL values win at the same origin.
+    if nodes[i].kind == XmlNodeKind.Element && svg(document, node) {
+      if let Option<&[u8]>.Some { value } = (XmlDocument.attribute(
+        document,
+        node,
+        animation.animated(),
+        "style",
+      )
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        drop run catalog.addInline(rules, value, nodeBase, limits)
+      }
+    }
+    if nodes[i].kind == XmlNodeKind.Element && svg(document, node) {
+      let attrs = XmlDocument.attributes(document, node)
+      let mut a: usize = 0
+      while a < attrs.length {
+        if equal(
+          String.utf8Bytes(XmlDocument.attributeNamespaceUri(document, attrs[a])),
+          String.utf8Bytes(animation.animated()),
+        ) {
+          let name = String.utf8Bytes(XmlDocument.attributeLocalName(document, attrs[a]))
+          if let Option<Property>.Some { value } = animatedProperty(
+            String.utf8Bytes(XmlDocument.localName(document, node)),
+            name,
+          ) {
+            drop run catalog.addPresentation(
+              rules,
+              String.utf8Bytes(XmlDocument.attributeValue(document, attrs[a])),
+              nodeBase,
+              value,
+              limits,
+            )
+          }
+        }
+        a = a + 1
+      }
+    }
+    let animatedRange = TokenRange { start: animatedStart, end: catalog.declarations.length() }
+    run result.append(
+      NodeDeclarations { presentation: presentation, inline: inline, animated: animatedRange },
+    )
+    i = i + 1
+  }
+  return SourceStyles { rules: rules, nodes: move result, templateTransforms: move transforms }
+}
+
+effect fn appendNodeCandidates(
+  node: &NodeDeclarations,
+  depth: usize,
+  candidates: &mut List<Candidate>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut declaration = node.presentation.start
+  while declaration < node.presentation.end {
+    let mut priority = Priority.make(Origin.Author, 0)
+    priority.encapsulationDepth = depth
+    run candidates.append(Candidate { declaration: declaration, priority: priority })
+    declaration = declaration + 1
+  }
+  declaration = node.inline.start
+  while declaration < node.inline.end {
+    let mut priority = Priority.make(Origin.Author, declaration + 1)
+    priority.encapsulationDepth = depth
+    priority.inline = true
+    run candidates.append(Candidate { declaration: declaration, priority: priority })
+    declaration = declaration + 1
+  }
+  declaration = node.animated.start
+  while declaration < node.animated.end {
+    let mut priority = Priority.make(Origin.Animation, declaration + 1)
+    priority.encapsulationDepth = depth
+    run candidates.append(Candidate { declaration: declaration, priority: priority })
+    declaration = declaration + 1
+  }
+}
+
+// A template presentation attribute participates in the HOST cascade. Copying
+// its computed transform afterwards would incorrectly override transform:none,
+// initial, inherit, and author stylesheet declarations on the host.
+// SVG whitespace: XML S, the separators of a transform list.
+fn blank(value: &[u8]) -> bool {
+  let mut i: usize = 0
+  while i < value.length {
+    if value[i] != 0x20 && value[i] != 0x09 && value[i] != 0x0A && value[i] != 0x0D {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn templateTransform(
+  graph: &Graph,
+  sources: &[SourceStyles],
+  templates: &HashMap<usize, OccurrenceId>,
+  node: usize,
+) -> Option<usize> {
+  let mut next: Option<OccurrenceId> = templates.get(node)
+  if next.isNone() {
+    return Option<usize>.None
+  }
+  let source = graph.occurrences.asSlice()[node].source
+  let document = graph.sourceDocument(source)
+
+  // An attribute counts as specified only when it parses: an empty or invalid
+  // value does not block inheritance from the template (WPT
+  // *-transform-empty-attr).
+  if sources[source.document.index].templateTransforms.get(source.node.index).isSome()
+    || (XmlDocument.attribute(document, source.node, "", "transform")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)).isSome() {
+    return Option<usize>.None
+  }
+  let mut remaining = graph.occurrences.length()
+  while let Option<OccurrenceId>.Some { value } = next {
+    if remaining == 0 {
+      return Option<usize>.None
+    }
+    remaining = remaining - 1
+    let target = graph.occurrences.asSlice()[value.index].source
+    let inherited = sources[target.document.index].templateTransforms.get(target.node.index)
+    if inherited.isSome() {
+      return inherited
+    }
+    next = templates.get(value.index)
+  }
+  return Option<usize>.None
+}
+
+// Independent source-document styling remains useful without instantiation.
+pub effect fn build<'a>(
+  document: &XmlDocument,
+  catalog: Catalog<'a>,
+  host: &HostContext<'_>,
+  mediaEnvironment: &Environment,
+  documentBase: Url,
+  limits: &Limits,
+) -> StyledDocument<'a>
+  ! CssError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = move catalog
+  let base = run catalog.registerBase(move documentBase)
+  let rules = run catalog.createRuleSet(
+    base,
+    Policy { mode: ProcessingMode.Static, limits: ResourceLimits.defaults() },
+  )
+
+  // About four values per node (presentation attributes, then computed values), so the
+  // store does not copy itself while doubling up from the initials.
+  run catalog.engine.values.reserve(XmlDocument.nodes(document).length * 4)
+
+  // A prepared catalog collected it under the first registered base, which base is.
+  if !catalog.hasUserAgentSheet() {
+    run catalog.addSheet(
+      RuleSetId { index: 0 },
+      uaSheet(),
+      base,
+      Encoding.Utf8,
+      Origin.UserAgent,
+      mediaEnvironment,
+      limits,
+    )
+  }
+
+  // At most one presentation declaration per attribute. Reserved before the sheets add
+  // theirs, so a large sheet's lists are not copied again for a few attributes.
+  run catalog.reservePresentations(XmlDocument.attributeCount(document))
+  run collectSheets(document, &mut catalog, rules, base, &[], mediaEnvironment, limits)
+  let declarations = run compileNodes(document, &mut catalog, rules, base, &[], limits)
+  let tree = run style_tree.make(document)
+  let nodes = XmlDocument.nodes(document)
+  let mut nodeStyles = run List<Option<StyleId>>.makeWithCapacity(nodes.length)
+  let mut context = MatchContext.make(XmlDocument.root(document).index, NO_ELEMENT)
+  let mut i: usize = 0
+  while i < nodes.length {
+    let node = XmlNodeId { index: i }
+    if nodes[i].kind != XmlNodeKind.Element {
+      run nodeStyles.append(Option<StyleId>.None)
+    } else {
+      let mut candidates = run catalog.matching(rules, &tree, i, &mut context)
+      run appendNodeCandidates(&declarations.nodes.asSlice()[i], 0, &mut candidates)
+      let parent = match &nodes[i].parent {
+        Option<XmlNodeId>.Some { value } => nodeStyles.asSlice()[value.index]
+        _ => Option<StyleId>.None
+      }
+      let style = run catalog.engine.build(
+        catalog.buffers.view(),
+        catalog.declarations.asSlice(),
+        candidates.asSlice(),
+        parent,
+        host,
+        limits,
+      )
+      run nodeStyles.append(Option<StyleId>.Some { value: style })
+    }
+    i = i + 1
+  }
+  return StyledDocument { catalog: move catalog, nodeStyles: move nodeStyles }
+}
+
+effect fn sourceBase(
+  graph: &Graph,
+  index: usize,
+  mapped: &mut List<usize>,
+  catalog: &mut Catalog<'_>,
+) -> usize
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let existing = mapped.asSlice()[index]
+  if existing != usize.MAX {
+    return existing
+  }
+  let base = run graph.urls.asSlice()[index].clone()
+  let registered = run catalog.registerBase(move base)
+  let mut entries = mapped.asMutSlice()
+  entries[index] = registered
+  return registered
+}
+
+// True when a computed reference property names at least one non-empty URL,
+// so buildGraph only gathers reference lists for values that can resolve.
+fn hasReference(store: &Store<'_>, id: ValueId) -> bool {
+  match &store.get(id).* {
+    Value.Paint { paint } => match &paint {
+      Paint.Server { url, fallback } => {
+        return store.text(url).length > 0
+      }
+      _ => {}
+    }
+    Value.Resource { url } => {
+      return store.text(url).length > 0
+    }
+    Value.Effect { value } => match &value {
+      EffectValue.ClipPath { source } => match &source {
+        ClipSource.Url { url } => {
+          return url.asSlice().length > 0
+        }
+        _ => {}
+      }
+      EffectValue.Masks { layers, resetBorder } => {
+        let mut layer: usize = 0
+        while layer < layers.length() {
+          if let Image.Url { url } = &layers.asSlice()[layer].image {
+            if url.asSlice().length > 0 {
+              return true
+            }
+          }
+          layer = layer + 1
+        }
+      }
+      EffectValue.Shapes { sources: shapes } => {
+        let mut source: usize = 0
+        while source < shapes.length() {
+          if let ClipSource.Url { url } = &shapes.asSlice()[source] {
+            if url.asSlice().length > 0 {
+              return true
+            }
+          }
+          source = source + 1
+        }
+      }
+      EffectValue.Filters { items } => {
+        let mut item: usize = 0
+        while item < items.length() {
+          if let Filter.Url { url } = &items.asSlice()[item] {
+            if url.asSlice().length > 0 {
+              return true
+            }
+          }
+          item = item + 1
+        }
+      }
+      _ => {}
+    }
+    _ => {}
+  }
+  return false
+}
+
+pub effect fn buildGraph<'a>(
+  graph: &mut Graph,
+  catalog: Catalog<'a>,
+  host: &HostContext<'_>,
+  mediaEnvironment: &Environment,
+  selection: Selection,
+  limits: &Limits,
+  options: &Options<'_>,
+) -> StyledGraph<'a>
+  ! CssError | ComputedError | StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = move catalog
+
+  // About four values per occurrence (presentation attributes, then computed values).
+  run catalog.engine.values.reserve(graph.occurrences.length() * 4)
+  let mut mapped = run List<usize>.makeWithCapacity(graph.urls.length())
+  let mut i: usize = 0
+  while i < graph.urls.length() {
+    run mapped.append(usize.MAX)
+    i = i + 1
+  }
+  let rootSource = graph.occurrences.asSlice()[graph.root.index].source
+  let rootBase = run sourceBase(
+    &graph.*,
+    graph.documents.asSlice()[rootSource.document.index].base,
+    &mut mapped,
+    &mut catalog,
+  )
+
+  // A prepared catalog collected it under the first registered base, which rootBase is.
+  if !catalog.hasUserAgentSheet() {
+    run catalog.addSheet(
+      RuleSetId { index: 0 },
+      uaSheet(),
+      rootBase,
+      Encoding.Utf8,
+      Origin.UserAgent,
+      mediaEnvironment,
+      limits,
+    )
+  }
+  let mut sources = run List<SourceStyles>.makeWithCapacity(graph.documents.length())
+  let mut metadata = TreeCache.make()
+  let mut styles = run List<StyleId>.makeWithCapacity(graph.occurrences.length())
+  let mut resources = HashMap<ResourceKey, OccurrenceId>.make(Hash.seed(0))
+  let mut templates = HashMap<usize, OccurrenceId>.make(Hash.seed(0))
+  let mut referenceCursor: usize = 0
+  let mut templateCursor: usize = 0
+  let mut targetNode = NO_ELEMENT
+  if let Option<SourceId>.Some { value } = &selection.target {
+    i = 0
+    while i < graph.occurrences.length() {
+      let occurrence = &graph.occurrences.asSlice()[i]
+      if occurrence.scope == 0 && occurrence.source.document.index == value.document.index
+        && occurrence.source.node.index == value.node.index {
+        targetNode = i
+        break
+      }
+      i = i + 1
+    }
+  }
+  let mut context = MatchContext.make(graph.root.index, targetNode)
+  let mut memo = MatchMemo.make()
+  while true {
+    run structure.expand(&mut graph.*, options)
+    while mapped.length() < graph.urls.length() {
+      run mapped.append(usize.MAX)
+    }
+    i = sources.length()
+    while i < graph.documents.length() {
+      let source = &graph.documents.asSlice()[i]
+      let base = run sourceBase(&graph.*, source.base, &mut mapped, &mut catalog)
+      let rules = run catalog.createRuleSet(base, source.policy)
+      let mut bases = run List<usize>.makeWithCapacity(source.nodeBases.length())
+      let mut node: usize = 0
+      while node < source.nodeBases.length() {
+        run bases.append(
+          run sourceBase(&graph.*, source.nodeBases.asSlice()[node], &mut mapped, &mut catalog),
+        )
+        node = node + 1
+      }
+
+      // At most one presentation declaration per attribute, reserved before the sheets.
+      run catalog.reservePresentations(XmlDocument.attributeCount(&source.document))
+      run collectSheets(
+        &source.document,
+        &mut catalog,
+        rules,
+        base,
+        bases.asSlice(),
+        mediaEnvironment,
+        limits,
+      )
+      let declarations = run compileNodes(
+        &source.document,
+        &mut catalog,
+        rules,
+        base,
+        bases.asSlice(),
+        limits,
+      )
+      run sources.append(move declarations)
+      i = i + 1
+    }
+    while templateCursor < graph.occurrences.length() {
+      let node = OccurrenceId { index: templateCursor }
+      if let Option<SourceId>.Some { value } = graph.templateSource(node) {
+        if let Option<OccurrenceId>.Some { value: target } = run graph.occurrence(node, value) {
+          drop run templates.insert(node.index, target)
+        }
+      }
+      templateCursor = templateCursor + 1
+    }
+    run metadata.extend(&graph.*)
+    let tree = occurrence_tree.make(&graph.*, &metadata)
+    i = styles.length()
+    if graph.occurrences.length() > i {
+      run catalog.engine.reserve(graph.occurrences.length() - i)
+      run styles.reserve(graph.occurrences.length() - i)
+    }
+    let mut candidates = List<Candidate>.make()
+    while i < graph.occurrences.length() {
+      let occurrence = &graph.occurrences.asSlice()[i]
+      let scope = &graph.scopes.asSlice()[occurrence.scope]
+      context.scope = scope.root.index
+      context.shadowHost = match &scope.host {
+        Option<OccurrenceId>.Some { value } => value.index
+        _ => NO_ELEMENT
+      }
+      let source = &sources.asSlice()[occurrence.source.document.index]
+
+      // Use copies of one source element share its element-local rule results. One list
+      // collects every occurrence's candidates in turn.
+      candidates.clear()
+      if scope.host.isSome() {
+        run catalog.matchingSharedInto(
+          source.rules,
+          &tree,
+          i,
+          &mut context,
+          u64.shiftLeft(usize.toU64(occurrence.source.document.index), 32)
+            | usize.toU64(occurrence.source.node.index),
+          &mut memo,
+          &mut candidates,
+        )
+      } else {
+        run catalog.matchingInto(source.rules, &tree, i, &mut context, &mut candidates)
+      }
+      let mut priorities = candidates.asMutSlice()
+      let mut c: usize = 0
+      while c < priorities.length {
+        priorities[c].priority.encapsulationDepth = scope.depth
+        c = c + 1
+      }
+      drop priorities
+      if let Option<usize>.Some { value } = templateTransform(
+        &graph.*,
+        sources.asSlice(),
+        &templates,
+        i,
+      ) {
+        let mut priority = Priority.make(Origin.Author, 0)
+        priority.encapsulationDepth = scope.depth
+        run candidates.append(Candidate { declaration: value, priority: priority })
+      }
+      run appendNodeCandidates(
+        &source.nodes.asSlice()[occurrence.source.node.index],
+        scope.depth,
+        &mut candidates,
+      )
+
+      // The inner scope's :host rules participate before inheritance into children.
+      match &occurrence.shadow {
+        Option<OccurrenceId>.Some { value } => {
+          let inner = &graph.scopes.asSlice()[graph.occurrences.asSlice()[value.index].scope]
+          context.shadowHost = i
+          let innerCandidates = run catalog.matching(
+            sources.asSlice()[inner.document.index].rules,
+            &tree,
+            i,
+            &mut context,
+          )
+          c = 0
+          while c < innerCandidates.length() {
+            let mut candidate = innerCandidates.asSlice()[c]
+            candidate.priority.encapsulationDepth = inner.depth
+            run candidates.append(candidate)
+            c = c + 1
+          }
+        }
+        _ => {}
+      }
+      let parent = match &occurrence.parent {
+        Option<OccurrenceId>.Some { value } => Option<StyleId>.some(styles.asSlice()[value.index])
+        _ => Option<StyleId>.None
+      }
+      let style = run catalog.engine.build(
+        catalog.buffers.view(),
+        catalog.declarations.asSlice(),
+        candidates.asSlice(),
+        parent,
+        host,
+        limits,
+      )
+      run styles.append(style)
+      i = i + 1
+    }
+    drop tree
+
+    // Only newly computed occurrences are inspected. Their URLs may append source
+    // documents, raw shadow forests and declarations for the next incremental pass.
+    let end = styles.length()
+    while referenceCursor < end {
+      let node = OccurrenceId { index: referenceCursor }
+      let referenceProperties = [
+        Property.Fill,
+        Property.Stroke,
+        Property.MarkerStart,
+        Property.MarkerMid,
+        Property.MarkerEnd,
+        Property.ClipPath,
+        Property.MaskImage,
+        Property.Filter,
+        Property.ShapeInside,
+        Property.ShapeSubtract,
+      ]
+      let mut p: usize = 0
+      while p < referenceProperties.length {
+        let property = referenceProperties[p]
+        if let Option<ComputedValue>.Some { value: entry } = catalog.engine.get(
+          styles.asSlice()[node.index],
+          property,
+        ) {
+          if !hasReference(&catalog.engine.values, entry.value) {
+            p = p + 1
+            continue
+          }
+          let mut references = List<Bytes>.make()
+          let mut reference = Bytes.make()
+          match &catalog.engine.values.get(entry.value).* {
+            Value.Paint { paint } => match &paint {
+              Paint.Server { url, fallback } => {
+                run reference.append(catalog.engine.values.text(url))
+              }
+              _ => {}
+            }
+            Value.Resource { url } => {
+              run reference.append(catalog.engine.values.text(url))
+            }
+            Value.Effect { value } => match &value {
+              EffectValue.ClipPath { source } => match &source {
+                ClipSource.Url { url } => {
+                  run reference.append(url.asSlice())
+                }
+                _ => {}
+              }
+              EffectValue.Masks { layers, resetBorder } => {
+                let mut layer: usize = 0
+                while layer < layers.length() {
+                  let mut urlBytes = Bytes.make()
+                  match &layers.asSlice()[layer].image {
+                    Image.Url { url } => {
+                      run urlBytes.append(url.asSlice())
+                    }
+                    _ => {}
+                  }
+                  run references.append(move urlBytes)
+                  layer = layer + 1
+                }
+              }
+              EffectValue.Shapes { sources: shapes } => {
+                let mut source: usize = 0
+                while source < shapes.length() {
+                  let mut urlBytes = Bytes.make()
+                  if let ClipSource.Url { url } = &shapes.asSlice()[source] {
+                    run urlBytes.append(url.asSlice())
+                  }
+                  run references.append(move urlBytes)
+                  source = source + 1
+                }
+              }
+              EffectValue.Filters { items } => {
+                let mut item: usize = 0
+                while item < items.length() {
+                  let mut urlBytes = Bytes.make()
+                  match &items.asSlice()[item] {
+                    Filter.Url { url } => {
+                      run urlBytes.append(url.asSlice())
+                    }
+                    _ => {}
+                  }
+                  run references.append(move urlBytes)
+                  item = item + 1
+                }
+              }
+              _ => {}
+            }
+            _ => {}
+          }
+          if references.length() == 0 {
+            run references.append(move reference)
+          }
+          let mut resourceLayer: usize = 0
+          while resourceLayer < references.length() {
+            let referenceBytes = references.asSlice()[resourceLayer].asSlice()
+            if referenceBytes.length > 0 {
+              let declarationBase = match &entry.sourceBuffer {
+                Option<usize>.Some { value: buffer } => catalog.base(buffer)
+                _ => Option<&'static Url>.None
+              }
+              let declarationDocument = match &entry.sourceBuffer {
+                Option<usize>.Some { value: buffer } => catalog.sourceDocument(buffer)
+                _ => Option<&'static Url>.None
+              }
+              let target = run structure.resolveResource(
+                &mut graph.*,
+                node,
+                declarationDocument,
+                declarationBase,
+                referenceBytes,
+                options,
+              )
+              if let Option<OccurrenceId>.Some { value } = target {
+                let targetSource = graph.occurrences.asSlice()[value.index].source
+                let targetDocument = graph.sourceDocument(targetSource)
+                let name = String.utf8Bytes(
+                  XmlDocument.localName(targetDocument, targetSource.node),
+                )
+                let paint = property == Property.Fill || property == Property.Stroke
+                if svg(targetDocument, targetSource.node)
+                  && ((paint
+                    && (equal(name, b"linearGradient") || equal(name, b"radialGradient")
+                      || equal(name, b"pattern")
+                      || equal(name, b"meshgradient")
+                      || equal(name, b"hatch")))
+                    || (property == Property.ClipPath && equal(name, b"clipPath"))
+                    || (property == Property.MaskImage && equal(name, b"mask"))
+                    || (property == Property.Filter && equal(name, b"filter"))
+                    || ((property == Property.ShapeInside || property == Property.ShapeSubtract)
+                      && shapeElement(name))
+                    || (!paint && property != Property.ClipPath && property != Property.MaskImage
+                      && property != Property.Filter
+                      && property != Property.ShapeInside
+                      && property != Property.ShapeSubtract
+                      && equal(name, b"marker"))) {
+                  let ignored = run resources.insert(
+                    ResourceKey {
+                      node: node.index,
+                      property: properties.index(property),
+                      layer: resourceLayer,
+                    },
+                    value,
+                  )
+                  drop ignored
+                }
+              }
+            }
+            resourceLayer = resourceLayer + 1
+          }
+        }
+        p = p + 1
+      }
+      referenceCursor = referenceCursor + 1
+    }
+    if styles.length() == graph.occurrences.length() {
+      break
+    }
+  }
+  return StyledGraph {
+    catalog: move catalog,
+    styles: move styles,
+    selection: move selection,
+    resources: move resources,
+    templates: move templates,
+  }
+}
+
+/// The SVG basic shapes and `path`, which `shape-inside` and `shape-subtract` may reference.
+fn shapeElement(name: &[u8]) -> bool {
+  return equal(name, b"path") || equal(name, b"rect") || equal(name, b"circle")
+    || equal(name, b"ellipse")
+    || equal(name, b"line")
+    || equal(name, b"polyline")
+    || equal(name, b"polygon")
+}

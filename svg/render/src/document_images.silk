@@ -1,0 +1,111 @@
+//! Independent secure styling and intrinsic metadata for retained SVG responses.
+import silk.text.string { String }
+import svg_core.image_assets { Store, DocumentSource, DocumentMetadata }
+import svg_core.structure { StructureError }
+import svg_core.structure
+import svg_core.scene { RenderError }
+import svg_core.resources { Resolver, ResourceError }
+import svg_core.svg_intrinsic
+import svg_core.url { Url }
+import svg_css.computed { StyleId }
+import svg_geometry.geometry { Size, Rect }
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.svg
+import silk.xml.document { XmlDocument }
+import environment { Environment }
+import environment
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+pub effect fn inspect(source: &DocumentSource, host: &Environment<'_, '_>) -> DocumentMetadata
+  ! StructureError | ResourceError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let base = match &source.response.finalUrl {
+    Option<Url>.Some { value } => &value
+    _ => &source.request
+  }
+  let mut local = environment.embedded(host, base, Size.new(300.0, 150.0))
+  local.structure.fragment = source.request.fragment()
+  let mut graph = run structure.buildResponse(&source.response, &source.request, &local.structure)
+  let styles = run environment.styles(&mut graph, &local)
+  let rootStyle = match &styles.nodeStyle(graph.root) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let root = graph.occurrences.asSlice()[graph.root.index].source
+  let document = graph.sourceDocument(root)
+  let box = match &styles.selection.viewBox {
+    Option<Rect>.Some { value } => Option<Rect>.some(value)
+    _ => match &(XmlDocument.attribute(document, root.node, "", "viewBox")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => svg.viewBox(value)
+      _ => Option<Rect>.None
+    }
+  }
+  let aspect = match &styles.selection.aspectRatio {
+    Option<AspectRatio>.Some { value } => Option<AspectRatio>.some(value)
+    _ => match &(XmlDocument.attribute(document, root.node, "", "preserveAspectRatio")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => svg.aspectRatio(value)
+      _ => Option<AspectRatio>.None
+    }
+  }
+  return DocumentMetadata {
+    natural: svg_intrinsic.measure(&styles.catalog.engine, rootStyle, box),
+    aspect: aspect,
+  }
+}
+
+/// Broken image documents remain unprepared. Aggregate/resource limits and
+/// allocator failures are explicit; they never silently remove part of a scene.
+pub effect fn prepare(store: &mut Store, host: &Environment<'_, '_>) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut i: usize = 0
+  while i < store.documents.length() {
+    let result = run Effect.result(inspect(&store.documents.asSlice()[i], host))
+    match move result {
+      Result<
+        DocumentMetadata,
+        StructureError | ResourceError | RenderError | OutOfMemoryError
+      >.Success {
+        value
+      } => {
+        let entries = store.documents.asMutSlice()
+        entries[i].metadata = Option<DocumentMetadata>.some(move value)
+      }
+      Result<
+        DocumentMetadata,
+        StructureError | ResourceError | RenderError | OutOfMemoryError
+      >.Failure {
+        error
+      } => {
+        match &error {
+          OutOfMemoryError problem => {
+            fail OutOfMemoryError {}
+          }
+          StructureError problem => {
+            if problem == StructureError.TooLarge {
+              fail RenderError.TooLarge
+            }
+          }
+          ResourceError problem => {
+            if problem == ResourceError.TooLarge {
+              fail RenderError.TooLarge
+            }
+          }
+          RenderError problem => {
+            if problem == RenderError.TooLarge {
+              fail problem
+            }
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+}

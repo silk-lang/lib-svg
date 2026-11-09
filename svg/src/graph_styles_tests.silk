@@ -1,0 +1,751 @@
+//! Computed values across immutable source documents and instantiated selector scopes.
+import silk.text.string { String }
+import document_styles { StyledGraph }
+import document_styles
+import structure { Graph, SourceId, OccurrenceId, Options, StructureError }
+import structure
+import stylesheets { Catalog }
+import view_selection { Selection }
+import resources { Resolver, Response, ResourceKind, ResourceError }
+import url { Url, UrlError }
+import silk.xml.document { XmlDocument }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.computed { HostContext, StyleId, ComputedValue, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { Value, ValueId, Paint, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.media_features { Environment }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+struct FixtureResolver {}
+
+impl FixtureResolver {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    let mut mime: &[u8] = b"image/svg+xml"
+    let resource = Url.withoutFragment(address)
+    let mut finalAddress = resource
+    let source = if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/shared.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><style>.shared{stroke-opacity:.6} .source rect{stroke-width:99px} rect{width:2em;height:var(--height)}</style><g class='source'><rect id='same' class='shared'/></g></svg>"
+    } else if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/nested.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><style>:host{stroke-width:7px;stroke-opacity:.7!important} :host(#nested){stroke-opacity:.9!important}</style><defs><rect id='leaf'/></defs><g id='bundle'><use id='nested' href='#leaf' style='stroke-width:11px;stroke-opacity:.4!important'/></g></svg>"
+    } else if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/paint.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><style xml:base='../css/external/'>.paint{fill:url(#external-gradient);stroke:url(texture.svg#p)}</style><g id='paint' class='paint'><rect id='paint-child'/></g></svg>"
+    } else if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/resources.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><style>.ordinary marker{stroke-width:8px}:host(#external){stroke-opacity:.6}stop+stop{stop-opacity:.4}</style><g class='ordinary'><linearGradient id='base'><stop id='s1'/><stop id='s2'/></linearGradient><radialGradient id='middle' href='#base'/><marker id='m'><path id='mark-content' fill='url(#base)'/></marker><pattern id='tile'><rect id='tile-a' fill='url(#base)'/><circle id='tile-b'/></pattern></g></svg>"
+    } else if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/chain.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='gradient'/><g id='bundle'><rect id='chain-paint' fill='url(next.svg#g)'/></g></svg>"
+    } else if kind == ResourceKind.Document
+      && equal(resource, b"https://example.test/lib/next.svg") {
+      b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='g'><stop/></linearGradient></svg>"
+    } else if kind == ResourceKind.StyleSheet
+      && equal(resource, b"https://example.test/css/resource.css") {
+      mime = b"text/css"
+      finalAddress = b"https://example.test/styles/final/resource.css"
+      b"#shape{fill:url(#local);stroke:url(../../lib/resources.svg#base)}"
+    } else if kind == ResourceKind.StyleSheet
+      && equal(resource, b"https://example.test/css/main.css") {
+      mime = b"text/css"
+      b"#main-paint{fill:url(#main-gradient);stroke:url(../images/main.svg#p)}"
+    } else {
+      fail ResourceError.Io
+    }
+    let parsed = run Effect.result(Url.parseAbsolute(finalAddress))
+    let finalUrl = match move parsed {
+      Result<Url, UrlError | OutOfMemoryError>.Success { value } => move value
+      Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+        UrlError invalid => {
+          fail ResourceError.InvalidData
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+    return Response {
+      bytes: run Bytes.copy(source),
+      finalUrl: Option<Url>.Some { value: move finalUrl },
+      mediaType: Option<Bytes>.Some { value: run Bytes.copy(mime) },
+      charset: Option<Bytes>.None,
+    }
+  }
+}
+
+impl Resolver for FixtureResolver {
+  fetch: FixtureResolver.fetch
+}
+
+struct Fixture {
+  graph: Graph,
+  styled: StyledGraph<'static>,
+}
+
+effect fn fixtureWithOptions(data: &[u8], options: &Options<'_>) -> Fixture
+  ! StructureError | CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://example.test/art/main.svg")
+  let mut graph = run structure.build(data, &base, options)
+  let mut catalog = run Catalog<'static>.make()
+  let buffer = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &buffer, range: buffer.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(100.0, 100.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  let styled = run document_styles.buildGraph<'static>(
+    &mut graph,
+    move catalog,
+    &host,
+    &Environment.headless(100.0, 100.0),
+    Selection.empty(),
+    &Limits.make(),
+    options,
+  )
+  return Fixture { graph: move graph, styled: move styled }
+}
+
+effect fn fixture(data: &[u8]) -> Fixture
+  ! StructureError | CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  return run fixtureWithOptions(data, &Options.defaults())
+}
+
+effect fn required(value: Option<OccurrenceId>) -> OccurrenceId
+  ! AssertionError<'static> {
+  run Testing.expect(value.isSome(), "expected resolved occurrence")
+  return value.unwrapOr(OccurrenceId { index: 0 })
+}
+
+fn hasId(graph: &Graph, source: SourceId, id: &[u8]) -> bool {
+  return match &(XmlDocument.attribute(graph.sourceDocument(source), source.node, "", "id")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => equal(value, id)
+    _ => false
+  }
+}
+
+// Identify instances by their source ID attribute and immediate scope's host ID,
+// not arena position or private stylesheet/declaration allocation layout.
+fn named(result: &Fixture, id: &[u8], host: &[u8]) -> Option<StyleId> {
+  let mut i: usize = 0
+  while i < result.graph.occurrences.length() {
+    let occurrence = &result.graph.occurrences.asSlice()[i]
+    if hasId(&result.graph, occurrence.source, id) {
+      let correctScope = match &result.graph.scopes.asSlice()[occurrence.scope].host {
+        Option<OccurrenceId>.Some { value } => hasId(
+          &result.graph,
+          result.graph.occurrences.asSlice()[value.index].source,
+          host,
+        )
+        _ => host.length == 0
+      }
+      if correctScope {
+        return result.styled.nodeStyle(OccurrenceId { index: i })
+      }
+    }
+    i = i + 1
+  }
+  return Option<StyleId>.None
+}
+
+fn number(result: &Fixture, id: &[u8], host: &[u8], property: Property, expected: f64) -> bool {
+  return match &named(result, id, host) {
+    Option<StyleId>.Some { value } => match &result.styled.catalog.engine.number(
+      value,
+      property,
+      100.0,
+    ) {
+      Option<f64>.Some { value: actual } => actual == expected
+      _ => false
+    }
+    _ => false
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance
+// Pin abca334257fb3646e1ae5a5645a08621b4738a44e05c6d470bae03f5fd21ff62.
+test effect fn externalRulesRematchWithoutSharingInstanceComputedDimensions() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>#same.shared{stroke-width:9px;stroke-opacity:.1}</style><rect id='same' class='shared'/><use id='small' href='../lib/shared.svg#same' style='font-size:10px;stroke-width:3px;--height:3em'/><use id='large' href='../lib/shared.svg#same' style='font-size:20px;stroke-width:5px;--height:4em'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&result, b"same", b"", Property.StrokeWidth, 9.0)
+      && number(&result, b"same", b"", Property.StrokeOpacity, 0.1)
+      && number(&result, b"same", b"small", Property.StrokeOpacity, 0.6)
+      && number(&result, b"same", b"large", Property.StrokeOpacity, 0.6),
+    "same IDs/classes in separate documents do not leak stylesheet rules in either direction",
+  )
+  run Testing.expect(
+    number(&result, b"same", b"small", Property.StrokeWidth, 3.0)
+      && number(&result, b"same", b"large", Property.StrokeWidth, 5.0),
+    "source ancestor selector stops matching the referenced root, which inherits from each use",
+  )
+  run Testing.expect(
+    number(&result, b"same", b"small", Property.Width, 20.0)
+      && number(&result, b"same", b"large", Property.Width, 40.0)
+      && number(&result, b"same", b"small", Property.Height, 30.0)
+      && number(&result, b"same", b"large", Property.Height, 80.0),
+    "shared source declarations compute against each host's font size and inherited variables",
+  )
+}
+
+// Use copies of one source element share its element-only selector results, but not
+// positional ones: the same rect is a child of the cloned g in two copies and the
+// shadow root itself in another, so only those two match `g > rect`.
+test effect fn copiesOfOneSourceRematchPositionalRules() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>g > rect{stroke-width:5px} .c{stroke-opacity:.5} rect:not(.d){fill-opacity:.25}</style><defs><g id='g'><rect id='r' class='c'/></g></defs><use id='leaf' href='#r'/><use id='whole' href='#g'/><use id='again' href='#r'/><use id='later' href='#g'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&result, b"r", b"leaf", Property.StrokeWidth, 1.0)
+      && number(&result, b"r", b"whole", Property.StrokeWidth, 5.0)
+      && number(&result, b"r", b"again", Property.StrokeWidth, 1.0)
+      && number(&result, b"r", b"later", Property.StrokeWidth, 5.0),
+    "a positional rule is matched again for each copy",
+  )
+  run Testing.expect(
+    number(&result, b"r", b"leaf", Property.StrokeOpacity, 0.5)
+      && number(&result, b"r", b"whole", Property.StrokeOpacity, 0.5)
+      && number(&result, b"r", b"again", Property.FillOpacity, 0.25)
+      && number(&result, b"r", b"later", Property.FillOpacity, 0.25),
+    "element-only rules apply to every copy",
+  )
+}
+
+// https://www.w3.org/TR/css-cascade-4/#cascade-sort
+// https://drafts.csswg.org/css-shadow-1/#host-selector
+// Shadow pin c84bdd0453ff210fa95fb95b118d7a8d365f189ea8fab1ee7db791f199fe1db4.
+test effect fn hostEncapsulationPrecedenceInvertsForImportantAtEachNestedScope() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='outer' href='../lib/nested.svg#bundle' style='stroke-width:3px;stroke-opacity:.2!important'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&result, b"outer", b"", Property.StrokeWidth, 3.0)
+      && number(&result, b"outer", b"", Property.StrokeOpacity, 0.7)
+      && number(&result, b"bundle", b"outer", Property.StrokeWidth, 3.0)
+      && number(&result, b"bundle", b"outer", Property.StrokeOpacity, 0.7),
+    "including-document normal wins, external host-important beats including inline-important before inheritance",
+  )
+  run Testing.expect(
+    number(&result, b"nested", b"outer", Property.StrokeWidth, 11.0)
+      && number(&result, b"nested", b"outer", Property.StrokeOpacity, 0.9)
+      && number(&result, b"leaf", b"nested", Property.StrokeWidth, 11.0)
+      && number(&result, b"leaf", b"nested", Property.StrokeOpacity, 0.9),
+    "nested scope's host-important wins while outer normal remains authoritative, and the leaf inherits both",
+  )
+}
+
+fn paintProvenance(
+  result: &Fixture,
+  id: &[u8],
+  host: &[u8],
+  property: Property,
+  expectedReference: &[u8],
+  expectedDocument: &[u8],
+  expectedBase: &[u8],
+) -> bool {
+  let style = match &named(result, id, host) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  let entry = match &result.styled.catalog.engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  let typedReference = match &result.styled.catalog.engine.values.get(entry.value).* {
+    Value.Paint { paint } => match &paint {
+      Paint.Server { url, fallback } => equal(
+        result.styled.catalog.engine.values.text(url),
+        expectedReference,
+      )
+      _ => false
+    }
+    _ => false
+  }
+  let buffer = match &entry.sourceBuffer {
+    Option<usize>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  let documentRetained = match &result.styled.catalog.sourceDocument(buffer) {
+    Option<&Url>.Some { value } => equal(value.bytes(), expectedDocument)
+    _ => false
+  }
+  let baseRetained = match &result.styled.catalog.base(buffer) {
+    Option<&Url>.Some { value } => equal(value.bytes(), expectedBase)
+    _ => false
+  }
+  return typedReference && documentRetained && baseRetained
+}
+
+// https://www.w3.org/TR/css-values-3/#local-urls
+// https://www.w3.org/TR/css-values-3/#relative-urls
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance
+// Assert the typed reference and both consumer-visible bases, not token/arena indices.
+test effect fn paintReferencesRetainDocumentAndStylesheetBasesThroughInheritance() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<?xml-stylesheet href='../css/main.css'?><svg xmlns='http://www.w3.org/2000/svg'><rect id='main-paint'/><use id='external' href='../lib/paint.svg#paint'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    paintProvenance(
+      &result,
+      b"main-paint",
+      b"",
+      Property.Fill,
+      b"#main-gradient",
+      b"https://example.test/art/main.svg",
+      b"https://example.test/css/main.css",
+    )
+      && paintProvenance(
+        &result,
+        b"main-paint",
+        b"",
+        Property.Stroke,
+        b"../images/main.svg#p",
+        b"https://example.test/art/main.svg",
+        b"https://example.test/css/main.css",
+      ),
+    "external CSS retains the including source document for local fragments and the stylesheet base for relative URLs",
+  )
+  run Testing.expect(
+    paintProvenance(
+      &result,
+      b"paint",
+      b"external",
+      Property.Fill,
+      b"#external-gradient",
+      b"https://example.test/lib/paint.svg",
+      b"https://example.test/css/external/",
+    )
+      && paintProvenance(
+        &result,
+        b"paint",
+        b"external",
+        Property.Stroke,
+        b"texture.svg#p",
+        b"https://example.test/lib/paint.svg",
+        b"https://example.test/css/external/",
+      )
+      && paintProvenance(
+        &result,
+        b"paint-child",
+        b"external",
+        Property.Fill,
+        b"#external-gradient",
+        b"https://example.test/lib/paint.svg",
+        b"https://example.test/css/external/",
+      )
+      && paintProvenance(
+        &result,
+        b"paint-child",
+        b"external",
+        Property.Stroke,
+        b"texture.svg#p",
+        b"https://example.test/lib/paint.svg",
+        b"https://example.test/css/external/",
+      ),
+    "external template XML Base affects stylesheet-relative URLs without rebasing source-local fragments or inherited paint",
+  )
+}
+
+fn occurrence(result: &Fixture, id: &[u8], shadow: bool) -> Option<OccurrenceId> {
+  let mut i: usize = 0
+  while i < result.graph.occurrences.length() {
+    let entry = &result.graph.occurrences.asSlice()[i]
+    if hasId(&result.graph, entry.source, id)
+      && result.graph.scopes.asSlice()[entry.scope].host.isSome() == shadow {
+      return Option<OccurrenceId>.some(OccurrenceId { index: i })
+    }
+    i = i + 1
+  }
+  return Option<OccurrenceId>.None
+}
+
+// Pinned SVG2 pservers.html#PaintServerTemplates, SHA256 25529cd8fee8d915fdd673f3a2a8053ba3ee060661c07e6a0f52ba16babf607f.
+test effect fn paintTemplatesCloneSiblingChildrenAndInheritHostStyle() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>stop+stop{stop-opacity:.4}:host(#derived){stroke-width:7px}</style><linearGradient id='base'><stop id='first'/><stop id='second'/></linearGradient><radialGradient id='middle' href='#base'/><linearGradient id='derived' href='#middle'><desc>description only</desc></linearGradient><rect id='shape' fill='url(#derived)'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&result, b"first", b"derived", Property.StrokeWidth, 7.0)
+      && number(&result, b"second", b"derived", Property.StopOpacity, 0.4),
+    "template children share a selector scope and inherit after host rules",
+  )
+  let shape = run required(occurrence(&result, b"shape", false))
+  let target = run required(result.styled.resource(shape, Property.Fill))
+  run Testing.expect(
+    hasId(&result.graph, result.graph.occurrences.asSlice()[target.index].source, b"derived")
+      && result.styled.nodeStyle(target).isSome()
+      && result.styled.template(target).isSome(),
+    "resource and direct compatible template are fully styled",
+  )
+}
+
+// Pinned SVG2 pservers.html#PaintServerTemplates and linking.html#processingURL.
+test effect fn paintTemplateCyclesAndIncompatibleKindsAreIgnored() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='a' href='#b'/><radialGradient id='b' href='#a'/><pattern id='p' href='#a'/><rect id='shape' fill='url(#a)' marker-start='url(#m)'/><marker id='m'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let p = run required(occurrence(&result, b"p", false))
+  let a = run required(occurrence(&result, b"a", false))
+  let shape = run required(occurrence(&result, b"shape", false))
+  run Testing.expect(
+    result.styled.template(p).isNone()
+      && result.graph.occurrences.asSlice()[a.index].shadow.isNone()
+      && result.styled.resource(shape, Property.MarkerStart).isSome(),
+    "cyclic child chains terminate and patterns cannot template gradients",
+  )
+}
+
+// Pinned SVG2 struct.html#UseStyleInheritance; CSS Values #local-urls.
+test effect fn paintFragmentsPreferContainingShadowScope() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='bundle'><linearGradient id='g'><stop/></linearGradient><rect id='shape' fill='url(#g)'/></g><use href='#bundle'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let shape = run required(occurrence(&result, b"shape", true))
+  let target = run required(result.styled.resource(shape, Property.Fill))
+  run Testing.expect(
+    result.graph.occurrences.asSlice()[target.index].scope
+      == result.graph.occurrences.asSlice()[shape.index].scope
+      && result.styled.nodeStyle(target).isSome(),
+    "fragment paint resolves to cloned definition",
+  )
+}
+
+// Pinned SVG2 pservers.html#PaintServerTemplates and styling.html#StylingSVGContent.
+test effect fn externalTemplateDefinitionsRetainOrdinaryAncestorsAndHostRules() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='external' href='../lib/resources.svg#middle'/><rect id='shape' fill='url(#external)' marker-end='url(../lib/resources.svg#m)'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let shape = run required(occurrence(&result, b"shape", false))
+  let marker = run required(result.styled.resource(shape, Property.MarkerEnd))
+  run Testing.expect(
+    number(&result, b"s2", b"external", Property.StopOpacity, 0.4)
+      && number(&result, b"s1", b"external", Property.StrokeOpacity, 0.6)
+      && number(&result, b"m", b"", Property.StrokeWidth, 8.0)
+      && result.styled.nodeStyle(marker).isSome(),
+    "external ordinary ancestor rules and cloned host rules both compute",
+  )
+  let mut i: usize = 0
+  while i < result.graph.occurrences.length() {
+    run Testing.expect(
+      result.styled.nodeStyle(OccurrenceId { index: i }).isSome(),
+      "closure styles every occurrence",
+    )
+    i = i + 1
+  }
+}
+
+// CSS Values #relative-urls and #local-urls; SVG2 linking.html#processingURL.
+test effect fn computedStylesheetReferencesUseRedirectBaseAndDocumentFragments() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<?xml-stylesheet href='../css/resource.css'?><svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='local'/><rect id='shape'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let shape = run required(occurrence(&result, b"shape", false))
+  let fill = run required(result.styled.resource(shape, Property.Fill))
+  let stroke = run required(result.styled.resource(shape, Property.Stroke))
+  run Testing.expect(
+    hasId(&result.graph, result.graph.occurrences.asSlice()[fill.index].source, b"local")
+      && hasId(&result.graph, result.graph.occurrences.asSlice()[stroke.index].source, b"base"),
+    "fragment uses source document while stylesheet-relative URL follows redirected stylesheet base",
+  )
+}
+
+// SVG2 conform.html#secure-static-mode and struct.html#UseStyleInheritance.
+test effect fn secureOrdinarySourcesCannotPoisonOrBypassIncludingCloneCache() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use href='../lib/chain.svg#bundle'/><rect fill='url(../lib/next.svg#g)'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let clone = run required(occurrence(&result, b"chain-paint", true))
+  let ordinary = run required(occurrence(&result, b"chain-paint", false))
+  run Testing.expect(
+    result.styled.resource(clone, Property.Fill).isSome()
+      && result.styled.resource(ordinary, Property.Fill).isNone(),
+    "including scope can load resources despite secure source denial; successful cache cannot authorize secure source",
+  )
+}
+
+// SVG2 pservers.html#PaintServerTemplates: recursive templates subject to security limits.
+test effect fn templateReferenceAndOccurrenceBudgetsAreEnforced() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let mut options = Options.defaults()
+  options.limits.maxReferenceDepth = 1
+  let result = run Effect.result(
+    fixtureWithOptions(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='a' href='#b'/><linearGradient id='b' href='#c'/><linearGradient id='c'><stop/></linearGradient></svg>",
+      &options,
+    ),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let limited = match &result {
+    Result<
+      Fixture,
+      StructureError | CssError | UrlError | ComputedError | OutOfMemoryError
+    >.Failure {
+      error
+    } => match &error {
+      StructureError value => value == StructureError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(limited, "template href depth is bounded before cloning")
+}
+
+// SVG2 conform.html#secure-static-mode: a denied lookup is not a cached resolution.
+test effect fn secureDenialBeforeCloneStillAllowsLaterIncludingReference() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient href='../lib/chain.svg#gradient'/><g><g><g><use href='../lib/chain.svg#bundle'/></g></g></g></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let ordinary = run required(occurrence(&result, b"chain-paint", false))
+  let clone = run required(occurrence(&result, b"chain-paint", true))
+  run Testing.expect(
+    ordinary.index < clone.index && result.styled.resource(ordinary, Property.Fill).isNone()
+      && result.styled.resource(clone, Property.Fill).isSome(),
+    "secure source resolves first but does not poison the later authorized clone",
+  )
+}
+
+// SVG2 pservers.html#PaintServerTemplates; conform.html#ConformingSVGViewers.
+test effect fn paintClosureEnforcesExternalBytesAndCloneCounts() -> ()
+  ! OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg'><rect fill='url(../lib/resources.svg#base)'/></svg>"
+  let mut options = Options.defaults()
+  options.limits.maxTotalBytes = source.length
+  let bytes = run Effect.result(fixtureWithOptions(source, &options))
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let bytesLimited = match &bytes {
+    Result<
+      Fixture,
+      StructureError | CssError | UrlError | ComputedError | OutOfMemoryError
+    >.Failure {
+      error
+    } => match &error {
+      StructureError value => value == StructureError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(bytesLimited, "computed external references obey remaining aggregate bytes")
+  options = Options.defaults()
+  options.limits.maxOccurrences = 6
+  let clones = run Effect.result(
+    fixtureWithOptions(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><linearGradient id='a'><stop/><stop/></linearGradient><linearGradient href='#a'/></svg>",
+      &options,
+    ),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let clonesLimited = match &clones {
+    Result<
+      Fixture,
+      StructureError | CssError | UrlError | ComputedError | OutOfMemoryError
+    >.Failure {
+      error
+    } => match &error {
+      StructureError value => value == StructureError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(
+    clonesLimited,
+    "all top-level template children count toward occurrence budget",
+  )
+}
+
+// Pinned SVG2 pservers.html#PaintServerTemplates: compatible pattern content is a sibling forest.
+test effect fn externalPatternClonesChildrenAndClosesTheirComputedReferences() -> ()
+  ! StructureError
+    | CssError
+    | UrlError
+    | ComputedError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = FixtureResolver {}
+  let result = run fixture(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><pattern id='external' href='../lib/resources.svg#tile'><title>descriptive</title></pattern><pattern id='own' href='#external'><rect id='own-child'/></pattern><rect id='shape' fill='url(#external)'/></svg>",
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let host = run required(occurrence(&result, b"external", false))
+  let own = run required(occurrence(&result, b"own", false))
+  let first = run required(result.graph.occurrences.asSlice()[host.index].shadow)
+  let second = run required(result.graph.occurrences.asSlice()[first.index].nextSibling)
+  run Testing.expect(
+    hasId(&result.graph, result.graph.occurrences.asSlice()[first.index].source, b"tile-a")
+      && hasId(&result.graph, result.graph.occurrences.asSlice()[second.index].source, b"tile-b")
+      && result.graph.occurrences.asSlice()[first.index].scope
+        == result.graph.occurrences.asSlice()[second.index].scope
+      && result.graph.occurrences.asSlice()[own.index].shadow.isNone(),
+    "pattern clones children, not template wrapper, and own relevant children suppress cloning",
+  )
+  let gradient = run required(result.styled.resource(first, Property.Fill))
+  let markerContent = run required(occurrence(&result, b"mark-content", false))
+  run Testing.expect(
+    result.styled.nodeStyle(gradient).isSome()
+      && result.styled.resource(markerContent, Property.Fill).isSome(),
+    "computed references discovered in external ordinary and cloned content close before returning",
+  )
+}

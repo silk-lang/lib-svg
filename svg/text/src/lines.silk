@@ -1,0 +1,554 @@
+//! Auto-wrapped text (SVG 2 #TextLayoutAuto): line breaking for `inline-size` and for
+//! `shape-inside` wrapping areas, which turns lines into anchored chunks for `layout`.
+import layout {
+  Span,
+  Character,
+  Line,
+  Writing,
+  TextOrientation,
+  Baseline,
+  Anchor,
+  Instance,
+  Layout,
+  layout,
+  instance,
+  advances,
+  separator,
+  height,
+  encode
+}
+import areas { Region, available }
+import svg_fonts.database { Fonts }
+import svg_fonts.matching { Selection }
+import silk.text.line_break { BreakKind, BreakOpportunity, LineOptions, breaks }
+import silk.text.string { String }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+// White space that hangs at the end of a line; a preserved segment break is one.
+fn hanging(cp: u32) -> bool {
+  return cp == 0x20 || cp == 0x0A
+}
+
+// The end of the line content in `[start, end)`, before the white space that hangs.
+fn contentEnd(characters: &[Character], start: usize, end: usize) -> usize {
+  let mut last = end
+  while last > start && hanging(characters[last - 1].cp) {
+    last = last - 1
+  }
+  return last
+}
+
+// The advance of the line content `[start, end)`. A character's measured advance holds the
+// spacing before the next one, which a line end does not take.
+fn extent(
+  spans: &[Span],
+  characters: &[Character],
+  measured: &List<f64>,
+  start: usize,
+  end: usize,
+) -> f64 {
+  let last = contentEnd(characters, start, end)
+  let mut total = 0.0
+  let mut index = start
+  while index < last {
+    total = total + List<f64>.get(measured, index)
+    index = index + 1
+  }
+  if last > start && last < characters.length {
+    let before = &spans[characters[last - 1].span]
+    let after = &spans[characters[last].span]
+    total = total - before.letterSpacing / 2.0 - after.letterSpacing / 2.0
+    if separator(characters[last - 1].cp) {
+      total = total - before.wordSpacing
+    }
+  }
+  return total
+}
+
+/// One line box: how far its top and bottom lie below the text position of its line.
+struct Extent {
+  top: f64,
+  bottom: f64,
+}
+
+impl Copy for Extent {}
+
+// CSS 2.1 #line-height: each span's inline box is its first face's ascent plus descent,
+// with half the leading line-height adds above and below, set on the span's alphabetic
+// baseline. The line box spans the boxes of the spans on the line and the text element's
+// strut.
+effect fn lineBox(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  characters: &[Character],
+  result: &mut Layout,
+  start: usize,
+  end: usize,
+) -> Extent
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut box = Extent { top: f64.INFINITY, bottom: -f64.INFINITY }
+  let mut index = start
+  while index <= end {
+    // The strut first, then each character's span.
+    let span = if index == end {
+      0
+    } else {
+      characters[index].span
+    }
+    if List<Selection>.length(&spans[span].faces) > 0 {
+      let own = run instance(database, spans, span, 0, &mut result.instances)
+      let metrics = &List<Instance>.asSlice(&result.instances)[own]
+      let content = metrics.ascent + metrics.descent
+      let lineHeight = match spans[span].lineHeight {
+        Option<f64>.Some { value } => value
+        Option<f64>.None => content + metrics.lineGap
+      }
+      let leading = (lineHeight - content) / 2.0
+      let baseline = List<f64>.get(&result.drops, span)
+      if spans[0].writing != Writing.HorizontalTb
+        && spans[span].orientation != TextOrientation.Sideways {
+        // In vertical typographic mode the box is centred on the central baseline
+        // (CSS Writing Modes 3 #vertical-font-features).
+        let center = baseline - height(metrics, spans[span].size, Baseline.Central)
+        box.top = f64.min(box.top, center - content / 2.0 - leading)
+        box.bottom = f64.max(box.bottom, center + content / 2.0 + leading)
+      } else {
+        box.top = f64.min(box.top, baseline - metrics.ascent - leading)
+        box.bottom = f64.max(box.bottom, baseline + metrics.descent + leading)
+      }
+    }
+    index = index + 1
+  }
+  if box.top > box.bottom {
+    box.top = 0.0
+    box.bottom = 0.0
+  }
+  return box
+}
+
+/// The text laid out on one line, with its break opportunities.
+struct Measured {
+  layout: Layout,
+  /// Per character, its typographic character's advance (on its first character).
+  advances: List<f64>,
+  /// The characters before which a line may end, in order; the last is the text's end.
+  breaks: List<usize>,
+  /// Per break, whether it is forced.
+  forced: List<bool>,
+}
+
+// Clears every position, finds the UAX #14 break opportunities and lays the text out on
+// one line to measure it. A preserved segment break measures and renders as a space.
+effect fn measure(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  characters: &mut List<Character>,
+) -> Measured
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = List<Character>.length(&characters.*)
+  let all = List<Character>.asMutSlice(&mut characters)
+  let mut text = List<u8>.make()
+  let mut offsets = List<usize>.make()
+  let mut index: usize = 0
+  while index < count {
+    run List<usize>.append(&mut offsets, List<u8>.length(&text))
+    run encode(all[index].cp, &mut text)
+    all[index].x = Option<f64>.None
+    all[index].y = Option<f64>.None
+    all[index].line = Line.Inside
+    if all[index].cp == 0x0A {
+      all[index].cp = 0x20
+    }
+    index = index + 1
+  }
+  let mut opportunities = List<BreakOpportunity>.make()
+
+  // `encode` writes each character's scalar as UTF-8, so the bytes are valid text.
+  let view = unsafe String.fromUtf8Unchecked(List<u8>.asSlice(&text))
+  run breaks(view, LineOptions.make(), &mut opportunities)
+  let mut result = Measured {
+    layout: run layout(database, spans, List<Character>.asSlice(&characters.*), &[], &[]),
+    advances: List<f64>.make(),
+    breaks: List<usize>.make(),
+    forced: List<bool>.make(),
+  }
+  run List<f64>.appendRepeated(&mut result.advances, 0.0, count)
+  advances(&result.layout, count, &mut result.advances)
+  let items = List<BreakOpportunity>.asSlice(&opportunities)
+  let mut character: usize = 0
+  let mut item: usize = 0
+  while item < items.length {
+    while character < count && List<usize>.get(&offsets, character) < items[item].offset {
+      character = character + 1
+    }
+    if character > 0 {
+      run List<usize>.append(&mut result.breaks, character)
+      run List<bool>.append(
+        &mut result.forced,
+        character < count && items[item].kind == BreakKind.Mandatory,
+      )
+    }
+    item = item + 1
+  }
+  return move result
+}
+
+// The white space ending each line `[starts[k], starts[k + 1])` hangs, and each line's first
+// character takes the position in `xs` and `ys`; lines after the first start afresh.
+effect fn place(
+  characters: &mut List<Character>,
+  starts: &List<usize>,
+  ends: &List<usize>,
+  xs: &List<f64>,
+  ys: &List<f64>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut hangs = List<usize>.make()
+  let mut line: usize = 0
+  while line < List<usize>.length(starts) {
+    run List<usize>.append(
+      &mut hangs,
+      contentEnd(
+        List<Character>.asSlice(&characters.*),
+        List<usize>.get(starts, line),
+        List<usize>.get(ends, line),
+      ),
+    )
+    line = line + 1
+  }
+  let placed = List<Character>.asMutSlice(&mut characters)
+  line = 0
+  while line < List<usize>.length(starts) {
+    let first = List<usize>.get(starts, line)
+    let mut index = List<usize>.get(&hangs, line)
+    while index < List<usize>.get(ends, line) {
+      placed[index].line = Line.Hang
+      index = index + 1
+    }
+    if line > 0 {
+      placed[first].line = Line.Start
+    }
+    placed[first].x = Option<f64>.Some { value: List<f64>.get(xs, line) }
+    placed[first].y = Option<f64>.Some { value: List<f64>.get(ys, line) }
+    line = line + 1
+  }
+}
+
+/// Auto-wrapped text in a wrapping area `width` wide (SVG 2 #InlineSize, #TextLayoutAuto).
+/// The text is laid out once on one line to measure it, broken into lines at UAX #14
+/// opportunities, greedily and only at forced breaks without `soft`, and each line becomes
+/// an anchored chunk: its first character takes the first character's `x` and the next
+/// baseline as `y`. All other `x` and `y` values are ignored.
+pub effect fn wrap(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  characters: &mut List<Character>,
+  width: f64,
+  soft: bool,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = List<Character>.length(&characters.*)
+  if count == 0 {
+    return
+  }
+  let writing = spans[0].writing
+  let first = List<Character>.get(&characters.*, 0)
+  let mut x = match first.x {
+    Option<f64>.Some { value } => value
+    Option<f64>.None => 0.0
+  }
+  let mut y = match first.y {
+    Option<f64>.Some { value } => value
+    Option<f64>.None => 0.0
+  }
+  let mut measured = run measure(database, spans, &mut characters)
+
+  // Line starts, greedily: a line ends at the last opportunity its content fits before.
+  let mut starts = List<usize>.make()
+  run List<usize>.append(&mut starts, 0)
+  let mut start: usize = 0
+  let mut candidate: usize = 0
+  let mut item: usize = 0
+  while item < List<usize>.length(&measured.breaks) {
+    let at = List<usize>.get(&measured.breaks, item)
+    if soft && candidate > start
+      && extent(spans, List<Character>.asSlice(&characters.*), &measured.advances, start, at)
+        > width {
+      run List<usize>.append(&mut starts, candidate)
+      start = candidate
+    }
+    if List<bool>.get(&measured.forced, item) {
+      run List<usize>.append(&mut starts, at)
+      start = at
+    }
+    candidate = at
+    item = item + 1
+  }
+
+  // Each line's baseline. Lines stack down, or in vertical text leftward (vertical-rl) or
+  // rightward (vertical-lr), across the turned frame.
+  let mut ends = List<usize>.make()
+  let mut xs = List<f64>.make()
+  let mut ys = List<f64>.make()
+  let mut previous = Extent { top: 0.0, bottom: 0.0 }
+  let mut line: usize = 0
+  while line < List<usize>.length(&starts) {
+    let end = if line + 1 < List<usize>.length(&starts) {
+      List<usize>.get(&starts, line + 1)
+    } else {
+      count
+    }
+    let box = run lineBox(
+      database,
+      spans,
+      List<Character>.asSlice(&characters.*),
+      &mut measured.layout,
+      List<usize>.get(&starts, line),
+      end,
+    )
+    if line > 0 {
+      if writing == Writing.HorizontalTb {
+        y = y + (previous.bottom - box.top)
+      } else if writing == Writing.VerticalRl {
+        x = x - (previous.bottom - box.top)
+      } else {
+        x = x + (box.bottom - previous.top)
+      }
+    }
+    run List<usize>.append(&mut ends, end)
+    run List<f64>.append(&mut xs, x)
+    run List<f64>.append(&mut ys, y)
+    previous = box
+    line = line + 1
+  }
+  run place(&mut characters, &starts, &ends, &xs, &ys)
+}
+
+// The word separators inside the content of `[start, end)`, which justification widens.
+fn separators(characters: &[Character], start: usize, end: usize) -> usize {
+  let last = contentEnd(characters, start, end)
+  let mut count: usize = 0
+  let mut index = start
+  while index < last {
+    if separator(characters[index].cp) {
+      count = count + 1
+    }
+    index = index + 1
+  }
+  return count
+}
+
+// Moves each word after a separator on a justified line by its share of the free space,
+// through dx, which also moves the rest of the line.
+fn justify(
+  characters: &mut List<Character>,
+  starts: &List<usize>,
+  ends: &List<usize>,
+  spreads: &List<f64>,
+) -> () {
+  let mut line: usize = 0
+  while line < List<usize>.length(starts) {
+    let spread = List<f64>.get(spreads, line)
+    if spread != 0.0 {
+      let start = List<usize>.get(starts, line)
+      let last = contentEnd(
+        List<Character>.asSlice(&characters.*),
+        start,
+        List<usize>.get(ends, line),
+      )
+      let all = List<Character>.asMutSlice(&mut characters)
+      let mut index = start
+      while index + 1 < last {
+        if separator(all[index].cp) {
+          all[index + 1].dx = all[index + 1].dx + spread
+        }
+        index = index + 1
+      }
+    }
+    line = line + 1
+  }
+}
+
+/// A line's alignment inside a `shape-inside` area (CSS Text 3 #text-align-property), with
+/// `start` and `end` taken relative to the text element's direction.
+pub enum Align {
+  Start,
+  End,
+  Left,
+  Right,
+  Center,
+  Justify,
+}
+
+/// Text wrapped in `shape-inside` areas less the `shape-subtract` ones (SVG 2
+/// #TextShapeInside, #TextShapeSubtract), horizontal text only. Lines are as tall as the
+/// text element's strut and fill each area from its top. A line takes, left to right, the
+/// spans of its band inside the area; a span that cannot hold the next word is skipped,
+/// and a line that holds nothing moves down a pixel (CSS Shapes 1 treats a shape's edge as
+/// pixel floats). Each part of a line is an anchored chunk aligned in its span by
+/// `text-align`, or `last` for a line that ends the text or a forced break; `text-anchor`
+/// does not apply (SVG 2 #TextAnchoringProperties). A justified line spreads its free space
+/// evenly over its word separators (CSS Text 3 #justify-auto). Text that overflows one area
+/// continues in the next; what is left after the last is not rendered.
+pub effect fn wrapInAreas(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  characters: &mut List<Character>,
+  shapes: &[Region],
+  holes: &[Region],
+  soft: bool,
+  align: Align,
+  last: Align,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = List<Character>.length(&characters.*)
+  if count == 0 {
+    return
+  }
+  let mut measured = run measure(database, spans, &mut characters)
+  let all = List<Character>.asSlice(&characters.*)
+  let strut = run lineBox(database, spans, all, &mut measured.layout, count, count)
+  let tall = strut.bottom - strut.top
+  let mut starts = List<usize>.make()
+  let mut ends = List<usize>.make()
+  let mut xs = List<f64>.make()
+  let mut ys = List<f64>.make()
+  let mut spreads = List<f64>.make()
+  let mut next: usize = 0
+  let mut item: usize = 0
+  let mut shape: usize = 0
+  while next < count && shape < shapes.length && tall > 0.0 {
+    let area = &shapes[shape]
+    let mut top = area.top
+    while next < count && top + tall <= area.bottom {
+      let mut pieces = List<f64>.make()
+      run available(area, holes, top, top + tall, &mut pieces)
+      let parts = List<f64>.asSlice(&pieces)
+      let mut placed = false
+      let mut forced = false
+      let mut p: usize = 0
+      while p + 1 < parts.length && next < count && !forced {
+        let left = parts[p]
+        let right = parts[p + 1]
+
+        // The furthest break whose content fits, stopping at a forced one; without soft
+        // wrapping, the next forced break or the end, fitting or not.
+        let mut fit = Option<usize>.None
+        let mut k = item
+        let mut searching = true
+        while searching && k < List<usize>.length(&measured.breaks) {
+          let at = List<usize>.get(&measured.breaks, k)
+          let last = List<bool>.get(&measured.forced, k)
+            || k + 1 == List<usize>.length(&measured.breaks)
+          if !soft {
+            if last {
+              fit = Option<usize>.Some { value: k }
+              searching = false
+            }
+          } else if extent(spans, all, &measured.advances, next, at) <= right - left {
+            fit = Option<usize>.Some { value: k }
+            searching = !List<bool>.get(&measured.forced, k)
+          } else {
+            searching = false
+          }
+          k = k + 1
+        }
+        if let Option<usize>.Some { value: chosen } = fit {
+          let end = List<usize>.get(&measured.breaks, chosen)
+          forced = List<bool>.get(&measured.forced, chosen)
+          let closing = forced || chosen + 1 == List<usize>.length(&measured.breaks)
+          let mode = if closing {
+            last
+          } else {
+            align
+          }
+          let width = right - left
+          let mut used = extent(spans, all, &measured.advances, next, end)
+          let mut spread = 0.0
+          if mode == Align.Justify && used < width {
+            let gaps = separators(all, next, end)
+            if gaps > 0 {
+              spread = (width - used) / usize.toF64(gaps)
+              used = width
+            }
+          }
+          let rtl = spans[0].rtl
+          let free = width - used
+          let start = left
+            + match mode {
+              Align.Left => 0.0
+              Align.Right => free
+              Align.Center => free / 2.0
+              Align.End => if rtl {
+                0.0
+              } else {
+                free
+              }
+              _ => if rtl {
+                free
+              } else {
+                0.0
+              }
+            }
+
+          // The chunk anchors at its first character by that span's text-anchor.
+          let span = &spans[all[next].span]
+          let x = match span.anchor {
+            Anchor.Start => if span.rtl {
+              start + used
+            } else {
+              start
+            }
+            Anchor.Middle => start + used / 2.0
+            Anchor.End => if span.rtl {
+              start
+            } else {
+              start + used
+            }
+          }
+          run List<usize>.append(&mut starts, next)
+          run List<usize>.append(&mut ends, end)
+          run List<f64>.append(&mut xs, x)
+          run List<f64>.append(&mut ys, top - strut.top)
+          run List<f64>.append(
+            &mut spreads,
+            if span.rtl {
+              -spread
+            } else {
+              spread
+            },
+          )
+          next = end
+          item = chosen + 1
+          placed = true
+        }
+        p = p + 2
+      }
+      top = if placed {
+        top + tall
+      } else {
+        top + 1.0
+      }
+    }
+    shape = shape + 1
+  }
+  run place(&mut characters, &starts, &ends, &xs, &ys)
+  justify(&mut characters, &starts, &ends, &spreads)
+
+  // Text that fits no area hangs: it takes no room and is not drawn.
+  let rest = List<Character>.asMutSlice(&mut characters)
+  while next < count {
+    rest[next].line = Line.Hang
+    next = next + 1
+  }
+}

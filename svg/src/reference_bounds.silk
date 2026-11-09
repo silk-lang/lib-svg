@@ -1,0 +1,439 @@
+//! Exact object and undashed stroke reference geometry. Source paths are converted
+//! once only when vector geometry is needed; affine object bounds stay analytic.
+import scene { Style, LineCap, LineJoin, RenderError, StrokeSpace }
+import mapping { Mapping }
+import mapping
+import vector_path
+import svg_geometry.geometry { Path, Rect, Transform, isValidRect }
+import svg_geometry.bounds { Result as BoundsResult }
+import svg_geometry.bounds
+import vector.path { Path as VectorPath }
+import vector.stroke { Stroker, Stroke, LengthEstimate }
+import vector.stroke
+import vector.projective
+import vector.projective { Homography }
+import vector.geometry_error { GeometryError }
+import vector.geometry { Affine }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.num.f64
+import silk.core.ownership { Copy }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.num.usize
+import silk.num.u32
+
+struct MetricKey {
+  path: usize,
+  matrix: [f64; 9],
+}
+
+impl Copy for MetricKey {}
+
+impl HashKey for MetricKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    if a.path != b.path {
+      return false
+    }
+    let mut i: usize = 0
+    while i < 9 {
+      if a.matrix[i] != b.matrix[i] {
+        return false
+      }
+      i = i + 1
+    }
+    return true
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    let mut result = Hash.mix(seed, usize.toU64(value.path))
+    let mut i: usize = 0
+    while i < 9 {
+      result = Hash.combine(
+        result,
+        f64.toBits(
+          if value.matrix[i] == 0.0 {
+            0.0
+          } else {
+            value.matrix[i]
+          },
+        ),
+      )
+      i = i + 1
+    }
+    return result
+  }
+}
+
+fn penStyle(style: &Style) -> Stroke {
+  let mut pen = Stroke.make(style.strokeWidth)
+  pen.miterLimit = style.miterLimit
+  pen.cap = match style.lineCap {
+    LineCap.Butt => stroke.CAP_BUTT
+    LineCap.Round => stroke.CAP_ROUND
+    LineCap.Square => stroke.CAP_SQUARE
+  }
+  pen.join = match style.lineJoin {
+    LineJoin.Miter => stroke.JOIN_MITER
+    LineJoin.Round => stroke.JOIN_ROUND
+    LineJoin.Bevel => stroke.JOIN_BEVEL
+    LineJoin.MiterClip => stroke.JOIN_MITER_CLIP
+    LineJoin.Arcs => stroke.JOIN_ARCS
+  }
+  return move pen
+}
+
+struct Entry {
+  ready: bool,
+  path: VectorPath
+}
+
+// A path's analytic bounds under one affine transform: 0 empty, 1 finite, 2 limited.
+struct AffineBounds {
+  transform: Transform,
+  kind: u8,
+  rect: Rect,
+}
+
+impl Copy for AffineBounds {}
+
+fn sameTransform(a: Transform, b: Transform) -> bool {
+  return f64.toBits(a.xx) == f64.toBits(b.xx) && f64.toBits(a.yx) == f64.toBits(b.yx)
+    && f64.toBits(a.xy) == f64.toBits(b.xy)
+    && f64.toBits(a.yy) == f64.toBits(b.yy)
+    && f64.toBits(a.dx) == f64.toBits(b.dx)
+    && f64.toBits(a.dy) == f64.toBits(b.dy)
+}
+
+pub struct Cache {
+  paths: List<Entry>,
+  metrics: HashMap<MetricKey, f64>,
+  stroker: Stroker,
+  // Each path's last affine fill bounds, since several consumers ask for the same box. A
+  // path's slot is 0 for none or 1 + its index in affine.
+  affineSlots: List<u32>,
+  affine: List<AffineBounds>,
+  remember: bool
+}
+
+impl Cache {
+  pub fn make() -> Cache {
+    return Cache {
+      paths: List<Entry>.make(),
+      metrics: HashMap<MetricKey, f64>.make(Hash.seed(0)),
+      stroker: Stroker.make(),
+      affineSlots: List<u32>.make(),
+      affine: List<AffineBounds>.make(),
+      remember: false,
+    }
+  }
+
+  // While on, affine fill bounds are kept per path, for a caller that is about to ask for the
+  // same boxes again.
+  pub fn rememberAffine(self: &mut Self, on: bool) -> () {
+    self.remember = on
+  }
+
+  effect fn prepare(self: &mut Cache, paths: &[Path], index: usize) -> ()
+    ! RenderError | OutOfMemoryError
+    ? &mut Allocator {
+    if index >= paths.length {
+      fail RenderError.InvalidGeometry
+    }
+    if self.paths.length() < paths.length {
+      let additional = paths.length - self.paths.length()
+      run self.paths.reserve(additional)
+      while self.paths.length() < paths.length {
+        run self.paths.append(Entry { ready: false, path: VectorPath.make() })
+      }
+    }
+    if !self.paths.asSlice()[index].ready {
+      let converted = run vector_path.convert(&paths[index])
+      let mut entries = self.paths.asMutSlice()
+      entries[index].path = move converted
+      entries[index].ready = true
+    }
+  }
+
+  /// The same analytic metric used for stroke geometry, independent of output
+  /// zoom. Non-scaling strokes measure their transformed centerline in the host.
+  pub effect fn length(
+    self: &mut Cache,
+    paths: &[Path],
+    index: usize,
+    space: Option<Mapping>,
+  ) -> f64
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    let h = match &space {
+      Option<Mapping>.Some { value: host } => match &host {
+        Mapping.Affine { value } => Homography.fromAffine(&value)
+        Mapping.Projective { value } => value
+      }
+      _ => Homography.fromAffine(&Affine.identity())
+    }
+    let key = MetricKey {
+      path: index,
+      matrix: [h.xx, h.xy, h.xw, h.yx, h.yy, h.yw, h.wx, h.wy, h.ww],
+    }
+    let cached: Option<f64> = self.metrics.get(key)
+    if let Option<f64>.Some { value } = &cached {
+      return value
+    }
+    run self.prepare(paths, index)
+    let identity = h.xx == 1.0 && h.xy == 0.0 && h.xw == 0.0 && h.yx == 0.0 && h.yy == 1.0
+      && h.yw == 0.0
+      && h.wx == 0.0
+      && h.wy == 0.0
+      && h.ww == 1.0
+
+    // Absolute source units alone lose calibrated dash placement when tiny paths
+    // are magnified. Start coarse and refine to a relative bound; when a finer
+    // budget is out of f64 reach on a large curve, keep the best certified one.
+    let mut tolerance = 1.0
+    let mut best: Option<f64> = Option<f64>.None
+    let mut attempts: usize = 0
+    while attempts < 16 {
+      let path = &self.paths.asSlice()[index].path
+      let result = if identity {
+        run Effect.result(stroke.measureLength(path, tolerance))
+      } else {
+        run Effect.result(stroke.measureLengthInSpace(path, &h, tolerance))
+      }
+      let measured = match move result {
+        Result<LengthEstimate, GeometryError>.Success { value } => value
+        Result<LengthEstimate, GeometryError>.Failure { error } => {
+          if let Option<f64>.Some { value } = best {
+            drop run self.metrics.insert(key, value)
+            return value
+          }
+          fail move error
+        }
+      }
+      if measured.error == 0.0 || measured.error <= 0.000001 * (measured.value - measured.error) {
+        drop run self.metrics.insert(key, measured.value)
+        return measured.value
+      }
+      if measured.error <= 0.00001 * (measured.value - measured.error) {
+        best = Option<f64>.some(measured.value)
+      }
+
+      // A coarse closed curve can have zero chord length without being empty.
+      // Step down gradually so a budget just out of reach still leaves a best.
+      tolerance = f64.max(
+        tolerance * 0.0625,
+        f64.min(tolerance * 0.5, f64.max(measured.value, measured.error) * 0.00000025),
+      )
+      if !(tolerance > 0.0) {
+        fail RenderError.InvalidGeometry
+      }
+      attempts = attempts + 1
+    }
+    if let Option<f64>.Some { value } = best {
+      drop run self.metrics.insert(key, value)
+      return value
+    }
+    fail RenderError.InvalidGeometry
+  }
+
+  pub effect fn fillBounds(
+    self: &mut Cache,
+    paths: &[Path],
+    index: usize,
+    transform: &Mapping,
+    tolerance: f64,
+  ) -> Option<Rect>
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    if index >= paths.length {
+      fail RenderError.InvalidGeometry
+    }
+    match &transform.* {
+      Mapping.Affine { value } => {
+        if !self.remember {
+          return match &bounds.pathTransformed(&paths[index], value) {
+            BoundsResult.Finite { rect } => Option<Rect>.some(rect)
+            BoundsResult.Empty => Option<Rect>.None
+            BoundsResult.Limited => {
+              fail RenderError.InvalidGeometry
+            }
+          }
+        }
+        let mut memo = AffineBounds {
+          transform: value,
+          kind: 2,
+          rect: Rect { xMin: 0.0, yMin: 0.0, xMax: 0.0, yMax: 0.0 },
+        }
+        let have = self.affineSlots.length()
+        if have < paths.length {
+          run self.affineSlots.appendRepeated(0, paths.length - have)
+        }
+        let slot = u32.toUsize(self.affineSlots.asSlice()[index])
+        if slot != 0 && sameTransform(self.affine.asSlice()[slot - 1].transform, value) {
+          memo = self.affine.asSlice()[slot - 1]
+        } else {
+          match &bounds.pathTransformed(&paths[index], value) {
+            BoundsResult.Finite { rect } => {
+              memo.kind = 1
+              memo.rect = rect
+            }
+            BoundsResult.Empty => {
+              memo.kind = 0
+            }
+            BoundsResult.Limited => {}
+          }
+          if slot != 0 {
+            let mut entries = self.affine.asMutSlice()
+            entries[slot - 1] = memo
+          } else {
+            let mut slots = self.affineSlots.asMutSlice()
+            slots[index] = usize.toU32(self.affine.length() + 1)
+            drop slots
+            run self.affine.append(memo)
+          }
+        }
+        if memo.kind == 2 {
+          fail RenderError.InvalidGeometry
+        }
+        return if memo.kind == 1 {
+          Option<Rect>.some(memo.rect)
+        } else {
+          Option<Rect>.None
+        }
+      }
+      Mapping.Projective { value } => {
+        run self.prepare(paths, index)
+        let result = run projective.bounds(&self.paths.asSlice()[index].path, &value, tolerance)
+        if result.empty {
+          return Option<Rect>.None
+        }
+        let rect = Rect {
+          xMin: result.bounds.xMin,
+          yMin: result.bounds.yMin,
+          xMax: result.bounds.xMax,
+          yMax: result.bounds.yMax,
+        }
+        if !isValidRect(rect) {
+          fail RenderError.InvalidGeometry
+        }
+        return Option<Rect>.some(rect)
+      }
+    }
+  }
+
+  // SVG stroke-box ignores dash gaps and paint opacity.
+  pub effect fn strokeBounds(
+    self: &mut Cache,
+    paths: &[Path],
+    index: usize,
+    style: &Style,
+    transform: &Mapping,
+    tolerance: f64,
+  ) -> Option<Rect>
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    run self.prepare(paths, index)
+    let pen = penStyle(style)
+    let result = match &transform.* {
+      Mapping.Affine { value } => run self.stroker.bounds(
+        &self.paths.asSlice()[index].path,
+        &pen,
+        &value,
+        tolerance,
+        true,
+      )
+      Mapping.Projective { value } => run self.stroker.boundsProjective(
+        &self.paths.asSlice()[index].path,
+        &pen,
+        &value,
+        tolerance,
+        true,
+      )
+    }
+    if result.empty {
+      return Option<Rect>.None
+    }
+    let rect = Rect {
+      xMin: result.bounds.xMin,
+      yMin: result.bounds.yMin,
+      xMax: result.bounds.xMax,
+      yMax: result.bounds.yMax,
+    }
+    if !isValidRect(rect) {
+      fail RenderError.InvalidGeometry
+    }
+    return Option<Rect>.Some { value: rect }
+  }
+
+  // Painted bounds include actual dash caps and vector-effect host geometry.
+  // Reuse vector's conservative unclipped solver, never a transformed AABB or
+  // a finite sampling window that could drop overflow-visible content.
+  pub effect fn paintedStrokeBounds(
+    self: &mut Cache,
+    paths: &[Path],
+    index: usize,
+    style: &Style,
+    transform: &Mapping,
+    space: Option<StrokeSpace>,
+    dashes: &[f64],
+  ) -> Option<Rect>
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    run self.prepare(paths, index)
+    let mut pen = penStyle(style)
+    pen.dashOffset = style.dashOffset
+    run pen.setDashes(dashes)
+    let result = match &space {
+      Option<StrokeSpace>.Some { value: spaceValue } => {
+        let center = match &spaceValue.pathToHost {
+          Mapping.Affine { value } => Homography.fromAffine(&value)
+          Mapping.Projective { value } => value
+        }
+        let placement = match &spaceValue.hostToDevice {
+          Mapping.Affine { value } => Homography.fromAffine(&value)
+          Mapping.Projective { value } => value
+        }
+        run self.stroker.boundsInSpace(
+          &self.paths.asSlice()[index].path,
+          &pen,
+          &center,
+          &placement,
+          0.0000001,
+          false,
+        )
+      }
+      _ => match &transform.* {
+        Mapping.Affine { value } => run self.stroker.bounds(
+          &self.paths.asSlice()[index].path,
+          &pen,
+          &value,
+          0.0000001,
+          false,
+        )
+        Mapping.Projective { value } => run self.stroker.boundsProjective(
+          &self.paths.asSlice()[index].path,
+          &pen,
+          &value,
+          0.0000001,
+          false,
+        )
+      }
+    }
+    if result.empty {
+      return Option<Rect>.None
+    }
+    let rect = Rect {
+      xMin: result.bounds.xMin,
+      yMin: result.bounds.yMin,
+      xMax: result.bounds.xMax,
+      yMax: result.bounds.yMax,
+    }
+    if !isValidRect(rect) || !f64.isFinite(rect.width()) || !f64.isFinite(rect.height()) {
+      fail RenderError.InvalidGeometry
+    }
+    return Option<Rect>.some(rect)
+  }
+}

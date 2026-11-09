@@ -1,0 +1,2 @@
+<!-- Literal affine image of the physical viewport, not its axis-aligned bounds. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M4 12L12 16L8 24L0 20Z"/><rect x="24" width="8" height="8" fill="red"/></svg>

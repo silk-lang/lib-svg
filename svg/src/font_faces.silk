@@ -1,0 +1,443 @@
+//! @font-face rules (CSS Fonts 4 #font-face-rule): the family, the font sources and the
+//! descriptors that place a downloaded face in font matching.
+import svg_css.tokens { TokenBuffer, TokenRange, Span, Kind, Limits, CssError, insensitive }
+import svg_css.syntax { Declaration }
+import svg_css.syntax
+import svg_fonts.database { Range, FaceStyle }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+
+/// One `src` entry the renderer can try.
+pub union Source {
+  /// A url() text, whose format is absent or sfnt.
+  Url { pub text: Span },
+  /// A `local()` full or PostScript name.
+  Local { pub name: Bytes },
+}
+
+/// One parsed @font-face rule, with its usable `src` entries in order.
+pub struct Rule {
+  pub family: Bytes,
+  pub sources: List<Source>,
+  pub weight: Option<Range>,
+  pub width: Option<Range>,
+  pub style: Option<FaceStyle>,
+}
+
+/// A source that may still provide a face once the host's fonts are known.
+pub union Candidate {
+  Local { pub name: Bytes },
+  Data { pub bytes: Bytes },
+}
+
+/// A face a document defines: the `local()` names before the first url source that
+/// loaded, then that source's data.
+pub struct DocumentFace {
+  pub family: Bytes,
+  pub candidates: List<Candidate>,
+  pub weight: Option<Range>,
+  pub width: Option<Range>,
+  pub style: Option<FaceStyle>,
+}
+
+fn space(buffer: &TokenBuffer, index: usize) -> bool {
+  return match &buffer.tokens.asSlice()[index].kind {
+    Kind.Whitespace => true
+    _ => false
+  }
+}
+
+pub fn skip(buffer: &TokenBuffer, start: usize, end: usize) -> usize {
+  let mut at = start
+  while at < end && space(buffer, at) {
+    at = at + 1
+  }
+  return at
+}
+
+/// The tokens of a value without whitespace, which these descriptors never need.
+effect fn words(buffer: &TokenBuffer, range: TokenRange) -> List<usize>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<usize>.make()
+  let mut at = range.start
+  while at < range.end {
+    if !space(buffer, at) {
+      run out.append(at)
+    }
+    at = at + 1
+  }
+  return move out
+}
+
+/// `<family-name>`: a string, or identifiers joined by single spaces.
+effect fn family(buffer: &TokenBuffer, range: TokenRange) -> Option<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let tokens = run words(buffer, range)
+  return run joined(buffer, &tokens)
+}
+
+effect fn joined(buffer: &TokenBuffer, tokens: &List<usize>) -> Option<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if tokens.length() == 0 {
+    return Option<Bytes>.None
+  }
+  let mut name = Bytes.make()
+  let mut index: usize = 0
+  while index < tokens.length() {
+    match &buffer.tokens.asSlice()[tokens.asSlice()[index]].kind {
+      Kind.String { text } => {
+        if tokens.length() != 1 {
+          return Option<Bytes>.None
+        }
+        run Bytes.append(&mut name, buffer.text(text))
+      }
+      Kind.Ident { text } => {
+        if index > 0 {
+          run Bytes.append(&mut name, b" ")
+        }
+        run Bytes.append(&mut name, buffer.text(text))
+      }
+      _ => {
+        return Option<Bytes>.None
+      }
+    }
+    index = index + 1
+  }
+  return Option<Bytes>.Some { value: move name }
+}
+
+/// The url text of a `url()` token or function, and the index after it.
+pub fn address(buffer: &TokenBuffer, at: usize, end: usize) -> Option<Span> {
+  let token = &buffer.tokens.asSlice()[at]
+  match &token.kind {
+    Kind.Url { text } => {
+      return Option<Span>.Some { value: text }
+    }
+    Kind.Function { name } => {
+      if insensitive(buffer.text(name), b"url") && token.matching < end {
+        let inner = skip(buffer, at + 1, token.matching)
+        if inner < token.matching && skip(buffer, inner + 1, token.matching) == token.matching {
+          match &buffer.tokens.asSlice()[inner].kind {
+            Kind.String { text } => {
+              return Option<Span>.Some { value: text }
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+    _ => {}
+  }
+  return Option<Span>.None
+}
+
+/// Whether a `format()` names sfnt data: TrueType, OpenType or a collection.
+fn readable(buffer: &TokenBuffer, at: usize, end: usize) -> bool {
+  let token = &buffer.tokens.asSlice()[at]
+  let name = match &token.kind {
+    Kind.Function { name } => name
+    _ => {
+      return false
+    }
+  }
+  if !insensitive(buffer.text(name), b"format") || token.matching >= end {
+    return false
+  }
+  let inner = skip(buffer, at + 1, token.matching)
+  if inner >= token.matching || skip(buffer, inner + 1, token.matching) != token.matching {
+    return false
+  }
+  let text = match &buffer.tokens.asSlice()[inner].kind {
+    Kind.String { text } => buffer.text(text)
+    Kind.Ident { text } => buffer.text(text)
+    _ => {
+      return false
+    }
+  }
+  return insensitive(text, b"truetype") || insensitive(text, b"opentype")
+    || insensitive(text, b"collection")
+}
+
+/// One `src` entry: a url with an optional readable format. `local()` and unknown
+/// formats or technologies are skipped.
+effect fn source(buffer: &TokenBuffer, start: usize, end: usize, out: &mut List<Source>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let at = skip(buffer, start, end)
+  if at >= end {
+    return
+  }
+  let token = &buffer.tokens.asSlice()[at]
+  let local = match &token.kind {
+    Kind.Function { name } => insensitive(buffer.text(name), b"local")
+    _ => false
+  }
+  if local {
+    if token.matching < end && skip(buffer, token.matching + 1, end) >= end {
+      let tokens = run words(buffer, TokenRange { start: at + 1, end: token.matching })
+      if let Option<Bytes>.Some { value } = move run joined(buffer, &tokens) {
+        run out.append(Source.Local { name: move value })
+      }
+    }
+    return
+  }
+  if let Option<Span>.Some { value } = address(buffer, at, end) {
+    let token = &buffer.tokens.asSlice()[at]
+    let after = match &token.kind {
+      Kind.Function { name } => token.matching + 1
+      _ => at + 1
+    }
+    let next = skip(buffer, after, end)
+    if next >= end {
+      run out.append(Source.Url { text: value })
+    } else if readable(buffer, next, end) {
+      if skip(buffer, buffer.tokens.asSlice()[next].matching + 1, end) >= end {
+        run out.append(Source.Url { text: value })
+      }
+    }
+  }
+}
+
+/// The `src` entries, split at top-level commas.
+effect fn sources(buffer: &TokenBuffer, range: TokenRange) -> List<Source>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<Source>.make()
+  let mut start = range.start
+  let mut at = range.start
+  while at < range.end {
+    let token = &buffer.tokens.asSlice()[at]
+    match &token.kind {
+      Kind.Comma => {
+        run source(buffer, start, at, &mut out)
+        start = at + 1
+        at = at + 1
+      }
+      Kind.Function { name } => {
+        at = token.matching + 1
+      }
+      Kind.OpenParen => {
+        at = token.matching + 1
+      }
+      Kind.OpenSquare => {
+        at = token.matching + 1
+      }
+      Kind.OpenBrace => {
+        at = token.matching + 1
+      }
+      _ => {
+        at = at + 1
+      }
+    }
+  }
+  run source(buffer, start, range.end, &mut out)
+  return move out
+}
+
+fn ordered(first: f64, second: f64) -> Range {
+  return if first <= second {
+    Range { min: first, max: second }
+  } else {
+    Range { min: second, max: first }
+  }
+}
+
+/// A one- or two-value range descriptor; `auto` and invalid values give None.
+effect fn range(
+  buffer: &TokenBuffer,
+  input: TokenRange,
+  number: fn(&TokenBuffer, usize) -> Option<f64>,
+) -> Option<Range>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let tokens = run words(buffer, input)
+  if tokens.length() == 0 || tokens.length() > 2 {
+    return Option<Range>.None
+  }
+  let first = match number(buffer, tokens.asSlice()[0]) {
+    Option<f64>.Some { value } => value
+    _ => {
+      return Option<Range>.None
+    }
+  }
+  if tokens.length() == 1 {
+    return Option<Range>.Some { value: Range.point(first) }
+  }
+  return match number(buffer, tokens.asSlice()[1]) {
+    Option<f64>.Some { value: second } => Option<Range>.Some { value: ordered(first, second) }
+    _ => Option<Range>.None
+  }
+}
+
+/// A font-weight descriptor value: normal, bold or a number in [1, 1000].
+fn weightValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
+  return match &buffer.tokens.asSlice()[at].kind {
+    Kind.Ident { text } => if insensitive(buffer.text(text), b"normal") {
+      Option<f64>.Some { value: 400.0 }
+    } else if insensitive(buffer.text(text), b"bold") {
+      Option<f64>.Some { value: 700.0 }
+    } else {
+      Option<f64>.None
+    }
+    Kind.Number { value, integer } => if value >= 1.0 && value <= 1000.0 {
+      Option<f64>.Some { value: value }
+    } else {
+      Option<f64>.None
+    }
+    _ => Option<f64>.None
+  }
+}
+
+/// A font-width (font-stretch) descriptor value: a keyword or a non-negative percentage.
+fn widthValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
+  return match &buffer.tokens.asSlice()[at].kind {
+    Kind.Percentage { value, integer } => if value >= 0.0 {
+      Option<f64>.Some { value: value }
+    } else {
+      Option<f64>.None
+    }
+    Kind.Ident { text } => {
+      let name = buffer.text(text)
+      let keywords: [&[u8]; 9] = [
+        b"ultra-condensed",
+        b"extra-condensed",
+        b"condensed",
+        b"semi-condensed",
+        b"normal",
+        b"semi-expanded",
+        b"expanded",
+        b"extra-expanded",
+        b"ultra-expanded",
+      ]
+      let values: [f64; 9] = [50.0, 62.5, 75.0, 87.5, 100.0, 112.5, 125.0, 150.0, 200.0]
+      let mut index: usize = 0
+      while index < 9 {
+        if insensitive(name, keywords[index]) {
+          return Option<f64>.Some { value: values[index] }
+        }
+        index = index + 1
+      }
+      Option<f64>.None
+    }
+    _ => Option<f64>.None
+  }
+}
+
+/// An `<angle>` in degrees, within the descriptor's [-90deg, 90deg].
+fn angleValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
+  let degrees = match &buffer.tokens.asSlice()[at].kind {
+    Kind.Dimension { value, integer, unit } => if insensitive(buffer.text(unit), b"deg") {
+      value
+    } else if insensitive(buffer.text(unit), b"grad") {
+      value * 0.9
+    } else if insensitive(buffer.text(unit), b"rad") {
+      value * 180.0 / f64.PI
+    } else if insensitive(buffer.text(unit), b"turn") {
+      value * 360.0
+    } else {
+      return Option<f64>.None
+    }
+    _ => {
+      return Option<f64>.None
+    }
+  }
+  if degrees >= -90.0 && degrees <= 90.0 {
+    return Option<f64>.Some { value: degrees }
+  }
+  return Option<f64>.None
+}
+
+fn keyword(buffer: &TokenBuffer, at: usize, expected: &[u8]) -> bool {
+  return match &buffer.tokens.asSlice()[at].kind {
+    Kind.Ident { text } => insensitive(buffer.text(text), expected)
+    _ => false
+  }
+}
+
+/// font-style: normal, italic, or oblique with up to two angles (default 14deg).
+effect fn style(buffer: &TokenBuffer, input: TokenRange) -> Option<FaceStyle>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let tokens = run words(buffer, input)
+  let list = tokens.asSlice()
+  if list.length == 1 && keyword(buffer, list[0], b"normal") {
+    return Option<FaceStyle>.Some { value: FaceStyle.Normal }
+  }
+  if list.length == 1 && keyword(buffer, list[0], b"italic") {
+    return Option<FaceStyle>.Some { value: FaceStyle.Italic }
+  }
+  if list.length >= 1 && list.length <= 3 && keyword(buffer, list[0], b"oblique") {
+    if list.length == 1 {
+      return Option<FaceStyle>.Some { value: FaceStyle.Oblique { min: 14.0, max: 14.0 } }
+    }
+    let first = match angleValue(buffer, list[1]) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<FaceStyle>.None
+      }
+    }
+    let mut second = first
+    if list.length == 3 {
+      second = match angleValue(buffer, list[2]) {
+        Option<f64>.Some { value } => value
+        _ => {
+          return Option<FaceStyle>.None
+        }
+      }
+    }
+    let bounds = ordered(first, second)
+    return Option<FaceStyle>.Some { value: FaceStyle.Oblique { min: bounds.min, max: bounds.max } }
+  }
+  return Option<FaceStyle>.None
+}
+
+/// Parses the declarations of an @font-face block. A rule without a family or without a
+/// readable source defines nothing.
+pub effect fn parse(buffer: &TokenBuffer, body: TokenRange, limits: &Limits) -> Option<Rule>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let declarations = run syntax.parseDeclarations(buffer, body, limits)
+  let mut name = Option<Bytes>.None
+  let mut found = List<Source>.make()
+  let mut weight = Option<Range>.None
+  let mut width = Option<Range>.None
+  let mut slant = Option<FaceStyle>.None
+  let mut index: usize = 0
+  while index < declarations.length() {
+    let declaration = declarations.asSlice()[index]
+    let descriptor = buffer.text(declaration.name)
+    if insensitive(descriptor, b"font-family") {
+      name = run family(buffer, declaration.value)
+    } else if insensitive(descriptor, b"src") {
+      found = run sources(buffer, declaration.value)
+    } else if insensitive(descriptor, b"font-weight") {
+      weight = run range(buffer, declaration.value, weightValue)
+    } else if insensitive(descriptor, b"font-stretch") || insensitive(descriptor, b"font-width") {
+      width = run range(buffer, declaration.value, widthValue)
+    } else if insensitive(descriptor, b"font-style") {
+      slant = run style(buffer, declaration.value)
+    }
+    index = index + 1
+  }
+  if found.length() == 0 {
+    return Option<Rule>.None
+  }
+  return match move name {
+    Option<Bytes>.Some { value } => Option<Rule>.Some {
+      value: Rule {
+        family: move value,
+        sources: move found,
+        weight: weight,
+        width: width,
+        style: slant,
+      },
+    }
+    _ => Option<Rule>.None
+  }
+}

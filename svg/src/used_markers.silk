@@ -1,0 +1,264 @@
+//! Used SVG2 marker geometry, before source CTM, CSS transforms and overflow policy.
+//! Pinned CR painting SHA256 7d6def7e874c400920e09c534ed52307c66ec7f4275c15a8c7f08c54bf73dca7.
+import paint_metadata { MarkerMetadata, MarkerUnits, MarkerOrient }
+import used_viewports { Reference }
+import used_paints
+import scene { RenderError }
+import svg_css.computed { Engine, StyleId }
+import svg_css.dimensions { ExprId }
+import svg_geometry.geometry {
+  Rect,
+  Point,
+  Transform,
+  checkedRect,
+  isValidRect,
+  isEmptyRect,
+  mapRect
+}
+import svg_geometry.markers { MarkerKind, MarkerPosition }
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.svg
+import svg_geometry.math
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+
+pub struct Layout {
+  // Origin-zero viewport in markerUnits, before stroke-width scaling/rotation.
+  pub physical: Rect,
+  // Attribute reference-point percentage basis, NOT descendant percentage basis.
+  // coords#ElementsThatEstablishViewports excludes marker, even with viewBox.
+  pub reference: Rect,
+  // Content coordinates -> physical marker drawing surface, before placement.
+  pub content: Transform,
+  // Marker-content coordinates -> referencing-element user coordinates.
+  pub mapping: Transform,
+  // Physical viewport coordinates -> referencing-element user coordinates.
+  // Apply overflow policy to physical, NOT to the viewBox rectangle.
+  pub clipMapping: Transform,
+}
+
+impl Copy for Layout {}
+
+effect fn reference(
+  value: &Option<Reference>,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  basis: f64,
+) -> f64
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let result = match &value.* {
+    Option<Reference>.Some { value: reference } => match &reference {
+      Reference.Fraction { value: fraction } => fraction * basis
+      Reference.Expression { expression } => run used_paints.number(
+        &mut engine.*,
+        style,
+        Option<ExprId>.some(expression),
+        basis,
+        0.0,
+      )
+
+      // A marker's missing reference is content zero, unlike symbol's missing
+      // reference, which preserves the unshifted physical viewport origin.
+      Reference.Missing => 0.0
+    }
+    _ => 0.0
+  }
+  if !f64.isFinite(result) {
+    fail RenderError.InvalidGeometry
+  }
+  return result
+}
+
+effect fn validRectangle(value: Rect) -> ()
+  ! RenderError {
+  if !isValidRect(value) || !f64.isFinite(value.width()) || !f64.isFinite(value.height()) {
+    fail RenderError.InvalidGeometry
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerUnitsAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefYAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+// None means disabled by a zero viewport/viewBox or zero strokeWidth-unit scale.
+// Numeric failures are errors, never disabled/identity substitutes.
+// The markerUnits NSS note requires strokeWidth markers to be non-scaling too:
+// callers with host-space strokes supply positions/tangents in that host space,
+// and compose the result with hostToDevice. No scalar CTM approximation belongs
+// here. userSpaceOnUse markers remain in the referencing element's user space.
+pub effect fn resolve(
+  metadata: &MarkerMetadata,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  parentViewport: Rect,
+  strokeWidth: f64,
+  position: MarkerPosition,
+) -> Option<Layout>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  run validRectangle(parentViewport)
+  if !position.position.isFinite() || !f64.isFinite(position.angle) || !f64.isFinite(strokeWidth)
+    || strokeWidth < 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+  let units = match &metadata.units {
+    Option<MarkerUnits>.Some { value } => value
+    _ => MarkerUnits.StrokeWidth
+  }
+  let scale = if units == MarkerUnits.StrokeWidth {
+    strokeWidth
+  } else {
+    1.0
+  }
+  let computedWidth = run used_paints.number(
+    &mut engine.*,
+    style,
+    metadata.width,
+    parentViewport.width(),
+    3.0,
+  )
+  let computedHeight = run used_paints.number(
+    &mut engine.*,
+    style,
+    metadata.height,
+    parentViewport.height(),
+    3.0,
+  )
+
+  // CSS Values #calc-range: selected math expressions clamp at used-value time.
+  // Invalid negative literals were already discarded by metadata parsing.
+  let width = if computedWidth < 0.0 {
+    0.0
+  } else {
+    computedWidth
+  }
+  let height = if computedHeight < 0.0 {
+    0.0
+  } else {
+    computedHeight
+  }
+  let physical = match &checkedRect(0.0, 0.0, width, height) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let user = match &metadata.viewBox {
+    Option<Rect>.Some { value } => value
+    _ => physical
+  }
+  run validRectangle(user)
+  if isEmptyRect(physical) || isEmptyRect(user) || scale == 0.0 {
+    return Option<Layout>.None
+  }
+  let aspectRatio = match &metadata.aspectRatio {
+    Option<AspectRatio>.Some { value } => value
+    _ => AspectRatio.make()
+  }
+  let local = match &metadata.viewBox {
+    Option<Rect>.Some { value } => match &svg.viewportWithAspectRatio(
+      value,
+      width,
+      height,
+      aspectRatio,
+    ) {
+      Option<Transform>.Some { value: mapping } => mapping
+      _ => {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    _ => Transform.identity()
+  }
+
+  // Positive dimensions must not underflow to a collapsed content transform.
+  if local.xx <= 0.0 || local.yy <= 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+
+  // Keywords are percentages of the extent, with NO addition of viewBox minima.
+  let refX = run reference(&metadata.refX, &mut engine.*, style, user.width())
+  let refY = run reference(&metadata.refY, &mut engine.*, style, user.height())
+  let mut reverse = false
+  let angle = match &metadata.orient {
+    Option<MarkerOrient>.Some { value } => match &value {
+      MarkerOrient.Auto => position.angle
+      MarkerOrient.AutoStartReverse => {
+        reverse = position.kind == MarkerKind.Start
+        position.angle
+      }
+
+      // CSS numeric computation canonicalizes angles to degrees; bare numbers
+      // also mean degrees. Geometry MarkerPosition and Transform use radians.
+      MarkerOrient.Angle { expression } => math.radians(
+        run used_paints.number(&mut engine.*, style, Option<ExprId>.some(expression), 1.0, 0.0),
+      )
+    }
+    _ => 0.0
+  }
+  let rotation = Transform.rotation(angle)
+
+  // Negating rather than adding pi preserves reversal even for huge angles.
+  let direction = if reverse {
+    -scale
+  } else {
+    scale
+  }
+  let a = rotation.xx * direction
+  let b = rotation.yx * direction
+  let c = rotation.xy * direction
+  let d = rotation.yy * direction
+  let referencePoint = local * (Point.new(refX, refY))
+  if !referencePoint.isFinite() {
+    fail RenderError.InvalidGeometry
+  }
+  let clipMapping = Transform.new(
+    a,
+    b,
+    c,
+    d,
+    position.position.x - (a * referencePoint.x + c * referencePoint.y),
+    position.position.y - (b * referencePoint.x + d * referencePoint.y),
+  )
+
+  // Reference alignment cancels viewBox/PAR translation in the content map.
+  // Compute it directly, avoiding cancellation of two potentially huge offsets.
+  let ma = a * local.xx
+  let mb = b * local.xx
+  let mc = c * local.yy
+  let md = d * local.yy
+  let mapping = Transform.new(
+    ma,
+    mb,
+    mc,
+    md,
+    position.position.x - (ma * refX + mc * refY),
+    position.position.y - (mb * refX + md * refY),
+  )
+  if !mapping.isFinite() || !clipMapping.isFinite() || (ma == 0.0 && mb == 0.0)
+    || (mc == 0.0 && md == 0.0) {
+    fail RenderError.InvalidGeometry
+  }
+
+  // Finite coefficients alone do not ensure finite physical viewport corners.
+  match &mapRect(clipMapping, physical) {
+    Option<Rect>.Some { value } => {
+      run validRectangle(value)
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return Option<Layout>.some(
+    Layout {
+      physical: physical,
+      reference: user,
+      content: local,
+      mapping: mapping,
+      clipMapping: clipMapping,
+    },
+  )
+}

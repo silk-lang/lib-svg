@@ -1,0 +1,333 @@
+//! SVG surface, paint, dash and coverage limits around the checked vector backend.
+import svg_core.scene { Color, RenderError, Stroke }
+import vector.flatten { Line }
+import silk.num.f32
+import silk.num.f64
+import silk.num.u32
+import silk.num.usize
+import silk.num.u64
+import silk.simd.f32x4
+import silk.simd.mask4
+
+// Aggregate output plus isolated surfaces: 256 MiB of premultiplied RGBA storage.
+pub const MAX_SURFACE_PIXELS: usize = 67108864
+
+pub effect fn dimensions(width: u32, height: u32) -> ()
+  ! RenderError {
+  if width == 0 || height == 0 {
+    fail RenderError.InvalidSize
+  }
+
+  // Coverage uses f32 pixel boundaries and u32 alpha offsets, including padded bands.
+  if width > 16777216 || height > 16777216 {
+    fail RenderError.TooLarge
+  }
+  if u32.toU64(width) * u32.toU64(height) > usize.toU64(MAX_SURFACE_PIXELS) {
+    fail RenderError.TooLarge
+  }
+  let paddedHeight = ((u32.toU64(height) + 3) / 4) * 4
+  let bytes = u32.toU64(width) * paddedHeight * 4
+  if bytes > 4294967295 || bytes > usize.toU64(usize.MAX) {
+    fail RenderError.TooLarge
+  }
+}
+
+pub effect fn unit(value: f64) -> u8
+  ! RenderError {
+  if !f64.isFinite(value) || value < 0.0 || value > 1.0 {
+    fail RenderError.InvalidGeometry
+  }
+  return f64.toU8(value * 255.0 + 0.5)
+}
+
+pub effect fn color(value: Color) -> ()
+  ! RenderError {
+  drop run unit(value.r)
+  drop run unit(value.g)
+  drop run unit(value.b)
+  drop run unit(value.a)
+}
+
+pub effect fn stroke(style: Stroke, dashes: &[f64]) -> ()
+  ! RenderError {
+  if !f64.isFinite(style.width) || style.width < 0.0 || !f64.isFinite(style.miterLimit)
+    || style.miterLimit < 1.0
+    || !f64.isFinite(style.dashOffset) {
+    fail RenderError.InvalidGeometry
+  }
+  let mut total: f64 = 0.0
+  let mut i: usize = 0
+  while i < dashes.length {
+    let value = dashes[i]
+    if !f64.isFinite(value) || value < 0.0 {
+      fail RenderError.InvalidGeometry
+    }
+    total = total + value
+    i = i + 1
+  }
+  if dashes.length % 2 == 1 {
+    total = total * 2.0
+  }
+  if !f64.isFinite(total) {
+    fail RenderError.InvalidGeometry
+  }
+}
+
+pub effect fn lines(lines: &[Line], width: u32, height: u32) -> ()
+  ! RenderError {
+  let w = u32.toF32(width)
+  let h = u32.toF32(height)
+  let mut bandEntries: u64 = 0
+  let mut i: usize = 0
+  while i < lines.length {
+    // Four lines at a time while every one is finite and crosses the surface rows only with
+    // both ends in 0 ..= width; any other group takes the line-by-line checks below.
+    if i + 4 <= lines.length {
+      let entries = fourLines(lines, i, w, h)
+      if entries != u64.MAX {
+        bandEntries = bandEntries + entries
+        if bandEntries > 4294967295 {
+          fail RenderError.InvalidGeometry
+        }
+        i = i + 4
+        continue
+      }
+    }
+    let end = if i + 4 <= lines.length {
+      i + 4
+    } else {
+      lines.length
+    }
+    while i < end {
+      run line(lines[i], w, h, &mut bandEntries)
+      i = i + 1
+    }
+  }
+  if lines.length > 1431655765 {
+    fail RenderError.InvalidGeometry
+  }
+}
+
+// The finite lanes of `value`, as mask bits.
+@inlineAlways
+fn finiteBits(value: simd<f32, 4>) -> u64 {
+  return mask4.toBits(f32x4.lanesEqual(value - value, f32x4.splat(0.0)))
+}
+
+// The band entries of lines `at` .. `at + 4` when all four are finite and each that crosses
+// the surface rows has both ends in 0 ..= width and passes lineArithmetic's in-surface checks,
+// using the same f32 operations lane by lane; u64.MAX when any line needs the scalar checks.
+fn fourLines(lines: &[Line], at: usize, width: f32, height: f32) -> u64 {
+  let a = lines[at]
+  let b = lines[at + 1]
+  let c = lines[at + 2]
+  let d = lines[at + 3]
+  let x0 = f32x4.fromArray([a.x0, b.x0, c.x0, d.x0])
+  let y0 = f32x4.fromArray([a.y0, b.y0, c.y0, d.y0])
+  let x1 = f32x4.fromArray([a.x1, b.x1, c.x1, d.x1])
+  let y1 = f32x4.fromArray([a.y1, b.y1, c.y1, d.y1])
+  if (finiteBits(x0) & finiteBits(y0) & finiteBits(x1) & finiteBits(y1)) != 15 {
+    return u64.MAX
+  }
+  let zero = f32x4.splat(0.0)
+  let w = f32x4.splat(width)
+  let h = f32x4.splat(height)
+  let ascending = f32x4.lanesLess(y0, y1)
+  let low = f32x4.select(ascending, y0, y1)
+  let high = f32x4.select(ascending, y1, y0)
+  let active = mask4.toBits(f32x4.lanesGreater(high, zero)) & mask4.toBits(f32x4.lanesLess(low, h))
+    & mask4.toBits(f32x4.lanesNotEqual(y0, y1))
+  if active == 0 {
+    return 0
+  }
+  let inside = mask4.toBits(f32x4.lanesGreaterOrEqual(x0, zero))
+    & mask4.toBits(f32x4.lanesLessOrEqual(x0, w))
+    & mask4.toBits(f32x4.lanesGreaterOrEqual(x1, zero))
+    & mask4.toBits(f32x4.lanesLessOrEqual(x1, w))
+  if (active & (inside ^ 15)) != 0 {
+    return u64.MAX
+  }
+  let dx = x1 - x0
+  let dy = y1 - y0
+  let slope = dx / dy
+  let start = f32x4.select(f32x4.lanesGreater(low, zero), low, zero)
+  let end = f32x4.select(f32x4.lanesLess(high, h), high, h)
+  let first = (start - low) * slope
+  let last = (end - low) * slope
+  let firstSize = f32x4.select(f32x4.lanesLess(first, zero), zero - first, first)
+  let lastSize = f32x4.select(f32x4.lanesLess(last, zero), zero - last, last)
+  let valid = finiteBits(dx) & finiteBits(dy) & finiteBits(slope) & finiteBits(first)
+    & finiteBits(last)
+    & finiteBits(w + firstSize)
+    & finiteBits(w + lastSize)
+  if (active & (valid ^ 15)) != 0 {
+    return u64.MAX
+  }
+
+  // Inactive lanes convert zero, so every converted lane is in range.
+  let lanes = mask4.fromBits(active)
+  let tops = f32x4.toArray(f32x4.select(lanes, start, zero))
+  let bottoms = f32x4.toArray(f32x4.select(lanes, end, zero))
+  let mut entries: u64 = 0
+  let mut k: usize = 0
+  while k < 4 {
+    if (u64.shiftRight(active, usize.toU64(k)) & 1) == 1 {
+      let firstBand = Intrinsic.f32ToU32(tops[k]) / 4
+      let bottom = bottoms[k]
+      let truncated = Intrinsic.f32ToU32(bottom)
+      let ceiling = if u32.toF32(truncated) < bottom {
+        truncated + 1
+      } else {
+        truncated
+      }
+      let lastBand = (ceiling - 1) / 4
+      entries = entries + u32.toU64(lastBand - firstBand + 1) * 3
+    }
+    k = k + 1
+  }
+  return entries
+}
+
+effect fn line(line: Line, w: f32, h: f32, bandEntries: &mut u64) -> ()
+  ! RenderError {
+  if !f32.isFinite(line.x0) || !f32.isFinite(line.y0) || !f32.isFinite(line.x1)
+    || !f32.isFinite(line.y1) {
+    fail RenderError.InvalidGeometry
+  }
+
+  // The coordinates are finite, so plain selects order them as f32.min/max would
+  // (silk-lang/silk#2566), and the clamped ends lie in 0 ..= h, where truncation is the
+  // floor and needs no range check (f32.ceil is software, silk-lang/silk#2561).
+  let low = if line.y0 < line.y1 {
+    line.y0
+  } else {
+    line.y1
+  }
+  let high = if line.y0 < line.y1 {
+    line.y1
+  } else {
+    line.y0
+  }
+  if high > 0.0 && low < h && line.y0 != line.y1 {
+    run lineArithmetic(line, w, h)
+    let first = Intrinsic.f32ToU32(
+      if low > 0.0 {
+        low
+      } else {
+        0.0
+      },
+    )
+      / 4
+    let bottom: f32 = if high < h {
+      high
+    } else {
+      h
+    }
+    let truncated = Intrinsic.f32ToU32(bottom)
+    let ceiling = if u32.toF32(truncated) < bottom {
+      truncated + 1
+    } else {
+      truncated
+    }
+    let last = (ceiling - 1) / 4
+    bandEntries.* = bandEntries.* + u32.toU64(last - first + 1) * 3
+    if bandEntries.* > 4294967295 {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+// Check the exact f32 operations the backend will perform at the two x clipping
+// boundaries. Candidate pairs only certify arithmetic; vector owns all clipping,
+// subdivision, coverage integration and pixel conversion.
+effect fn lineArithmetic(line: Line, width: f32, height: f32) -> ()
+  ! RenderError {
+  let dx = line.x1 - line.x0
+  let dy = line.y1 - line.y0
+  if !f32.isFinite(dx) || !f32.isFinite(dy) {
+    fail RenderError.InvalidGeometry
+  }
+
+  // Both ends inside [0, width]: no boundary crossings and no clamping, so the
+  // only candidate pair is the line itself (the general loop's a=0, b=1).
+  if line.x0 >= 0.0 && line.x0 <= width && line.x1 >= 0.0 && line.x1 <= width {
+    let low = if line.y0 < line.y1 {
+      line.y0
+    } else {
+      line.y1
+    }
+    let high = if line.y0 < line.y1 {
+      line.y1
+    } else {
+      line.y0
+    }
+    if low < high && low < height && high > 0.0 {
+      let slope = (line.x1 - line.x0) / (line.y1 - line.y0)
+      let start: f32 = if low > 0.0 {
+        low
+      } else {
+        0.0
+      }
+      let end: f32 = if high < height {
+        high
+      } else {
+        height
+      }
+      let first = (start - low) * slope
+      let last = (end - low) * slope
+      if !f32.isFinite(slope) || !f32.isFinite(first) || !f32.isFinite(last)
+        || !f32.isFinite(width + f32.abs(first))
+        || !f32.isFinite(width + f32.abs(last)) {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    return
+  }
+  let mut xs: [f32; 4] = [
+    f32.min(f32.max(line.x0, 0.0), width),
+    f32.min(f32.max(line.x1, 0.0), width),
+    0.0,
+    0.0,
+  ]
+  let mut ys: [f32; 4] = [line.y0, line.y1, 0.0, 0.0]
+  let mut count: usize = 2
+  let mut edge: usize = 0
+  while edge < 2 {
+    let x: f32 = if edge == 0 {
+      0.0
+    } else {
+      width
+    }
+    if (line.x0 < x && line.x1 > x) || (line.x0 > x && line.x1 < x) {
+      let product = (x - line.x0) * dy
+      let y = line.y0 + product / dx
+      if !f32.isFinite(product) || !f32.isFinite(y) {
+        fail RenderError.InvalidGeometry
+      }
+      xs[count] = x
+      ys[count] = y
+      count = count + 1
+    }
+    edge = edge + 1
+  }
+  let mut a: usize = 0
+  while a < count {
+    let mut b = a + 1
+    while b < count {
+      let low = f32.min(ys[a], ys[b])
+      let high = f32.max(ys[a], ys[b])
+      if low < high && low < height && high > 0.0 {
+        let slope = (xs[b] - xs[a]) / (ys[b] - ys[a])
+        let first = (f32.max(low, 0.0) - low) * slope
+        let last = (f32.min(high, height) - low) * slope
+        if !f32.isFinite(slope) || !f32.isFinite(first) || !f32.isFinite(last)
+          || !f32.isFinite(width + f32.abs(first))
+          || !f32.isFinite(width + f32.abs(last)) {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      b = b + 1
+    }
+    a = a + 1
+  }
+}

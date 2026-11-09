@@ -1,0 +1,268 @@
+//! Authored before conditional.silk against svg2-struct and smil-content in specs.lock.json.
+import silk.text.string { String }
+import conditional { Config, qualifies, selectSwitchChild }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlError }
+import svg_css.tokens { equal }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn preferences<'a>(languages: &'a [&'a [u8]], extensions: &'a [&'a [u8]]) -> Config<'a> {
+  return Config { languages: languages, supportedExtensions: extensions }
+}
+
+effect fn qualification(source: &[u8], config: &Config<'_>, expected: bool) -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let document = run XmlDocument.parse(source)
+  run Testing.expect(
+    qualifies(&document, XmlDocument.root(&document), config) == expected,
+    "local conditional tests produce the expected qualification",
+  )
+}
+
+effect fn selection(source: &[u8], config: &Config<'_>, expected: &[u8]) -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let document = run XmlDocument.parse(source)
+  let selected = selectSwitchChild(&document, XmlDocument.root(&document), config)
+  match &selected {
+    Option<XmlNodeId>.Some { value } => {
+      let id = (XmlDocument.attribute(&document, value, "", "id")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes))
+      match &id {
+        Option<&[u8]>.Some { value: actual } => {
+          run Testing.expect(
+            equal(actual, expected),
+            "switch selects the expected actual XML child",
+          )
+        }
+        _ => {
+          run Testing.expect(false, "selected fixture child has an id")
+        }
+      }
+    }
+    _ => {
+      run Testing.expect(expected.length == 0, "no child qualifies")
+    }
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingOverview
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingSystemLanguageAttribute
+test effect fn absentConditionsPassButEmptyLanguagesFail() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let none: [&[u8]; 0] = []
+  let config = preferences(&none, &none)
+  run qualification(b"<g/>", &config, true) |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredFeatures='unsupported'/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredFeatures=''/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage=''/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='en'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(
+    b"<g xmlns:c='urn:test' c:systemLanguage='' c:requiredExtensions=''/>",
+    &config,
+    true,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingSystemLanguageAttribute
+// SVG2 uses HTML comma-token splitting, not SMIL's stricter list grammar: empty
+// members do not match, but do not invalidate another matching member.
+test effect fn languageDirectionCaseAndCommaLists() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let languages: [&[u8]; 1] = [b"EN"]
+  let none: [&[u8]; 0] = []
+  let config = preferences(&languages, &none)
+  run qualification(b"<g systemLanguage='en'/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='fr, en-US'/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='eng'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='  , EN-us, , '/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage=' , , '/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='en fr'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='en;fr'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let regions: [&[u8]; 1] = [b"en-US"]
+  let regional = preferences(&regions, &none)
+  run qualification(b"<g systemLanguage='en'/>", &regional, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g systemLanguage='EN-us'/>", &regional, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let blanks: [&[u8]; 1] = [b""]
+  let empty = preferences(&blanks, &none)
+  run qualification(b"<g systemLanguage='en'/>", &empty, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingRequiredExtensionsAttribute
+test effect fn everyExtensionMustBeExactlySupported() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let languages: [&[u8]; 1] = [b"en"]
+  let extensions: [&[u8]; 2] = [b"urn:a", b"urn:b"]
+  let config = preferences(&languages, &extensions)
+  run qualification(b"<g requiredExtensions=' urn:a&#9;urn:b&#10;urn:a&#13; '/>", &config, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions='urn:a urn:c'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions='urn:A'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions='urn:a,urn:b'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions=''/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions=' &#9; '/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run qualification(b"<g requiredExtensions='urn:a' systemLanguage='fr'/>", &config, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let none: [&[u8]; 0] = []
+  let empty = preferences(&none, &none)
+  run qualification(b"<g requiredExtensions='urn:a'/>", &empty, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement
+// Selection does not consult renderability, display, visibility, or descendants.
+test effect fn actualDirectChildrenBlockRenderingFallbacks() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let none: [&[u8]; 0] = []
+  let config = preferences(&none, &none)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'>text<!--skip--><?skip data?><other xmlns='urn:foreign' id='foreign'/><rect id='fallback'/></switch>",
+    &config,
+    b"foreign",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><rect id='hidden' display='none' visibility='hidden'/><rect id='fallback'/></switch>",
+    &config,
+    b"hidden",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><unknown id='unknown'/><rect id='fallback'/></switch>",
+    &config,
+    b"unknown",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g systemLanguage='fr'><rect id='nested'/></g><g id='features' requiredFeatures='unsupported'/><rect id='fallback'/></switch>",
+    &config,
+    b"features",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g systemLanguage='fr'/><g requiredExtensions='unknown'/></switch>",
+    &config,
+    b"",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'>text<!--only--></switch>",
+    &config,
+    b"",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement
+// https://www.w3.org/TR/REC-smil/smil-content.html#adef-allowReorder
+// SVG2 mandates SMIL's yes behavior even when allowReorder is absent or no.
+// Host preference order wins; equally ranked children retain document order.
+test effect fn svgSwitchAlwaysReordersByHostLanguagePreference() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let languages: [&[u8]; 2] = [b"de", b"en"]
+  let none: [&[u8]; 0] = []
+  let config = preferences(&languages, &none)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='english' systemLanguage='en'/><g id='german' systemLanguage='de'/><g id='fallback'/></switch>",
+    &config,
+    b"german",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg' allowReorder='no'><g id='english' systemLanguage='en'/><g id='german' systemLanguage='de'/></switch>",
+    &config,
+    b"german",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg' allowReorder='yes'><g id='regional' systemLanguage='de-AT'/><g id='exact' systemLanguage='de'/></switch>",
+    &config,
+    b"regional",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='list' systemLanguage='en, de'/><g id='single' systemLanguage='de'/></switch>",
+    &config,
+    b"list",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='unsupported' systemLanguage='de' requiredExtensions='urn:no'/><g id='english' systemLanguage='en'/><g id='fallback'/></switch>",
+    &config,
+    b"english",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/REC-smil/smil-content.html#adef-allowReorder
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ConditionalProcessingSystemLanguageAttribute
+// Language-less candidates rank after all language matches, with document-order
+// ties. SMIL expressly preserves a final fallback; this extends that ranking
+// deterministically to language-less candidates at any position.
+test effect fn unconditionalFallbackAndEmptyHostDefaults() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let languages: [&[u8]; 1] = [b"de"]
+  let none: [&[u8]; 0] = []
+  let config = preferences(&languages, &none)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='fallback'/><g id='german' systemLanguage='de'/></switch>",
+    &config,
+    b"german",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='french' systemLanguage='fr'/><g id='fallback'/><g id='second'/></switch>",
+    &config,
+    b"fallback",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let empty = preferences(&none, &none)
+  run selection(
+    b"<switch xmlns='http://www.w3.org/2000/svg'><g id='german' systemLanguage='de'/><g id='empty' systemLanguage=''/><g id='fallback'/></switch>",
+    &empty,
+    b"fallback",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let document = run XmlDocument.parse(b"<g/>") |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !qualifies(&document, XmlNodeId { index: XmlDocument.nodes(&document).length }, &empty),
+    "invalid ids never qualify",
+  )
+  let selected = selectSwitchChild(&document, XmlDocument.root(&document), &empty)
+  run Testing.expect(
+    match &selected {
+      Option<XmlNodeId>.None => true
+      _ => false
+    },
+    "non-switch elements select no switch child",
+  )
+}

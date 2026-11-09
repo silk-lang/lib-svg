@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#LinearGradientNotes; A valid empty server paints none rather than its URL fallback; one stop is solid even outside a radial cone; a zero linear vector uses the final stop including opacity. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="8">
+<rect x="0" y="0" width="24" height="8" fill="white"/><rect x="8" y="0" width="8" height="8" fill="red" fill-opacity=".5"/><rect x="16" y="0" width="8" height="8" fill="blue" fill-opacity=".5"/>
+</svg>

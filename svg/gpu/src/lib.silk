@@ -1,0 +1,2 @@
+//! Draws SVG display lists through gpu_scene.
+import scene

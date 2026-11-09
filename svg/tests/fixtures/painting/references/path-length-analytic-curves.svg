@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute -->
+<g fill="none" stroke="black" stroke-width="2">
+<path d="M12 8A4 4 0 0 1 8 12M4 8A4 4 0 0 1 8 4"/>
+<path d="M24 24A8 4 0 0 1 16 28M8 24A8 4 0 0 1 16 20"/>
+</g>
+</svg>

@@ -1,0 +1,6 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties -->
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ComputingAViewportsTransform -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <svg x="4" y="4" width="8" height="8" viewBox="0 0 4 4"><rect x="-1" y="-1" width="6" height="6" fill="blue"/></svg>
+  <rect x="24" y="2" width="4" height="4" fill="green"/>
+</svg>

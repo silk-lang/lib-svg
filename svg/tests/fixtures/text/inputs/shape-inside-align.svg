@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="130">
+<defs>
+<rect id="a" x="20" y="10" width="160" height="24"/>
+<rect id="b" x="20" y="40" width="160" height="24"/>
+<rect id="c" x="20" y="70" width="160" height="24"/>
+<rect id="d" x="20" y="100" width="160" height="24"/>
+</defs>
+<g font-family="Noto Sans" font-size="16" style="line-height: 24px">
+<text style="shape-inside: url(#a); text-align: center">Lorem ipsum</text>
+<text style="shape-inside: url(#b); text-align: right">Lorem ipsum</text>
+<text text-anchor="middle" style="shape-inside: url(#c)">Lorem ipsum</text>
+<text style="shape-inside: url(#d); text-align: end">Lorem ipsum</text>
+</g>
+</svg>

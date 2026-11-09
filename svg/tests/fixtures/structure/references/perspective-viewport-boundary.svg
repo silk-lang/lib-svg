@@ -1,0 +1,2 @@
+<!-- w=1-16/32=.5: the physical viewport [8,16]^2 becomes [16,32]^2. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect x="16" y="16" width="16" height="16"/><rect x="40" width="8" height="8" fill="red"/></svg>

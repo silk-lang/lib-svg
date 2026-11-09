@@ -1,0 +1,338 @@
+import used_vector_effects { Resolution, Used }
+import used_vector_effects
+import mapping { Mapping }
+import svg_geometry.geometry { Point, Transform, Vector }
+import vector.projective { Homography }
+import vector.geometry_error { GeometryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.f64
+
+// SVG2 CR coords SHA256 79f20813910f1866e40bf1548064ff2e47c095e425931a31063cf58f6c5334eb.
+effect fn used(result: &Resolution) -> Used
+  ! AssertionError<'static> {
+  match &result.* {
+    Resolution.Used { value } => {
+      return value
+    }
+    _ => {
+      run Testing.expect(false, "finite specified vector effect resolves")
+      return Used {
+        localToHost: Mapping.identity(),
+        hostToDevice: Mapping.identity(),
+        flags: 0,
+        strokeInHost: false,
+      }
+    }
+  }
+}
+
+effect fn affine(actual: &Mapping, expected: Transform) -> ()
+  ! AssertionError<'static> {
+  match &actual.* {
+    Mapping.Affine { value } => {
+      let a = value.coefficients()
+      let e = expected.coefficients()
+      let mut i: usize = 0
+      while i < 6 {
+        run Testing.expect(
+          f64.abs(a[i] - e[i]) <= 0.000000000001 * f64.max(1.0, f64.abs(e[i])),
+          "normative matrix coefficient",
+        )
+        i = i + 1
+      }
+    }
+    _ => {
+      run Testing.expect(false, "expected affine host mapping")
+    }
+  }
+}
+
+fn projective() -> Mapping {
+  return Mapping.Projective {
+    value: Homography {
+      xx: 2.0,
+      xy: 0.0,
+      xw: 7.0,
+      yx: 0.0,
+      yy: 3.0,
+      yw: 11.0,
+      wx: 0.01,
+      wy: -0.02,
+      ww: 1.0,
+    },
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn allGeometryCombinationsUseDeterminantScale() -> ()
+  ! AssertionError<'static> {
+  let original = Mapping.Affine { value: Transform.new(4.0, 0.0, 3.0, 1.0, 40.0, 50.0) }
+  let expected = [
+    Transform.new(4.0, 0.0, 3.0, 1.0, 40.0, 50.0),
+    Transform.new(2.0, 0.0, 1.5, 0.5, 40.0, 50.0),
+    Transform.new(2.0, 0.0, 0.0, 2.0, 40.0, 50.0),
+    Transform.new(1.0, 0.0, 0.0, 1.0, 40.0, 50.0),
+    Transform.new(4.0, 0.0, 3.0, 1.0, 7.0, 9.0),
+    Transform.new(2.0, 0.0, 1.5, 0.5, 7.0, 9.0),
+    Transform.new(2.0, 0.0, 0.0, 2.0, 7.0, 9.0),
+    Transform.new(1.0, 0.0, 0.0, 1.0, 7.0, 9.0),
+  ]
+  let flags: [u8; 8] = [0, 2, 4, 6, 8, 10, 12, 14]
+  let mut i: usize = 0
+  while i < flags.length {
+    let result = run used(
+      &used_vector_effects.resolve(flags[i], &original, &Mapping.identity(), Point.new(7.0, 9.0)),
+    )
+    run affine(&result.localToHost, expected[i])
+    run Testing.expect(result.flags == flags[i], "retain effective CSS flags")
+    run Testing.expect(result.strokeInHost == ((flags[i] & 2) != 0), "size implies host stroke")
+    let stroke = run used(
+      &used_vector_effects.resolve(
+        flags[i] | 1,
+        &original,
+        &Mapping.identity(),
+        Point.new(7.0, 9.0),
+      ),
+    )
+    run affine(&stroke.localToHost, expected[i])
+    run Testing.expect(
+      stroke.strokeInHost && stroke.flags == (flags[i] | 1),
+      "stroke combines with every geometry effect",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn rotationAndReflectionAreNotColumnNormalized() -> ()
+  ! AssertionError<'static> {
+  // A reflected quarter-turn with unequal singular values and determinant -4.
+  let original = Mapping.Affine { value: Transform.new(0.0, 4.0, 1.0, 0.0, 5.0, 6.0) }
+  let size = run used(
+    &used_vector_effects.resolve(2, &original, &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  run affine(&size.localToHost, Transform.new(0.0, 2.0, 0.5, 0.0, 5.0, 6.0))
+  let rotation = run used(
+    &used_vector_effects.resolve(4, &original, &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  run affine(&rotation.localToHost, Transform.new(2.0, 0.0, 0.0, 2.0, 5.0, 6.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectProperty
+test effect fn fixedPositionConsumesOwnTransformTranslationOnly() -> ()
+  ! AssertionError<'static> {
+  let own = Transform.new(2.0, 1.0, 3.0, 4.0, 7.0, 9.0)
+  let parent = Transform.new(3.0, 0.0, 0.0, 5.0, 100.0, 200.0)
+  let original = Mapping.Affine { value: parent * own }
+  let result = run used(
+    &used_vector_effects.resolve(8, &original, &Mapping.identity(), Point.new(own.dx, own.dy)),
+  )
+  run affine(&result.localToHost, Transform.new(6.0, 5.0, 9.0, 20.0, 7.0, 9.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#NestedVectorEffectsCalculation
+test effect fn nestedViewportAndScreenHaveDifferentHosts() -> ()
+  ! AssertionError<'static> | GeometryError {
+  let local = Mapping.Affine { value: Transform.new(4.0, 0.0, 0.0, 1.0, 10.0, 20.0) }
+  let outer = Mapping.Affine { value: Transform.new(3.0, 0.0, 0.0, 3.0, 100.0, 200.0) }
+  let viewport = run used(&used_vector_effects.resolve(14, &local, &outer, Point.new(7.0, 9.0)))
+  let viewportDevice = run viewport.hostToDevice.compose(&viewport.localToHost)
+  run affine(&viewportDevice, Transform.new(3.0, 0.0, 0.0, 3.0, 121.0, 227.0))
+  let screenLocal = run outer.compose(&local)
+
+  // Device pixel ratio stays OUTSIDE the screen CSS-pixel host.
+  let device = Mapping.Affine { value: Transform.scale(2.0, 2.0) }
+  let screen = run used(
+    &used_vector_effects.resolve(14, &screenLocal, &device, Point.new(7.0, 9.0)),
+  )
+  let screenDevice = run screen.hostToDevice.compose(&screen.localToHost)
+  run affine(&screenDevice, Transform.new(2.0, 0.0, 0.0, 2.0, 14.0, 18.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn singularSizeInvalidatesEntireCombinedEffect() -> ()
+  ! AssertionError<'static> {
+  let original = Mapping.Affine { value: Transform.new(1.0, 2.0, 2.0, 4.0, 30.0, 40.0) }
+  let result = run used(
+    &used_vector_effects.resolve(15, &original, &Mapping.identity(), Point.new(7.0, 9.0)),
+  )
+  run affine(&result.localToHost, Transform.new(1.0, 2.0, 2.0, 4.0, 30.0, 40.0))
+  run Testing.expect(
+    result.flags == 0 && !result.strokeInHost,
+    "zero determinant makes whole property none",
+  )
+  let rotation = run used(
+    &used_vector_effects.resolve(12, &original, &Mapping.identity(), Point.new(7.0, 9.0)),
+  )
+  run affine(&rotation.localToHost, Transform.new(0.0, 0.0, 0.0, 0.0, 7.0, 9.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn extremeDeterminantsAvoidProductOverflowAndUnderflow() -> ()
+  ! AssertionError<'static> {
+  let scales = [1.0e300, 1.0e-300, f64.fromBits(1)]
+  let mut i: usize = 0
+  while i < scales.length {
+    let original = Mapping.Affine { value: Transform.scale(scales[i], scales[i]) }
+    let result = run used(
+      &used_vector_effects.resolve(2, &original, &Mapping.identity(), Point.new(0.0, 0.0)),
+    )
+    run affine(&result.localToHost, Transform.identity())
+    i = i + 1
+  }
+  let mixed = Mapping.Affine { value: Transform.scale(1.0e300, 1.0e-300) }
+  let result = run used(
+    &used_vector_effects.resolve(4, &mixed, &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  run affine(&result.localToHost, Transform.identity())
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn finiteUnrepresentableResultIsNotSingularFallback() -> ()
+  ! AssertionError<'static> {
+  let original = Mapping.Affine { value: Transform.scale(1.0e308, f64.fromBits(1)) }
+  run Testing.expect(
+    match &used_vector_effects.resolve(2, &original, &Mapping.identity(), Point.new(0.0, 0.0)) {
+      Resolution.NumericLimit => true
+      _ => false
+    },
+    "unrepresentable normalized coefficient is a numeric limit, not none",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn nonfiniteInputsAndUnknownFlagsAreRejected() -> ()
+  ! AssertionError<'static> {
+  let bad = Mapping.Affine { value: Transform.scale(f64.INFINITY, 1.0) }
+  let results = [
+    used_vector_effects.resolve(0, &bad, &Mapping.identity(), Point.new(0.0, 0.0)),
+    used_vector_effects.resolve(0, &Mapping.identity(), &bad, Point.new(0.0, 0.0)),
+    used_vector_effects.resolve(
+      8,
+      &Mapping.identity(),
+      &Mapping.identity(),
+      Point.new(f64.fromBits(9221120237041090560), 0.0),
+    ),
+    used_vector_effects.resolve(16, &Mapping.identity(), &Mapping.identity(), Point.new(0.0, 0.0)),
+  ]
+  let mut i: usize = 0
+  while i < results.length {
+    run Testing.expect(
+      match &results[i] {
+        Resolution.InvalidInput => true
+        _ => false
+      },
+      "invalid numeric input has an explicit outcome",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#non-scaling-stroke
+test effect fn strokeRetainsExactHostMapsWithoutScaleApproximation() -> ()
+  ! AssertionError<'static> {
+  let local = Mapping.Affine { value: Transform.new(4.0, 2.0, 3.0, 1.0, 10.0, 20.0) }
+  let outer = Mapping.Affine { value: Transform.scale(2.0, 3.0) }
+  let result = run used(&used_vector_effects.resolve(1, &local, &outer, Point.new(0.0, 0.0)))
+  run Testing.expect(
+    result.strokeInHost && result.flags == 1,
+    "stroke constructed in selected host",
+  )
+  run affine(&result.localToHost, Transform.new(4.0, 2.0, 3.0, 1.0, 10.0, 20.0))
+  run affine(&result.hostToDevice, Transform.scale(2.0, 3.0))
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+// https://drafts.csswg.org/css-transforms-2/#3d-transform-rendering
+// Explicit policy: affine formulas do not define a projective geometry effect.
+test effect fn projectiveGeometryIsDistinctFromThreeDimensionalContext() -> ()
+  ! AssertionError<'static> {
+  let flags: [u8; 7] = [2, 4, 6, 8, 10, 12, 14]
+  let mut i: usize = 0
+  while i < flags.length {
+    run Testing.expect(
+      match &used_vector_effects.resolve(
+        flags[i],
+        &projective(),
+        &Mapping.identity(),
+        Point.new(7.0, 9.0),
+      ) {
+        Resolution.ProjectiveGeometry => true
+        _ => false
+      },
+      "no invented projective decomposition and no silent none fallback",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#non-scaling-stroke
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#NestedVectorEffectsCalculation
+test effect fn projectiveStrokeAndOuterProjectionRemainSupported() -> ()
+  ! AssertionError<'static> {
+  let stroke = run used(
+    &used_vector_effects.resolve(1, &projective(), &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  run Testing.expect(stroke.strokeInHost, "projective mapping does not disable non-scaling stroke")
+  run Testing.expect(
+    match &stroke.localToHost {
+      Mapping.Projective { value } => value.wx == 0.01 && value.wy == -0.02 && value.ww == 1.0
+      _ => false
+    },
+    "retain projective w and its sign for clipping",
+  )
+  let geometry = run used(
+    &used_vector_effects.resolve(14, &Mapping.identity(), &projective(), Point.new(7.0, 9.0)),
+  )
+  run affine(&geometry.localToHost, Transform.translation(Vector.new(7.0, 9.0)))
+  run Testing.expect(
+    match &geometry.hostToDevice {
+      Mapping.Projective { value } => value.wx == 0.01 && value.wy == -0.02 && value.ww == 1.0
+      _ => false
+    },
+    "outer projective transform is outside vector effect host",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn overflowingAreaCanStillHaveFiniteNormalizedGeometry() -> ()
+  ! AssertionError<'static> {
+  let largest = f64.fromBits(9218868437227405311)
+  let original = Mapping.Affine {
+    value: Transform.new(largest, largest, -largest, largest, 0.0, 0.0),
+  }
+  let size = run used(
+    &used_vector_effects.resolve(2, &original, &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  let unit = 1.0 / f64.sqrt(2.0)
+  run affine(&size.localToHost, Transform.new(unit, unit, -unit, unit, 0.0, 0.0))
+  run Testing.expect(
+    match &used_vector_effects.resolve(4, &original, &Mapping.identity(), Point.new(0.0, 0.0)) {
+      Resolution.NumericLimit => true
+      _ => false
+    },
+    "unrepresentable uniform non-rotation scale is rejected",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#VectorEffectsCalculation
+test effect fn positiveConstantHomogeneousWIsStillAffine() -> ()
+  ! AssertionError<'static> {
+  let original = Mapping.Projective {
+    value: Homography {
+      xx: 8.0,
+      xy: 0.0,
+      xw: 10.0,
+      yx: 0.0,
+      yy: 2.0,
+      yw: 12.0,
+      wx: 0.0,
+      wy: 0.0,
+      ww: 2.0,
+    },
+  }
+  let result = run used(
+    &used_vector_effects.resolve(2, &original, &Mapping.identity(), Point.new(0.0, 0.0)),
+  )
+  run affine(&result.localToHost, Transform.new(2.0, 0.0, 0.0, 0.5, 5.0, 6.0))
+}

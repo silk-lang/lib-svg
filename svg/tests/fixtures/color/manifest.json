@@ -1,0 +1,371 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "color-icc-srgb",
+      "input": "inputs/icc-srgb.svg",
+      "references": [
+        {
+          "path": "references/icc-srgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP matrix/TRC profile (srgb) converted to sRGB; expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-linear",
+      "input": "inputs/icc-linear.svg",
+      "references": [
+        {
+          "path": "references/icc-linear.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP matrix/TRC profile (linear) converted to sRGB; expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-wide-gamma",
+      "input": "inputs/icc-wide-gamma.svg",
+      "references": [
+        {
+          "path": "references/icc-wide-gamma.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP matrix/TRC profile (wide-gamma) converted to sRGB; expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-table",
+      "input": "inputs/icc-table.svg",
+      "references": [
+        {
+          "path": "references/icc-table.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP matrix/TRC profile (table) converted to sRGB; expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-parametric",
+      "input": "inputs/icc-parametric.svg",
+      "references": [
+        {
+          "path": "references/icc-parametric.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP matrix/TRC profile (parametric) converted to sRGB; expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-gray",
+      "input": "inputs/icc-gray.svg",
+      "references": [
+        {
+          "path": "references/icc-gray.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Gray TRC profile (ICC.1:2022 F.2): luminance maps to the PCS white.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-alpha",
+      "input": "inputs/icc-alpha.svg",
+      "references": [
+        {
+          "path": "references/icc-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Translucent samples convert their straight values; alpha is unchanged.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-lut-malformed",
+      "input": "inputs/icc-lut-malformed.svg",
+      "references": [
+        {
+          "path": "references/icc-lut-malformed.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A truncated lut16Type A2B0 tag is ignored and the samples are treated as sRGB.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-malformed",
+      "input": "inputs/icc-malformed.svg",
+      "references": [
+        {
+          "path": "references/icc-malformed.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A truncated profile is ignored and the samples are treated as sRGB.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-over-gama",
+      "input": "inputs/icc-over-gama.svg",
+      "references": [
+        {
+          "path": "references/icc-over-gama.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "iCCP takes precedence over gAMA.",
+      "spec": "https://www.w3.org/TR/png-3/#11iCCP",
+      "tolerance": {}
+    },
+    {
+      "id": "color-gama",
+      "input": "inputs/gama.svg",
+      "references": [
+        {
+          "path": "references/gama.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "gAMA alone: linear = sample^(100000/gAMA) with sRGB primaries ",
+      "spec": "https://www.w3.org/TR/png-3/#11gAMA",
+      "tolerance": {}
+    },
+    {
+      "id": "color-gama-chrm",
+      "input": "inputs/gama-chrm.svg",
+      "references": [
+        {
+          "path": "references/gama-chrm.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "gAMA with cHRM: primaries and white adapted to D50 with Bradford.",
+      "spec": "https://www.w3.org/TR/png-3/#11cHRM",
+      "tolerance": {}
+    },
+    {
+      "id": "color-chrm-srgb",
+      "input": "inputs/chrm-srgb.svg",
+      "references": [
+        {
+          "path": "references/chrm-srgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "cHRM with sRGB primaries and no gAMA keeps sRGB samples.",
+      "spec": "https://www.w3.org/TR/png-3/#11cHRM",
+      "tolerance": {}
+    },
+    {
+      "id": "color-srgb-over-gama",
+      "input": "inputs/srgb-over-gama.svg",
+      "references": [
+        {
+          "path": "references/srgb-over-gama.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An sRGB chunk overrides gAMA and cHRM.",
+      "spec": "https://www.w3.org/TR/png-3/#11sRGB",
+      "tolerance": {}
+    },
+    {
+      "id": "color-jpeg-icc",
+      "input": "inputs/jpeg-icc.svg",
+      "references": [
+        {
+          "path": "references/jpeg-icc.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "JPEG APP2 ICC_PROFILE (ICC.1:2022 Annex B); uniform gray 128 survives the DCT exactly.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=97",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-paint",
+      "input": "inputs/icc-paint.svg",
+      "references": [
+        {
+          "path": "references/icc-paint.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "icc-color() through matrix/TRC and gray profiles; a wrong component count or unknown profile uses the sRGB fallback.",
+      "spec": "https://www.w3.org/TR/SVG11/painting.html#SpecifyingPaint",
+      "tolerance": {}
+    },
+    {
+      "id": "color-icc-stop-flood",
+      "input": "inputs/icc-stop-flood.svg",
+      "references": [
+        {
+          "path": "references/icc-stop-flood.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "stop-color, flood-color and paint-server fallbacks accept icc-color().",
+      "spec": "https://www.w3.org/TR/SVG11/painting.html#SpecifyingPaint",
+      "tolerance": {}
+    },
+    {
+      "id": "color-image-color-profile",
+      "input": "inputs/image-color-profile.svg",
+      "references": [
+        {
+          "path": "references/image-color-profile.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "color-profile on images: sRGB ignores the embedded profile per occurrence, names and IRIs select a color-profile element, the property inherits, unknown names keep auto.",
+      "spec": "https://www.w3.org/TR/SVG11/color.html#ColorProfileProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "color-at-color-profile",
+      "input": "inputs/at-color-profile.svg",
+      "references": [
+        {
+          "path": "references/at-color-profile.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "@color-profile rules name profiles for icc-color() and the color-profile property.",
+      "spec": "https://www.w3.org/TR/SVG11/color.html#ColorProfileAtRule",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-mft2-lab",
+      "input": "inputs/lut-mft2-lab.svg",
+      "references": [
+        {
+          "path": "references/lut-mft2-lab.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP with a LUT-based A2B0 tag (mft2-lab); expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-mft1-lab",
+      "input": "inputs/lut-mft1-lab.svg",
+      "references": [
+        {
+          "path": "references/lut-mft1-lab.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP with a LUT-based A2B0 tag (mft1-lab); expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-mab-xyz",
+      "input": "inputs/lut-mab-xyz.svg",
+      "references": [
+        {
+          "path": "references/lut-mab-xyz.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP with a LUT-based A2B0 tag (mab-xyz); expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-mab-intents",
+      "input": "inputs/lut-mab-intents.svg",
+      "references": [
+        {
+          "path": "references/lut-mab-intents.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "PNG iCCP with a LUT-based A2B0 tag (mab-intents); expected colours evaluated independently.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-gray",
+      "input": "inputs/lut-gray.svg",
+      "references": [
+        {
+          "path": "references/lut-gray.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Gray lut16Type with a legacy Lab PCS.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-paint",
+      "input": "inputs/lut-paint.svg",
+      "references": [
+        {
+          "path": "references/lut-paint.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "icc-color() through CMYK and RGB LUT profiles; the element rendering-intent selects A2B1.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    },
+    {
+      "id": "color-lut-image-intent",
+      "input": "inputs/lut-image-intent.svg",
+      "references": [
+        {
+          "path": "references/lut-image-intent.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A color-profile element's rendering-intent picks the AToB tag used for images.",
+      "spec": "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65",
+      "tolerance": {}
+    }
+  ]
+}

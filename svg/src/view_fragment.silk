@@ -1,0 +1,704 @@
+//! Fragment syntax only. Document lookup, :target selection and view application
+//! stay with the caller; no source XML or computed styles are mutated here.
+import svg_css.values { Store, ValueId, Value, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.properties { Property }
+import svg_css.tokens { Limits, CssError, CssErrorKind }
+import svg_css.lexer
+import svg_geometry.geometry { Rect }
+import svg_geometry.svg
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.numeric
+import silk.text.utf8_scan as Utf8
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.core.result { Result }
+import silk.collections.slice { Slice }
+import silk.text.string { String, InvalidUtf8 }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.usize
+import silk.num.u8
+import silk.num.u64
+import silk.num.f64
+
+pub enum ZoomAndPan {
+  Magnify,
+  Disable
+}
+
+pub enum SpatialUnit {
+  Pixel,
+  Percent
+}
+
+pub struct SpatialView {
+  pub unit: SpatialUnit,
+  pub x: u64,
+  pub y: u64,
+  pub width: u64,
+  pub height: u64,
+}
+
+impl Copy for SpatialView {}
+
+pub struct TimeSegment {
+  pub start: f64,
+  pub end: Option<f64>,
+}
+
+impl Copy for TimeSegment {}
+
+pub struct ViewOverrides<'a> {
+  pub viewBox: Option<Rect>,
+  pub aspectRatio: Option<AspectRatio>,
+  pub transform: Option<ValueId>,
+  pub zoomAndPan: Option<ZoomAndPan>,
+  pub viewTarget: Option<&'a [u8]>,
+}
+
+impl<'a> ViewOverrides<'a> {
+  pub fn empty() -> ViewOverrides<'a> {
+    return ViewOverrides<'a> {
+      viewBox: Option<Rect>.None,
+      aspectRatio: Option<AspectRatio>.None,
+      transform: Option<ValueId>.None,
+      zoomAndPan: Option<ZoomAndPan>.None,
+      viewTarget: Option<&'a [u8]>.None,
+    }
+  }
+}
+
+pub struct Fragment<'a> {
+  pub valid: bool,
+  pub id: Option<&'a [u8]>,
+  pub view: Option<ViewOverrides<'a>>,
+  pub spatial: Option<SpatialView>,
+  pub temporal: Option<TimeSegment>,
+}
+
+impl<'a> Fragment<'a> {
+  pub fn root() -> Fragment<'a> {
+    return Fragment<'a> {
+      valid: true,
+      id: Option<&'a [u8]>.None,
+      view: Option<ViewOverrides<'a>>.None,
+      spatial: Option<SpatialView>.None,
+      temporal: Option<TimeSegment>.None,
+    }
+  }
+}
+
+fn invalid<'a>() -> Fragment<'a> {
+  let mut result = Fragment<'a>.root()
+  result.valid = false
+  return move result
+}
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut i: usize = 0
+  while i < a.length {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn part<'a>(data: &'a [u8], start: usize, end: usize) -> &'a [u8] {
+  return Slice.view<u8>(data, start, end - start)
+}
+
+fn starts(data: &[u8], prefix: &[u8]) -> bool {
+  return data.length >= prefix.length && equal(part(data, 0, prefix.length), prefix)
+}
+
+fn space(data: &[u8], at: usize) -> usize {
+  let mut next = at
+  while next < data.length && numeric.whitespace(data[next]) {
+    next = next + 1
+  }
+  return next
+}
+
+fn wordEnd(data: &[u8], at: usize) -> usize {
+  let mut next = at
+  while next < data.length && !numeric.whitespace(data[next]) {
+    next = next + 1
+  }
+  return next
+}
+
+fn validUtf8(data: &[u8]) -> bool {
+  return match &String.fromUtf8(data) {
+    Result<string, InvalidUtf8>.Success { value } => true
+    _ => false
+  }
+}
+
+// XML 1.0 Fifth Edition #NT-NameStartChar; XML IDs are not CSS identifiers.
+fn nameStart(c: u32) -> bool {
+  return c == 58 || c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    || (c >= 192 && c <= 214)
+    || (c >= 216 && c <= 246)
+    || (c >= 248 && c <= 767)
+    || (c >= 880 && c <= 893)
+    || (c >= 895 && c <= 8191)
+    || (c >= 8204 && c <= 8205)
+    || (c >= 8304 && c <= 8591)
+    || (c >= 11264 && c <= 12271)
+    || (c >= 12289 && c <= 55295)
+    || (c >= 63744 && c <= 64975)
+    || (c >= 65008 && c <= 65533)
+    || (c >= 65536 && c <= 983039)
+}
+
+fn name(data: &[u8]) -> bool {
+  if data.length == 0 || !validUtf8(data) {
+    return false
+  }
+  let mut at: usize = 0
+  while at < data.length {
+    let cp = Utf8.decode(data, at)
+    if !nameStart(cp.scalar)
+      && (at == 0
+        || !(cp.scalar == 45 || cp.scalar == 46 || (cp.scalar >= 48 && cp.scalar <= 57)
+          || cp.scalar == 183
+          || (cp.scalar >= 768 && cp.scalar <= 879)
+          || (cp.scalar >= 8255 && cp.scalar <= 8256))) {
+      return false
+    }
+    at = cp.next
+  }
+  return true
+}
+
+pub fn zoomAndPan(data: &[u8]) -> Option<ZoomAndPan> {
+  let at = space(data, 0)
+  let end = wordEnd(data, at)
+  if space(data, end) != data.length {
+    return Option<ZoomAndPan>.None
+  }
+  let token = part(data, at, end)
+  if equal(token, b"magnify") {
+    return Option<ZoomAndPan>.some(ZoomAndPan.Magnify)
+  }
+  if equal(token, b"disable") {
+    return Option<ZoomAndPan>.some(ZoomAndPan.Disable)
+  }
+  return Option<ZoomAndPan>.None
+}
+
+pub effect fn viewTarget<'a>(data: &'a [u8], limits: &Limits) -> Option<&'a [u8]>
+  ! CssError {
+  if data.length > limits.maxInputBytes {
+    fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+  }
+  let mut at = space(data, 0)
+  let mut count: usize = 0
+  while at < data.length {
+    if count >= limits.maxTokens {
+      fail CssError { kind: CssErrorKind.TokenLimit, offset: at }
+    }
+    let end = wordEnd(data, at)
+    if !name(part(data, at, end)) {
+      return Option<&'a [u8]>.None
+    }
+    count = count + 1
+    at = space(data, end)
+  }
+  if count == 0 {
+    return Option<&'a [u8]>.None
+  }
+  return Option<&'a [u8]>.Some { value: data }
+}
+
+// SVG2 refers to the transform property; SVG1.1 refers to the SVG attribute.
+// Accept the two complete grammars, never a token-by-token hybrid. CSS values
+// retain their operations and projective components in the shared value arena.
+effect fn transform(data: &[u8], store: &mut Store<'_>, limits: &Limits) -> Option<ValueId>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let buffer = run lexer.tokenize(data, limits)
+  let input = Input.Contiguous { buffer: &buffer, range: buffer.all() }
+  let legacy = run values.parse(&mut store.*, Property.Transform, &input, Mode.Presentation)
+  match &legacy {
+    Option<ValueId>.Some { value } => match &store.get(value).* {
+      Value.Transform { value: typed } => {
+        return legacy
+      }
+      _ => {
+        return Option<ValueId>.None
+      }
+    }
+    _ => {}
+  }
+  let css = run values.parse(&mut store.*, Property.Transform, &input, Mode.Css)
+  return match &css {
+    Option<ValueId>.Some { value } => match &store.get(value).* {
+      Value.Transform { value: typed } => css
+      _ => Option<ValueId>.None
+    }
+    _ => Option<ValueId>.None
+  }
+}
+
+// Balanced scanning also honors CSS strings/comments so delimiters inside a
+// transform's CSS syntax are never mistaken for outer svgView delimiters.
+effect fn closing(data: &[u8], start: usize, limits: &Limits) -> Option<usize>
+  ! CssError {
+  let mut at = start
+  let mut depth: usize = 1
+  if depth > limits.maxDepth {
+    fail CssError { kind: CssErrorKind.NestingLimit, offset: at }
+  }
+  let mut quote: u8 = 0
+  while at < data.length {
+    let c = data[at]
+    if quote != 0 {
+      if c == 92 && data.length - at >= 2 {
+        at = at + 2
+        continue
+      }
+      if c == quote {
+        quote = 0
+      }
+    } else if c == 34 || c == 39 {
+      quote = c
+    } else if c == 47 && data.length - at >= 2 && data[at + 1] == 42 {
+      at = at + 2
+      while data.length - at >= 2 && !(data[at] == 42 && data[at + 1] == 47) {
+        at = at + 1
+      }
+      if data.length - at < 2 {
+        return Option<usize>.None
+      }
+      at = at + 2
+      continue
+    } else if c == 40 {
+      if depth >= limits.maxDepth {
+        fail CssError { kind: CssErrorKind.NestingLimit, offset: at }
+      }
+      depth = depth + 1
+    } else if c == 41 {
+      depth = depth - 1
+      if depth == 0 {
+        return Option<usize>.some(at)
+      }
+    } else if c == 92 && data.length - at >= 2 {
+      at = at + 2
+      continue
+    }
+    at = at + 1
+  }
+  return Option<usize>.None
+}
+
+effect fn view<'a>(data: &'a [u8], store: &mut Store<'_>, limits: &Limits) -> Option<
+  ViewOverrides<'a>
+>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if !starts(data, b"svgView(") || data.length < 9 || data[data.length - 1] != 41 {
+    return Option<ViewOverrides<'a>>.None
+  }
+  let body = part(data, 8, data.length - 1)
+  let mut at: usize = 0
+  let mut seen = [false; 5]
+  let mut result = ViewOverrides<'a>.empty()
+  if at == body.length {
+    return Option<ViewOverrides<'a>>.None
+  }
+  while at < body.length {
+    let start = at
+    while at < body.length && body[at] != 40 {
+      at = at + 1
+    }
+    if at == body.length {
+      return Option<ViewOverrides<'a>>.None
+    }
+    let component = part(body, start, at)
+    let index: usize = if equal(component, b"viewBox") {
+      0
+    } else if equal(component, b"preserveAspectRatio") {
+      1
+    } else if equal(component, b"transform") {
+      2
+    } else if equal(component, b"zoomAndPan") {
+      3
+    } else if equal(component, b"viewTarget") {
+      4
+    } else {
+      return Option<ViewOverrides<'a>>.None
+    }
+    if seen[index] {
+      return Option<ViewOverrides<'a>>.None
+    }
+    seen[index] = true
+    let end = match &(run closing(body, at + 1, limits)) {
+      Option<usize>.Some { value } => value
+      _ => {
+        return Option<ViewOverrides<'a>>.None
+      }
+    }
+    let parameter = part(body, at + 1, end)
+    if index == 0 {
+      result.viewBox = svg.viewBox(parameter)
+      match &result.viewBox {
+        Option<Rect>.None => {
+          return Option<ViewOverrides<'a>>.None
+        }
+        _ => {}
+      }
+    } else if index == 1 {
+      result.aspectRatio = svg.aspectRatio(parameter)
+      match &result.aspectRatio {
+        Option<AspectRatio>.None => {
+          return Option<ViewOverrides<'a>>.None
+        }
+        _ => {}
+      }
+    } else if index == 2 {
+      result.transform = run transform(parameter, &mut store.*, limits)
+      match &result.transform {
+        Option<ValueId>.None => {
+          return Option<ViewOverrides<'a>>.None
+        }
+        _ => {}
+      }
+    } else if index == 3 {
+      result.zoomAndPan = zoomAndPan(parameter)
+      match &result.zoomAndPan {
+        Option<ZoomAndPan>.None => {
+          return Option<ViewOverrides<'a>>.None
+        }
+        _ => {}
+      }
+    } else {
+      result.viewTarget = run viewTarget(parameter, limits)
+      match &result.viewTarget {
+        Option<&[u8]>.None => {
+          return Option<ViewOverrides<'a>>.None
+        }
+        _ => {}
+      }
+    }
+    at = end + 1
+    if at == body.length {
+      break
+    }
+    if body[at] != 59 {
+      return Option<ViewOverrides<'a>>.None
+    }
+    at = at + 1
+    if at == body.length {
+      return Option<ViewOverrides<'a>>.None
+    }
+  }
+  return Option<ViewOverrides<'a>>.Some { value: move result }
+}
+
+fn integer(data: &[u8]) -> Option<u64> {
+  if data.length == 0 {
+    return Option<u64>.None
+  }
+  let mut n: u64 = 0
+  let mut at: usize = 0
+  while at < data.length {
+    let c = data[at]
+    if c < 48 || c > 57 {
+      return Option<u64>.None
+    }
+    let digit = u8.toU64(c - 48)
+    if n > (u64.MAX - digit) / 10 {
+      return Option<u64>.None
+    }
+    n = n * 10 + digit
+    at = at + 1
+  }
+  return Option<u64>.some(n)
+}
+
+fn spatial(data: &[u8]) -> Option<SpatialView> {
+  let mut at: usize = 0
+  let mut unit = SpatialUnit.Pixel
+  if starts(data, b"pixel:") {
+    at = 6
+  } else if starts(data, b"percent:") {
+    at = 8
+    unit = SpatialUnit.Percent
+  }
+  let mut components: [u64; 4] = [0; 4]
+  let mut index: usize = 0
+  while index < 4 {
+    let start = at
+    while at < data.length && data[at] != 44 {
+      at = at + 1
+    }
+    components[index] = match &integer(part(data, start, at)) {
+      Option<u64>.Some { value } => value
+      _ => {
+        return Option<SpatialView>.None
+      }
+    }
+    if index < 3 {
+      if at == data.length {
+        return Option<SpatialView>.None
+      }
+      at = at + 1
+    }
+    index = index + 1
+  }
+  if at != data.length || components[2] == 0 || components[3] == 0 {
+    return Option<SpatialView>.None
+  }
+  if unit == SpatialUnit.Percent
+    && (components[0] > 100 || components[1] > 100 || components[2] > 100 || components[3] > 100) {
+    return Option<SpatialView>.None
+  }
+  return Option<SpatialView>.some(
+    SpatialView {
+      unit: unit,
+      x: components[0],
+      y: components[1],
+      width: components[2],
+      height: components[3],
+    },
+  )
+}
+
+fn decimal(data: &[u8], fractional: bool) -> Option<f64> {
+  if data.length == 0 || data[0] < 48 || data[0] > 57 {
+    return Option<f64>.None
+  }
+  let mut dot = false
+  let mut at: usize = 0
+  while at < data.length {
+    let c = data[at]
+    if c == 46 && fractional && !dot {
+      dot = true
+    } else if c < 48 || c > 57 {
+      return Option<f64>.None
+    }
+    at = at + 1
+  }
+  return numeric.number(data)
+}
+
+fn time(data: &[u8]) -> Option<f64> {
+  let mut fields: [f64; 3] = [0.0; 3]
+  let mut widths: [usize; 3] = [0; 3]
+  let mut count: usize = 0
+  let mut at: usize = 0
+  while true {
+    if count == 3 {
+      return Option<f64>.None
+    }
+    let start = at
+    while at < data.length && data[at] != 58 {
+      at = at + 1
+    }
+    let token = part(data, start, at)
+    let mut width: usize = 0
+    while width < token.length && token[width] != 46 {
+      width = width + 1
+    }
+    widths[count] = width
+    fields[count] = match &decimal(token, at == data.length) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<f64>.None
+      }
+    }
+    count = count + 1
+    if at == data.length {
+      break
+    }
+    at = at + 1
+  }
+  if count == 1 {
+    return Option<f64>.some(fields[0])
+  }
+  if widths[count - 1] != 2 || fields[count - 1] >= 60.0 {
+    return Option<f64>.None
+  }
+  if widths[count - 2] != 2 || fields[count - 2] >= 60.0 {
+    return Option<f64>.None
+  }
+  let result = if count == 2 {
+    fields[0] * 60.0 + fields[1]
+  } else {
+    fields[0] * 3600.0 + fields[1] * 60.0 + fields[2]
+  }
+  if !f64.isFinite(result) {
+    return Option<f64>.None
+  }
+  return Option<f64>.some(result)
+}
+
+fn temporal(data: &[u8]) -> Option<TimeSegment> {
+  let start: usize = if starts(data, b"npt:") {
+    4
+  } else {
+    0
+  }
+  let mut comma = start
+  while comma < data.length && data[comma] != 44 {
+    comma = comma + 1
+  }
+  let begin = if comma == start && comma < data.length {
+    0.0
+  } else {
+    match &time(part(data, start, comma)) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<TimeSegment>.None
+      }
+    }
+  }
+  let mut end = Option<f64>.None
+  if comma < data.length {
+    let value = match &time(part(data, comma + 1, data.length)) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<TimeSegment>.None
+      }
+    }
+    if value <= begin {
+      return Option<TimeSegment>.None
+    }
+    end = Option<f64>.some(value)
+  }
+  return Option<TimeSegment>.some(TimeSegment { start: begin, end: end })
+}
+
+fn hex(c: u8) -> u8 {
+  if c >= 48 && c <= 57 {
+    return c - 48
+  }
+  if c >= 65 && c <= 70 {
+    return c - 65 + 10
+  }
+  if c >= 97 && c <= 102 {
+    return c - 97 + 10
+  }
+  return 255
+}
+
+// encoded/decoded must be the corresponding fragment slices from Url.fragment
+// and Url.decodedFragment, without '#'. The relation is checked while scanning.
+// Literal media delimiters are found BEFORE decoding; svgView's inner grammar
+// deliberately sees decoded separators. No per-component byte buffers are made.
+pub effect fn parse<'a>(
+  encoded: &[u8],
+  decoded: &'a [u8],
+  store: &mut Store<'_>,
+  limits: &Limits,
+) -> Fragment<'a>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if encoded.length > limits.maxInputBytes || decoded.length > limits.maxInputBytes {
+    fail CssError { kind: CssErrorKind.InputLimit, offset: 0 }
+  }
+  let mut result = Fragment<'a>.root()
+  let mut raw: usize = 0
+  let mut at: usize = 0
+  let mut count: usize = 0
+  while raw < encoded.length {
+    if count >= limits.maxTokens {
+      fail CssError { kind: CssErrorKind.TokenLimit, offset: raw }
+    }
+    let start = at
+    let mut equals = usize.MAX
+    let mut valid = true
+    while raw < encoded.length && encoded[raw] != 38 {
+      let mut c = encoded[raw]
+      if c == 61 && equals == usize.MAX {
+        equals = at
+      }
+      if c == 37 {
+        if encoded.length - raw >= 3 && hex(encoded[raw + 1]) != 255
+          && hex(encoded[raw + 2]) != 255 {
+          c = hex(encoded[raw + 1]) * 16 + hex(encoded[raw + 2])
+          raw = raw + 3
+        } else {
+          valid = false
+          raw = raw + 1
+        }
+      } else {
+        raw = raw + 1
+      }
+      if at >= decoded.length || decoded[at] != c {
+        return invalid<'a>()
+      }
+      at = at + 1
+    }
+    let segment = part(decoded, start, at)
+    if count == 0 && starts(segment, b"svgView(") {
+      if !valid {
+        return invalid<'a>()
+      }
+      result.view = run view(segment, &mut store.*, limits)
+      match &result.view {
+        Option<ViewOverrides<'a>>.None => {
+          return invalid<'a>()
+        }
+        _ => {}
+      }
+    } else if equals != usize.MAX {
+      let key = part(decoded, start, equals)
+      let value = part(decoded, equals + 1, at)
+      if valid && validUtf8(key) && validUtf8(value) {
+        if equal(key, b"t") {
+          let parsed = temporal(value)
+          match &parsed {
+            Option<TimeSegment>.Some { value: found } => {
+              result.temporal = parsed
+            }
+            _ => {}
+          }
+        } else if equal(key, b"xywh") {
+          // SVG2 permits spatial+temporal combinations, not a second spatial
+          // selection alongside an ordinary ID or explicit svgView.
+          let root = match &result.id {
+            Option<&[u8]>.None => match &result.view {
+              Option<ViewOverrides<'a>>.None => true
+              _ => false
+            }
+            _ => false
+          }
+          if root {
+            let parsed = spatial(value)
+            match &parsed {
+              Option<SpatialView>.Some { value: found } => {
+                result.spatial = parsed
+              }
+              _ => {}
+            }
+          }
+        }
+      }
+    } else if count == 0 && segment.length != 0 {
+      if !valid || !name(segment) {
+        return invalid<'a>()
+      }
+      result.id = Option<&'a [u8]>.Some { value: segment }
+    }
+    count = count + 1
+    if raw < encoded.length {
+      if at >= decoded.length || decoded[at] != 38 {
+        return invalid<'a>()
+      }
+      raw = raw + 1
+      at = at + 1
+    }
+  }
+  if at != decoded.length {
+    return invalid<'a>()
+  }
+  return move result
+}

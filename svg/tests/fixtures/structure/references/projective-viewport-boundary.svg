@@ -1,0 +1,2 @@
+<!-- x'=x/(1+x/32), y'=y/(1+x/32), applied to the physical viewport corners. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M6.4 6.4L10.666666666666666 5.333333333333333L10.666666666666666 10.666666666666666L6.4 12.8Z"/><rect x="24" width="8" height="8" fill="red"/></svg>

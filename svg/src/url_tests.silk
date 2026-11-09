@@ -1,0 +1,356 @@
+import url { Url, UrlError }
+import url
+import url_idna
+import silk.num.u32
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+effect fn absolute(input: &[u8], expected: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let value = run Url.parseAbsolute(input)
+  run Testing.expect(equal(Url.bytes(&value), expected), "URL canonical serialization")
+}
+
+effect fn relative(base: &Url, input: &[u8], expected: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let value = run Url.resolve(base, input)
+  run Testing.expect(equal(Url.bytes(&value), expected), "relative URL resolution")
+}
+
+effect fn invalid(input: &[u8]) -> ()
+  ! OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let attempted = run Effect.result(Url.parseAbsolute(input))
+  match move attempted {
+    Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+      run Testing.expect(false, "invalid URL must fail")
+    }
+    Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
+      match move error {
+        UrlError reason => {
+          run Testing.expect(reason == UrlError.InvalidUrl, "malformed URL is invalid")
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+  }
+}
+
+// https://url.spec.whatwg.org/#concept-basic-url-parser
+// https://url.spec.whatwg.org/#path-state
+// https://url.spec.whatwg.org/#concept-url-serializer
+effect fn canonicalCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run absolute(
+    b" \tHTTP://EXAMPLE.COM:00080/a/./b/%2e%2E/c?q=' x'#f x\n",
+    b"http://example.com/a/c?q=%27%20x%27#f%20x",
+  )
+  run absolute(b"https:\\EXAMPLE.COM\\a\\..\\b", b"https://example.com/b")
+  run absolute(b"http://user:@EXAMPLE.COM", b"http://user@example.com/")
+  run absolute(b"http://a@b:c@host:81/", b"http://a%40b:c@host:81/")
+  run absolute(b"custom://Case.Host:0009/a/../b?x#y", b"custom://Case.Host:9/b?x#y")
+  run absolute(b"custom:/.//not-a-host/", b"custom:/.//not-a-host/")
+  run absolute(b"https://example.com/\xC3\xA9", b"https://example.com/%C3%A9")
+
+  // A percent validation error alone is not a parser failure in the URL Standard.
+  run absolute(b"https://example.com/%zz", b"https://example.com/%zz")
+
+  // https://url.spec.whatwg.org/#concept-domain-to-ascii
+  // The pinned non-strict domain parser bypasses UTS46 errors for ASCII domains.
+  run absolute(b"http://XN--8I7CAA/", b"http://xn--8i7caa/")
+  run absolute(b"https://b%C3%BCcher.example/", b"https://xn--bcher-kva.example/")
+  run absolute(b"custom://\xC3\xA9/a", b"custom://%C3%A9/a")
+}
+
+test effect fn canonicalUrlComponents() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run canonicalCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://url.spec.whatwg.org/#relative-state
+// https://url.spec.whatwg.org/#special-relative-or-authority-state
+effect fn relativeCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://user:p@example.com:443/a/b.css?old#old")
+  run relative(&base, b"../c.css", b"https://user:p@example.com/c.css")
+  run relative(&base, b"?new", b"https://user:p@example.com/a/b.css?new")
+  run relative(&base, b"#new", b"https://user:p@example.com/a/b.css?old#new")
+  run relative(&base, b"", b"https://user:p@example.com/a/b.css?old")
+  run relative(&base, b"//EXAMPLE.ORG/x", b"https://example.org/x")
+  run relative(&base, b"/x", b"https://user:p@example.com/x")
+  run relative(&base, b"https:other.css", b"https://user:p@example.com/a/other.css")
+  run relative(&base, b"https:/other.css", b"https://user:p@example.com/other.css")
+  run relative(&base, b"https:\\\\OTHER/x", b"https://other/x")
+  let custom = run Url.parseAbsolute(b"custom:/a/b")
+  run relative(&custom, b"../c", b"custom:/c")
+  run relative(&custom, b".//x", b"custom:/a//x")
+  let protected = run Url.parseAbsolute(b"custom:/.//a/b")
+  run relative(&protected, b"../../c", b"custom:/c")
+  run relative(&protected, b"../c", b"custom:/.//c")
+}
+
+test effect fn resolveReferencesAndQueries() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run relativeCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://url.spec.whatwg.org/#file-state
+// https://url.spec.whatwg.org/#file-host-state
+// https://url.spec.whatwg.org/#shorten-a-urls-path
+effect fn fileCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run absolute(b"file://LOCALHOST/a/%2E%2e/b", b"file:///b")
+  run absolute(b"file:///C|/a/../../b", b"file:///C:/b")
+  run absolute(b"file://C:/a", b"file:///C:/a")
+  run absolute(b"file:relative", b"file:///relative")
+  let base = run Url.parseAbsolute(b"file:///C:/a/b.svg?q")
+  run relative(&base, b"/x", b"file:///C:/x")
+  run relative(&base, b"file:../c.css", b"file:///C:/c.css")
+  run relative(&base, b"/D|/x", b"file:///D:/x")
+  run relative(&base, b"D|/x", b"file:///D:/x")
+  let path = run Url.fromFilePath(b"/tmp/a #?%\xFF.svg")
+  run Testing.expect(
+    equal(Url.bytes(&path), b"file:///tmp/a%20%23%3F%25%FF.svg"),
+    "host path punctuation and arbitrary bytes remain data",
+  )
+  let decoded = run Url.decodedPath(&path)
+  run Testing.expect(equal(Bytes.asSlice(&decoded), b"/tmp/a #?%\xFF.svg"), "host path round trip")
+}
+
+test effect fn fileUrlsAndHostPathEscaping() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run fileCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://url.spec.whatwg.org/#concept-ipv4-parser
+// https://url.spec.whatwg.org/#concept-ipv6-parser
+// https://url.spec.whatwg.org/#concept-ipv6-serializer
+effect fn addressCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run absolute(b"http://127.1", b"http://127.0.0.1/")
+  run absolute(b"http://0x7f.01", b"http://127.0.0.1/")
+  run absolute(b"http://2130706433", b"http://127.0.0.1/")
+  run absolute(b"http://127.0.0.1.", b"http://127.0.0.1/")
+  run absolute(b"http://[2001:0DB8:0:0:1:0:0:1]:80", b"http://[2001:db8::1:0:0:1]/")
+  run absolute(b"http://[::ffff:192.0.2.1]/", b"http://[::ffff:c000:201]/")
+  run absolute(b"http://[::]/", b"http://[::]/")
+  run absolute(b"http://[1:0:2:3:4:5:6:7]/", b"http://[1:0:2:3:4:5:6:7]/")
+  run invalid(b"http://09/")
+  run invalid(b"http://256.1/")
+  run invalid(b"http://4294967296/")
+  run invalid(b"http://[1::2::3]/")
+  run invalid(b"http://[::ffff:192.00.2.1]/")
+  run invalid(b"http://[::ffff:256.0.0.1]/")
+}
+
+test effect fn canonicalIpAddressesAndFailures() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run addressCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://url.spec.whatwg.org/#cannot-be-a-base-url-path-state
+// https://url.spec.whatwg.org/#no-scheme-state
+effect fn opaqueCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run absolute(b"DATA:text/plain,a/../b?q#f", b"data:text/plain,a/../b?q#f")
+  run absolute(b"custom:a b ?q", b"custom:a b%20?q")
+  let base = run Url.parseAbsolute(b"data:,hello?query#old")
+  run relative(&base, b"#new", b"data:,hello?query#new")
+  let attempted = run Effect.result(Url.resolve(&base, b"x"))
+  run Testing.expect(
+    match &attempted {
+      Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match &error {
+        UrlError reason => reason == UrlError.InvalidUrl
+        _ => false
+      }
+      _ => false
+    },
+    "opaque URLs cannot resolve relative paths",
+  )
+  let fragment = run Url.parseAbsolute(b"custom:a#id%20one")
+  let decoded = run Url.decodedFragment(&fragment)
+  run Testing.expect(
+    match &decoded {
+      Option<Bytes>.Some { value } => equal(Bytes.asSlice(&value), b"id one")
+      _ => false
+    },
+    "fragment decoding is explicit",
+  )
+  run Testing.expect(
+    equal(Url.withoutFragment(&fragment), b"custom:a"),
+    "cache identity excludes fragment only",
+  )
+
+  // https://url.spec.whatwg.org/#percent-decode
+  let literalPercent = run Url.parseAbsolute(b"custom:a#id%zz")
+  let percentFragment = run Url.decodedFragment(&literalPercent)
+  run Testing.expect(
+    match &percentFragment {
+      Option<Bytes>.Some { value } => equal(Bytes.asSlice(&value), b"id%zz")
+      _ => false
+    },
+    "URL percent decoding preserves a validation-error percent spelling",
+  )
+}
+
+test effect fn opaquePathsAndFragments() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run opaqueCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://url.spec.whatwg.org/#concept-host-parser
+// https://url.spec.whatwg.org/#port-state
+effect fn malformedCases() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run invalid(b"relative/path")
+  run invalid(b"http://")
+  run invalid(b"https://example.com:65536/")
+  run invalid(b"https://example.com:abc/")
+  run invalid(b"https://exa%23mple.com/")
+  run invalid(b"https://exa mple.com/")
+  run invalid(b"https://%FF/")
+  run invalid(b"file://user@host/a")
+  run invalid(b"file://host:80/a")
+  run invalid(b"custom://:80/a")
+  let malformed = run Effect.result(url.percentDecode(b"x%0G"))
+  run Testing.expect(
+    match &malformed {
+      Result<Bytes, UrlError | OutOfMemoryError>.Failure { error } => match &error {
+        UrlError reason => reason == UrlError.InvalidPercentEncoding
+        _ => false
+      }
+      _ => false
+    },
+    "strict resource percent decoding rejects malformed triplets",
+  )
+}
+
+test effect fn malformedUrlsFailWithoutTraps() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run malformedCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn inputLimit(input: &[u8]) -> ()
+  ! OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let attempted = run Effect.result(Url.parseAbsolute(input))
+  match move attempted {
+    Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+      run Testing.expect(false, "IDNA resource exhaustion must fail")
+    }
+    Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
+      match move error {
+        UrlError reason => {
+          run Testing.expect(
+            reason == UrlError.InputLimit,
+            "IDNA resource exhaustion is InputLimit, not InvalidUrl",
+          )
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+  }
+}
+
+effect fn idnaResourceCases() -> ()
+  ! OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  // Ignored soft hyphens keep the mapped domain valid and small, isolating bytes.
+  let mut oversized = Bytes.make()
+  run oversized.append(b"https://a")
+  let mut i: usize = 0
+  while i < url_idna.maxInputBytes() / 2 {
+    run oversized.append(b"\xC2\xAD")
+    i = i + 1
+  }
+  run inputLimit(oversized.asSlice())
+
+  let mut scalars = Bytes.make()
+  run scalars.append(b"https://\xC3\xBC")
+  i = 0
+  while i < url_idna.maxScalars() {
+    run scalars.append(b"a")
+    i = i + 1
+  }
+  run inputLimit(scalars.asSlice())
+
+  // Both marks are valid after a starter. Canonical ordering must move every
+  // grave (CCC230) past every preceding comma-above-right (CCC232): >16Mi work.
+  let mut ordering = Bytes.make()
+  run ordering.append(b"https://a")
+  i = 0
+  while i < 8192 {
+    run ordering.append(b"\xCC\x95")
+    i = i + 1
+  }
+  i = 0
+  while i < 4096 {
+    run ordering.append(b"\xCC\x80")
+    i = i + 1
+  }
+  run inputLimit(ordering.asSlice())
+
+  // Distinct valid CJK scalars are already NFC, isolating punycode's repeated
+  // minimum/search passes: 3000 * (2 * 3000) exceeds the shared work budget.
+  let mut encoding = Bytes.make()
+  run encoding.append(b"https://")
+  let mut cp: u32 = 0x4e00
+  while cp < 0x4e00 + 3000 {
+    let bytes = [
+      u32.toU8(0xe0 + cp / 4096),
+      u32.toU8(0x80 + cp / 64 % 64),
+      u32.toU8(0x80 + cp % 64),
+    ]
+    run encoding.append(&bytes)
+    cp = cp + 1
+  }
+  run inputLimit(encoding.asSlice())
+
+  // A non-ASCII label invokes UTS46 for the entire domain. Pure ASCII domains
+  // intentionally retain the URL Standard's non-strict validation bypass.
+  run invalid(b"https://xn--0.\xC3\xBC/")
+  run invalid(b"https://xn--999999999999999999999999999999999999.\xC3\xBC/")
+  run invalid(b"https://xn--u-ccb.\xC3\xBC/")
+}
+
+test effect fn idnaResourceExhaustionIsNotInvalidUrl() -> ()
+  ! OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run idnaResourceCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}

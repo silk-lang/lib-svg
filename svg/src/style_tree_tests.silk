@@ -1,0 +1,91 @@
+//! Host-language selector semantics over the retained XML arena.
+import silk.text.string { String }
+import style_tree
+import style_tree { Tree }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind, XmlError }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.lexer { tokenize }
+import svg_css.selectors { SelectorList, Specificity, matchElement }
+import svg_css.selectors as selectors
+import svg_css.element { MatchContext, NO_ELEMENT }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn selected(tree: &Tree<'_>, source: &[u8], wanted: &[&[u8]]) -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let limits = Limits.make()
+  let tokens = run tokenize(source, &limits)
+  let parsed = run selectors.parse(&tokens, tokens.all(), &[], &limits)
+  match &parsed {
+    Option<SelectorList>.Some { value } => {
+      let mut context = MatchContext.make(XmlDocument.root(tree.document).index, NO_ELEMENT)
+      let nodes = XmlDocument.nodes(tree.document)
+      let mut count: usize = 0
+      let mut i: usize = 0
+      while i < nodes.length {
+        if nodes[i].kind == XmlNodeKind.Element {
+          let result = run matchElement(&value, &tokens, tree, i, &mut context)
+          let actual = match &result {
+            Option<Specificity>.Some { value: specificity } => true
+            _ => false
+          }
+          let id = (XmlDocument.attribute(tree.document, XmlNodeId { index: i }, "", "id")
+            |> Option<string>.map<&[u8]>(String.utf8Bytes))
+          let mut expected = false
+          match &id {
+            Option<&[u8]>.Some { value: name } => {
+              let mut j: usize = 0
+              while j < wanted.length {
+                if equal(name, wanted[j]) {
+                  expected = true
+                }
+                j = j + 1
+              }
+            }
+            _ => {}
+          }
+          run Testing.expect(
+            actual == expected,
+            "selector selects precisely the expected XML elements",
+          )
+          if actual {
+            count = count + 1
+          }
+        }
+        i = i + 1
+      }
+      run Testing.expect(count == wanted.length, "every expected element is selected")
+    }
+    _ => {
+      run Testing.expect(false, "fixture selector is valid")
+    }
+  }
+}
+
+// https://www.w3.org/TR/selectors-4/#id-selectors
+// https://www.w3.org/TR/selectors-4/#the-nth-child-pseudo
+// https://www.w3.org/TR/selectors-4/#lang-pseudo
+// https://www.w3.org/TR/selectors-4/#empty-pseudo
+// https://www.w3.org/TR/selectors-4/#link
+// https://www.w3.org/TR/xml/#sec-attribute-types
+test effect fn xmlMetadataControlsSelectorMatching() -> ()
+  ! CssError | XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let doc = run XmlDocument.parse(
+    b"<!DOCTYPE svg [<!ATTLIST rect key ID #IMPLIED>]><svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' xml:lang='en'><g lang='fr'><rect id='first' key=' chosen '/><!--ignored--><?ignored value?><rect id='second'/><g id='blank' xml:lang=''> \n<!--ignored--></g><a id='modern' href=''/><a id='legacy' xlink:href='#first'/><a id='not-link'/></g></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let tree = run style_tree.make(&doc) |> Effect.provideMut<Allocator>(&mut allocator)
+  run selected(&tree, b"g:lang(fr) > rect:nth-child(2)", &[b"second"])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selected(&tree, b"#chosen", &[b"first"]) |> Effect.provideMut<Allocator>(&mut allocator)
+  run selected(&tree, b"#blank:empty:not(:lang(fr))", &[b"blank"])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selected(&tree, b"a:link", &[b"modern", b"legacy"])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run selected(&tree, b"svg:root > g > rect:first-child + rect", &[b"second"])
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

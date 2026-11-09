@@ -1,0 +1,2647 @@
+//! SMIL animation sampled at a document time (SVG 1.1 ch. 19, SMIL Animation, SVG
+//! Animations 2). `timeline` finds each animation element's intervals once; its `apply`
+//! computes each value at a time, combines the animations of one attribute in the sandwich,
+//! and writes the results into the document: XML attributes directly, CSS properties as
+//! attributes in `animated()` that the cascade reads at the animation origin. `sample` does
+//! both for one time.
+import silk.text.string { String }
+import svg_css.colors
+import svg_css.colors { Identity, Color as CssColor }
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.tokens { Limits, CssError }
+import svg_css.tokens { TokenBuffer }
+import svg_css.value_cursor { Cursor }
+import svg_geometry.svg
+import svg_geometry.geometry { Path, Point, Segment, Transform }
+import svg_text.on_path { OnPath, Offset }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import document_styles
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.core.result { Result }
+import silk.io.writer { Writer, WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.text.format { Format }
+import silk.num.f64
+import silk.num.u8
+import silk.num.usize
+
+/// The namespace of the attributes that carry animated CSS property values.
+pub fn animated() -> string<'static> {
+  return "urn:silk:svg:animated"
+}
+
+// No animation may have more intervals than this.
+const MAX_INTERVALS: usize = 10000
+
+fn equal(left: &[u8], right: &[u8]) -> bool {
+  if left.length != right.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < left.length {
+    if left[index] != right[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn space(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 12
+}
+
+fn trim(bytes: &[u8]) -> &[u8] {
+  let mut start: usize = 0
+  let mut end = bytes.length
+  while start < end && space(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && space(bytes[end - 1]) {
+    end = end - 1
+  }
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+fn view(bytes: &[u8], start: usize, end: usize) -> &[u8] {
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+fn startsWith(bytes: &[u8], prefix: &[u8]) -> bool {
+  return bytes.length >= prefix.length && equal(view(bytes, 0, prefix.length), prefix)
+}
+
+fn digit(byte: u8) -> bool {
+  return byte >= 48 && byte <= 57
+}
+
+fn letter(byte: u8) -> bool {
+  return (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+}
+
+// The ';'-separated items of a list, trimmed; a trailing empty item is dropped.
+effect fn items(bytes: &[u8], out: &mut List<Bytes>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut start: usize = 0
+  while start <= bytes.length {
+    let mut end = start
+    while end < bytes.length && bytes[end] != 59 {
+      end = end + 1
+    }
+    let item = trim(view(bytes, start, end))
+    if item.length > 0 || end < bytes.length {
+      run out.append(run Bytes.copy(item))
+    }
+    start = end + 1
+  }
+}
+
+// --- Clock values (SMIL 3 #Timing-ClockValueSyntax) -----------------------------------------
+
+// Decimal digits with an optional fraction, as seconds-free plain numbers.
+fn decimal(bytes: &[u8]) -> Option<f64> {
+  if bytes.length == 0 {
+    return Option<f64>.None
+  }
+  let mut value: f64 = 0.0
+  let mut at: usize = 0
+  let mut digits: usize = 0
+  while at < bytes.length && digit(bytes[at]) {
+    value = value * 10.0 + u8.toF64(bytes[at] - 48)
+    at = at + 1
+    digits = digits + 1
+  }
+  if at < bytes.length && bytes[at] == 46 {
+    at = at + 1
+    let mut scale: f64 = 0.1
+    while at < bytes.length && digit(bytes[at]) {
+      value = value + u8.toF64(bytes[at] - 48) * scale
+      scale = scale / 10.0
+      at = at + 1
+      digits = digits + 1
+    }
+  }
+  if digits == 0 || at != bytes.length {
+    return Option<f64>.None
+  }
+  return Option<f64>.Some { value: value }
+}
+
+// Digits only, for the hour, minute and second fields of clock values.
+fn whole(bytes: &[u8]) -> Option<f64> {
+  let mut k: usize = 0
+  while k < bytes.length {
+    if !digit(bytes[k]) {
+      return Option<f64>.None
+    }
+    k = k + 1
+  }
+  return decimal(bytes)
+}
+
+/// A clock value in seconds: hh:mm:ss.f, mm:ss.f, or a timecount with h, min, s or ms.
+pub fn clock(text: &[u8]) -> Option<f64> {
+  let bytes = trim(text)
+  let mut colons: [usize; 2] = [0, 0]
+  let mut count: usize = 0
+  let mut k: usize = 0
+  while k < bytes.length {
+    if bytes[k] == 58 {
+      if count == 2 {
+        return Option<f64>.None
+      }
+      colons[count] = k
+      count = count + 1
+    }
+    k = k + 1
+  }
+  if count > 0 {
+    let mut hours: f64 = 0.0
+    let mut from: usize = 0
+    if count == 2 {
+      hours = match whole(view(bytes, 0, colons[0])) {
+        Option<f64>.Some { value } => value
+        _ => {
+          return Option<f64>.None
+        }
+      }
+      from = colons[0] + 1
+    }
+    let split = colons[count - 1]
+    let minutes = match whole(view(bytes, from, split)) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<f64>.None
+      }
+    }
+    let seconds = match decimal(view(bytes, split + 1, bytes.length)) {
+      Option<f64>.Some { value } => value
+      _ => {
+        return Option<f64>.None
+      }
+    }
+    if split - from != 2 || bytes.length - split - 1 < 2 || minutes >= 60.0 || seconds >= 60.0 {
+      return Option<f64>.None
+    }
+    return Option<f64>.Some { value: hours * 3600.0 + minutes * 60.0 + seconds }
+  }
+  let mut end = bytes.length
+  while end > 0 && letter(bytes[end - 1]) {
+    end = end - 1
+  }
+  let metric = view(bytes, end, bytes.length)
+  let scale = if metric.length == 0 || equal(metric, b"s") {
+    1.0
+  } else if equal(metric, b"ms") {
+    0.001
+  } else if equal(metric, b"min") {
+    60.0
+  } else if equal(metric, b"h") {
+    3600.0
+  } else {
+    return Option<f64>.None
+  }
+  return match decimal(view(bytes, 0, end)) {
+    Option<f64>.Some { value } => Option<f64>.Some { value: value * scale }
+    _ => Option<f64>.None
+  }
+}
+
+// An optional sign and a clock value.
+fn offset(text: &[u8]) -> Option<f64> {
+  let bytes = trim(text)
+  if bytes.length > 0 && (bytes[0] == 43 || bytes[0] == 45) {
+    return match clock(view(bytes, 1, bytes.length)) {
+      Option<f64>.Some { value } => Option<f64>.Some {
+        value: if bytes[0] == 45 {
+          -value
+        } else {
+          value
+        },
+      }
+      _ => Option<f64>.None
+    }
+  }
+  return clock(bytes)
+}
+
+// --- Timing model ---------------------------------------------------------------------------
+
+/// One begin or end value (SMIL 3 #Timing-BeginValueSyntax).
+union TimeValue {
+  Offset { pub time: f64 },
+  Indefinite,
+  /// Begins or ends of the intervals of another animation, plus an offset.
+  Sync { pub animation: usize, pub end: bool, pub delta: f64 },
+  /// The start of iteration `iteration` of another animation, plus an offset.
+  Repeat { pub animation: usize, pub iteration: f64, pub delta: f64 },
+  /// Event, access key and wallclock values never resolve without a host timeline.
+  Never,
+}
+
+impl Copy for TimeValue {}
+
+enum Restart {
+  Always,
+  WhenNotActive,
+  Never,
+}
+
+enum Calc {
+  Discrete,
+  Linear,
+  Paced,
+  Spline,
+}
+
+enum Kind {
+  Animate,
+  Set,
+  AnimateColor,
+  AnimateTransform,
+  AnimateMotion,
+}
+
+/// animateMotion's rotate attribute (SVG Animations 2 #RotateAttribute).
+union Rotate {
+  Angle { pub value: f64 },
+  Auto,
+  AutoReverse,
+}
+
+impl Copy for Rotate {}
+
+enum TransformType {
+  Translate,
+  Scale,
+  Rotate,
+  SkewX,
+  SkewY,
+}
+
+enum State {
+  Pending,
+  Busy,
+  Done,
+}
+
+struct Interval {
+  begin: f64,
+  end: f64,
+}
+
+impl Copy for Interval {}
+
+struct Animation {
+  node: XmlNodeId,
+  target: XmlNodeId,
+  kind: Kind,
+  namespace: Bytes,
+  name: Bytes,
+  css: bool,
+  begins: List<TimeValue>,
+  ends: List<TimeValue>,
+  hasEnd: bool,
+  /// The simple duration; infinite when indefinite or absent.
+  duration: f64,
+  repeatCount: Option<f64>,
+  repeatDuration: Option<f64>,
+  minimum: f64,
+  maximum: f64,
+  restart: Restart,
+  freeze: bool,
+  calc: Calc,
+  values: List<Bytes>,
+  keyTimes: List<f64>,
+  keySplines: List<f64>,
+  from: Option<Bytes>,
+  to: Option<Bytes>,
+  by: Option<Bytes>,
+  additive: bool,
+  accumulate: bool,
+  transform: TransformType,
+  /// animateMotion's path data, from an mpath reference or the path attribute.
+  path: Option<Bytes>,
+  keyPoints: List<f64>,
+  rotate: Rotate,
+  state: State,
+  intervals: List<Interval>,
+}
+
+struct Identified {
+  id: Bytes,
+  node: XmlNodeId,
+}
+
+fn attribute<'d>(document: &'d XmlDocument, node: XmlNodeId, name: string) -> Option<&'d [u8]> {
+  return (XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+}
+
+fn text<'d>(document: &'d XmlDocument, node: XmlNodeId, name: string) -> &'d [u8] {
+  return match attribute(document, node, name) {
+    Option<&[u8]>.Some { value } => trim(value)
+    _ => b""
+  }
+}
+
+fn element(document: &XmlDocument, node: XmlNodeId) -> bool {
+  return XmlDocument.nodes(document)[node.index].kind == XmlNodeKind.Element
+}
+
+fn findId(ids: &[Identified], id: &[u8]) -> Option<XmlNodeId> {
+  let mut k: usize = 0
+  while k < ids.length {
+    if equal(Bytes.asSlice(&ids[k].id), id) {
+      return Option<XmlNodeId>.Some { value: ids[k].node }
+    }
+    k = k + 1
+  }
+  return Option<XmlNodeId>.None
+}
+
+fn animationOf(animations: &List<Animation>, node: XmlNodeId) -> Option<usize> {
+  let all = animations.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    if all[k].node.index == node.index {
+      return Option<usize>.Some { value: k }
+    }
+    k = k + 1
+  }
+  return Option<usize>.None
+}
+
+// An id followed by `.`: escaped dots (`\.`) belong to the id.
+effect fn unescaped(bytes: &[u8]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let mut k: usize = 0
+  while k < bytes.length {
+    if bytes[k] == 92 && k + 1 < bytes.length {
+      k = k + 1
+    }
+    run out.append(view(bytes, k, k + 1))
+    k = k + 1
+  }
+  return move out
+}
+
+// The position of the `.` before `word` that ends the id part, if `bytes` has one.
+fn member(bytes: &[u8], word: &[u8]) -> Option<usize> {
+  let mut k: usize = 0
+  while k + word.length < bytes.length {
+    if bytes[k] == 46 && (k == 0 || bytes[k - 1] != 92)
+      && equal(view(bytes, k + 1, k + 1 + word.length), word) {
+      return Option<usize>.Some { value: k }
+    }
+    k = k + 1
+  }
+  return Option<usize>.None
+}
+
+effect fn timeValue(
+  item: &[u8],
+  document: &XmlDocument,
+  ids: &[Identified],
+  timed: &[XmlNodeId],
+) -> TimeValue
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if equal(item, b"indefinite") {
+    return TimeValue.Indefinite
+  }
+  if let Option<f64>.Some { value } = offset(item) {
+    return TimeValue.Offset { time: value }
+  }
+  let mut words: [&[u8]; 3] = [b"begin", b"end", b"repeat("]
+  let mut w: usize = 0
+  while w < 3 {
+    if let Option<usize>.Some { value: dot } = member(item, words[w]) {
+      let id = run unescaped(view(item, 0, dot))
+      let rest = view(item, dot + 1 + words[w].length, item.length)
+      let target = match findId(ids, Bytes.asSlice(&id)) {
+        Option<XmlNodeId>.Some { value } => value
+        _ => {
+          return TimeValue.Never
+        }
+      }
+      let mut animation = Option<usize>.None
+      let mut t: usize = 0
+      while t < timed.length {
+        if timed[t].index == target.index {
+          animation = Option<usize>.Some { value: t }
+        }
+        t = t + 1
+      }
+      let index = match animation {
+        Option<usize>.Some { value } => value
+        _ => {
+          return TimeValue.Never
+        }
+      }
+      let mut tail = rest
+      let mut iteration: f64 = 0.0
+      if w == 2 {
+        let mut close: usize = 0
+        while close < rest.length && rest[close] != 41 {
+          close = close + 1
+        }
+        if close == rest.length {
+          return TimeValue.Never
+        }
+        iteration = match whole(trim(view(rest, 0, close))) {
+          Option<f64>.Some { value } => value
+          _ => {
+            return TimeValue.Never
+          }
+        }
+        tail = view(rest, close + 1, rest.length)
+      }
+      let mut delta: f64 = 0.0
+      if trim(tail).length > 0 {
+        delta = match offset(tail) {
+          Option<f64>.Some { value } => value
+          _ => {
+            return TimeValue.Never
+          }
+        }
+      }
+      if w == 2 {
+        return TimeValue.Repeat { animation: index, iteration: iteration, delta: delta }
+      }
+      return TimeValue.Sync { animation: index, end: w == 1, delta: delta }
+    }
+    w = w + 1
+  }
+  drop document
+  return TimeValue.Never
+}
+
+effect fn timeList(
+  bytes: &[u8],
+  document: &XmlDocument,
+  ids: &[Identified],
+  timed: &[XmlNodeId],
+  out: &mut List<TimeValue>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut list = List<Bytes>.make()
+  run items(bytes, &mut list)
+  let all = list.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    run out.append(run timeValue(Bytes.asSlice(&all[k]), document, ids, timed))
+    k = k + 1
+  }
+}
+
+// Sorted resolved instance times of `values`; whether any value stays unresolved.
+effect fn instances(
+  animations: &mut List<Animation>,
+  values: &[TimeValue],
+  out: &mut List<f64>,
+) -> bool
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut unresolved = false
+  let mut k: usize = 0
+  while k < values.length {
+    match values[k] {
+      TimeValue.Offset { time } => run out.append(time)
+      TimeValue.Indefinite => {
+        unresolved = true
+      }
+      TimeValue.Never => {
+        unresolved = true
+      }
+      TimeValue.Sync { animation, end, delta } => {
+        run compute(&mut animations.*, animation)
+        let source = &animations.asSlice()[animation]
+        let intervals = source.intervals.asSlice()
+        let mut i: usize = 0
+        while i < intervals.length {
+          let time = if end {
+            intervals[i].end
+          } else {
+            intervals[i].begin
+          }
+          if f64.isFinite(time) {
+            run out.append(time + delta)
+          }
+          i = i + 1
+        }
+        unresolved = true
+      }
+      TimeValue.Repeat { animation, iteration, delta } => {
+        run compute(&mut animations.*, animation)
+        let source = &animations.asSlice()[animation]
+        let intervals = source.intervals.asSlice()
+        let mut i: usize = 0
+        while i < intervals.length {
+          let time = intervals[i].begin + iteration * source.duration
+          if f64.isFinite(time) && iteration >= 1.0 && time < intervals[i].end {
+            run out.append(time + delta)
+          }
+          i = i + 1
+        }
+        unresolved = true
+      }
+    }
+    k = k + 1
+  }
+  run out.sort()
+  return unresolved
+}
+
+// SMIL 3 #Timing-ComputingActiveDur. `end` is infinite when unresolved.
+fn activeDuration(animation: &Animation, begin: f64, end: f64) -> f64 {
+  let simple = animation.duration
+  let mut repeated = simple
+  if simple == 0.0 {
+    repeated = 0.0
+  } else if animation.repeatCount.isSome() || animation.repeatDuration.isSome() {
+    let counted = match animation.repeatCount {
+      Option<f64>.Some { value } => value * simple
+      _ => f64.INFINITY
+    }
+    let limited = match animation.repeatDuration {
+      Option<f64>.Some { value } => value
+      _ => f64.INFINITY
+    }
+    repeated = f64.min(counted, limited)
+  }
+  let mut active = repeated
+  if f64.isFinite(end) {
+    active = f64.min(repeated, end - begin)
+  }
+  if animation.minimum <= animation.maximum {
+    active = f64.max(animation.minimum, f64.min(animation.maximum, active))
+  }
+  return active
+}
+
+// The intervals of animation `index` (SMIL 3 #Timing-BeginEnd-LC-Start, "Getting the first
+// interval" and "Getting the next interval"), once.
+effect fn compute(animations: &mut List<Animation>, index: usize) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if animations.asSlice()[index].state != State.Pending {
+    return
+  }
+  let slots = animations.asMutSlice()
+  slots[index].state = State.Busy
+  let mut beginValues = List<TimeValue>.make()
+  run beginValues.appendSlice(animations.asSlice()[index].begins.asSlice())
+  let mut endValues = List<TimeValue>.make()
+  run endValues.appendSlice(animations.asSlice()[index].ends.asSlice())
+  let mut begins = List<f64>.make()
+  drop run instances(&mut animations.*, beginValues.asSlice(), &mut begins)
+  let mut ends = List<f64>.make()
+  let open = run instances(&mut animations.*, endValues.asSlice(), &mut ends)
+  let mut found = List<Interval>.make()
+  let animation = &animations.asSlice()[index]
+  let starts = begins.asSlice()
+  let stops = ends.asSlice()
+  let mut after = -f64.INFINITY
+  let mut last = -f64.INFINITY
+  let mut first = true
+  while found.length() < MAX_INTERVALS {
+    let mut begin = Option<f64>.None
+    let mut k: usize = 0
+    while k < starts.length && begin.isNone() {
+      if starts[k] >= after && (first || starts[k] > last) {
+        begin = Option<f64>.Some { value: starts[k] }
+      }
+      k = k + 1
+    }
+    let start = match begin {
+      Option<f64>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    let mut stop = f64.INFINITY
+    if animation.hasEnd {
+      let mut chosen = Option<f64>.None
+      k = 0
+      while k < stops.length && chosen.isNone() {
+        if stops[k] >= start {
+          chosen = Option<f64>.Some { value: stops[k] }
+        }
+        k = k + 1
+      }
+      match chosen {
+        Option<f64>.Some { value } => {
+          stop = value
+        }
+        _ => {
+          if !open {
+            break
+          }
+        }
+      }
+    }
+    let mut end = start + activeDuration(animation, start, stop)
+
+    // A begin inside the interval restarts the element (#Timing-RestartAttribute).
+    if animation.restart == Restart.Always {
+      k = 0
+      while k < starts.length {
+        if starts[k] > start && starts[k] < end {
+          end = starts[k]
+        }
+        k = k + 1
+      }
+    }
+    if end >= 0.0 || !first {
+      run found.append(Interval { begin: start, end: end })
+      first = false
+      if animation.restart == Restart.Never {
+        break
+      }
+    }
+    after = end
+    last = start
+  }
+  let target = &mut animations.asMutSlice()[index]
+  target.intervals = move found
+  target.state = State.Done
+}
+
+// --- Values -----------------------------------------------------------------------------------
+
+/// An attribute value as numbers within fixed text, or a color, or opaque text.
+union Value {
+  /// `pieces` has one more entry than `numbers`; separators are dropped from pieces.
+  Numbers { pub pieces: List<Bytes>, pub numbers: List<f64> },
+  Color { pub channels: [f64; 4] },
+  Text { pub bytes: Bytes },
+}
+
+fn separator(byte: u8) -> bool {
+  return space(byte) || byte == 44
+}
+
+// Where a number starts at `at`, if one does; `loose` allows one right after a letter, as
+// path data does.
+fn numberAt(bytes: &[u8], at: usize, loose: bool) -> bool {
+  let mut k = at
+  if k < bytes.length && (bytes[k] == 43 || bytes[k] == 45) {
+    k = k + 1
+  }
+  if k < bytes.length && bytes[k] == 46 {
+    k = k + 1
+  }
+  if k >= bytes.length || !digit(bytes[k]) {
+    return false
+  }
+  if at > 0 && !loose {
+    let before = bytes[at - 1]
+    if letter(before) || digit(before) || before == 35 || before == 95 {
+      return false
+    }
+  }
+  return true
+}
+
+// The end of the number starting at `at`.
+fn numberEnd(bytes: &[u8], at: usize) -> usize {
+  let mut k = at
+  if bytes[k] == 43 || bytes[k] == 45 {
+    k = k + 1
+  }
+  let mut dot = false
+  while k < bytes.length && (digit(bytes[k]) || (bytes[k] == 46 && !dot)) {
+    if bytes[k] == 46 {
+      dot = true
+    }
+    k = k + 1
+  }
+  if k + 1 < bytes.length && (bytes[k] == 101 || bytes[k] == 69) {
+    let mut e = k + 1
+    if bytes[e] == 43 || bytes[e] == 45 {
+      e = e + 1
+    }
+    if e < bytes.length && digit(bytes[e]) {
+      k = e
+      while k < bytes.length && digit(bytes[k]) {
+        k = k + 1
+      }
+    }
+  }
+  return k
+}
+
+effect fn piece(bytes: &[u8]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let mut k: usize = 0
+  while k < bytes.length {
+    if !separator(bytes[k]) {
+      run out.append(view(bytes, k, k + 1))
+    }
+    k = k + 1
+  }
+  return move out
+}
+
+effect fn numbers(bytes: &[u8], loose: bool) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return run numbersIn(bytes, loose, false)
+}
+
+// Numbers within text; `keep` keeps separators in the pieces, as CSS syntax needs them.
+effect fn numbersIn(bytes: &[u8], loose: bool, keep: bool) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut pieces = List<Bytes>.make()
+  let mut values = List<f64>.make()
+  let mut start: usize = 0
+  let mut k: usize = 0
+  while k < bytes.length {
+    if numberAt(bytes, k, loose) {
+      let end = numberEnd(bytes, k)
+      let parsed = match svg.number(view(bytes, k, end)) {
+        Option<f64>.Some { value } => value
+        _ => {
+          return Value.Text { bytes: run Bytes.copy(bytes) }
+        }
+      }
+      run pieces.append(
+        if keep {
+          run Bytes.copy(view(bytes, start, k))
+        } else {
+          run piece(view(bytes, start, k))
+        },
+      )
+      run values.append(parsed)
+      k = end
+      start = end
+    } else {
+      k = k + 1
+    }
+  }
+  run pieces.append(
+    if keep {
+      run Bytes.copy(view(bytes, start, bytes.length))
+    } else {
+      run piece(view(bytes, start, bytes.length))
+    },
+  )
+  return Value.Numbers { pieces: move pieces, numbers: move values }
+}
+
+effect fn color(bytes: &[u8]) -> Option<[f64; 4]>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let limits = Limits.make()
+  let parsed = run Effect.result(lexer.tokenize(bytes, &limits))
+  let tokens = match move parsed {
+    Result<TokenBuffer, CssError | OutOfMemoryError>.Success { value } => move value
+    Result<TokenBuffer, CssError | OutOfMemoryError>.Failure { error } => match move error {
+      CssError problem => {
+        return Option<[f64; 4]>.None
+      }
+      OutOfMemoryError problem => {
+        fail move problem
+      }
+    }
+  }
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let found = run colors.parse(&input, &mut cursor)
+  if !cursor.done(&input) {
+    return Option<[f64; 4]>.None
+  }
+  return match found {
+    Option<CssColor>.Some { value } => match value.identity {
+      Identity.Absolute => {
+        let rgba = colors.toSrgb(value)
+        Option<[f64; 4]>.Some { value: [rgba.r * 255.0, rgba.g * 255.0, rgba.b * 255.0, rgba.a] }
+      }
+      _ => Option<[f64; 4]>.None
+    }
+    _ => Option<[f64; 4]>.None
+  }
+}
+
+fn colored(name: &[u8]) -> bool {
+  return equal(name, b"fill") || equal(name, b"stroke") || equal(name, b"color")
+    || equal(name, b"stop-color")
+    || equal(name, b"flood-color")
+    || equal(name, b"lighting-color")
+}
+
+effect fn parse(animation: &Animation, bytes: &[u8]) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let name = Bytes.asSlice(&animation.name)
+  if animation.kind == Kind.AnimateColor || colored(name) {
+    if let Option<[f64; 4]>.Some { value } = run color(trim(bytes)) {
+      return Value.Color { channels: value }
+    }
+    return Value.Text { bytes: run Bytes.copy(trim(bytes)) }
+  }
+  if animation.kind == Kind.AnimateTransform {
+    let parsed = run numbers(bytes, false)
+    let mut list = List<f64>.make()
+    match &parsed {
+      Value.Numbers { pieces, numbers: values } => run list.appendSlice(values.asSlice())
+      _ => {}
+    }
+    return run transformValue(animation.transform, list.asSlice())
+  }
+  return run numbers(bytes, equal(name, b"d") || equal(name, b"points") || equal(name, b"path"))
+}
+
+// animateTransform parameters, padded to the type's full count (SVG 1.1 #AnimateTransformElement).
+effect fn transformValue(kind: TransformType, given: &[f64]) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut list = List<f64>.make()
+  let first = if given.length > 0 {
+    given[0]
+  } else {
+    0.0
+  }
+  match kind {
+    TransformType.Translate => {
+      run list.append(first)
+      run list.append(
+        if given.length > 1 {
+          given[1]
+        } else {
+          0.0
+        },
+      )
+    }
+    TransformType.Scale => {
+      run list.append(first)
+      run list.append(
+        if given.length > 1 {
+          given[1]
+        } else {
+          first
+        },
+      )
+    }
+    TransformType.Rotate => {
+      run list.append(first)
+      run list.append(
+        if given.length > 2 {
+          given[1]
+        } else {
+          0.0
+        },
+      )
+      run list.append(
+        if given.length > 2 {
+          given[2]
+        } else {
+          0.0
+        },
+      )
+    }
+    _ => run list.append(first)
+  }
+  let mut pieces = List<Bytes>.make()
+  let mut k: usize = 0
+  while k <= list.length() {
+    run pieces.append(Bytes.make())
+    k = k + 1
+  }
+  return Value.Numbers { pieces: move pieces, numbers: move list }
+}
+
+fn samePieces(left: &List<Bytes>, right: &List<Bytes>) -> bool {
+  if left.length() != right.length() {
+    return false
+  }
+  let a = left.asSlice()
+  let b = right.asSlice()
+  let mut k: usize = 0
+  while k < a.length {
+    if !equal(Bytes.asSlice(&a[k]), Bytes.asSlice(&b[k])) {
+      return false
+    }
+    k = k + 1
+  }
+  return true
+}
+
+effect fn copyPieces(pieces: &List<Bytes>) -> List<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut copied = List<Bytes>.make()
+  let all = pieces.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    run copied.append(run Bytes.copy(Bytes.asSlice(&all[k])))
+    k = k + 1
+  }
+  return move copied
+}
+
+effect fn copyValue(value: &Value) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &value.* {
+    Value.Numbers { pieces, numbers: values } => {
+      let mut copied = List<Bytes>.make()
+      let all = pieces.asSlice()
+      let mut k: usize = 0
+      while k < all.length {
+        run copied.append(run Bytes.copy(Bytes.asSlice(&all[k])))
+        k = k + 1
+      }
+      let mut list = List<f64>.make()
+      run list.appendSlice(values.asSlice())
+      Value.Numbers { pieces: move copied, numbers: move list }
+    }
+    Value.Color { channels } => Value.Color { channels: channels }
+    Value.Text { bytes } => Value.Text { bytes: run Bytes.copy(Bytes.asSlice(&bytes)) }
+  }
+}
+
+// `left + (right - left) * amount` where both interpolate, and `scale * left + right` for
+// sums; otherwise the discrete choice at half way (SMIL Animation #AnimFuncCalcMode).
+effect fn combine(left: &Value, right: &Value, amount: f64, sum: bool) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  match &left.* {
+    Value.Numbers { pieces, numbers: first } => {
+      if let Value.Numbers { pieces: others, numbers: second } = &right.* {
+        if samePieces(&pieces, &others) && first.length() == second.length() {
+          let mut list = List<f64>.make()
+          let a = first.asSlice()
+          let b = second.asSlice()
+          let mut k: usize = 0
+          while k < a.length {
+            run list.append(
+              if sum {
+                a[k] * amount + b[k]
+              } else {
+                a[k] + (b[k] - a[k]) * amount
+              },
+            )
+            k = k + 1
+          }
+          return Value.Numbers { pieces: run copyPieces(&pieces), numbers: move list }
+        }
+      }
+    }
+    Value.Color { channels: first } => {
+      if let Value.Color { channels: second } = &right.* {
+        let mut mixed: [f64; 4] = [0.0, 0.0, 0.0, 0.0]
+        let mut k: usize = 0
+        while k < 4 {
+          mixed[k] = if sum {
+            first[k] * amount + second[k]
+          } else {
+            first[k] + (second[k] - first[k]) * amount
+          }
+          k = k + 1
+        }
+        return Value.Color { channels: mixed }
+      }
+    }
+    _ => {}
+  }
+  if sum {
+    return run copyValue(right)
+  }
+  return run copyValue(
+    if amount < 0.5 {
+      left
+    } else {
+      right
+    },
+  )
+}
+
+fn distance(left: &Value, right: &Value) -> f64 {
+  match &left.* {
+    Value.Numbers { pieces, numbers: first } => {
+      if let Value.Numbers { pieces: others, numbers: second } = &right.* {
+        if first.length() == second.length() {
+          let a = first.asSlice()
+          let b = second.asSlice()
+          let mut total: f64 = 0.0
+          let mut k: usize = 0
+          while k < a.length {
+            total = total + (b[k] - a[k]) * (b[k] - a[k])
+            k = k + 1
+          }
+          return f64.sqrt(total)
+        }
+      }
+    }
+    Value.Color { channels: first } => {
+      if let Value.Color { channels: second } = &right.* {
+        let mut total: f64 = 0.0
+        let mut k: usize = 0
+        while k < 3 {
+          total = total + (second[k] - first[k]) * (second[k] - first[k])
+          k = k + 1
+        }
+        return f64.sqrt(total)
+      }
+    }
+    _ => {}
+  }
+  return 0.0
+}
+
+// Numbers print as the shortest decimal that reads back the same.
+struct NumberText {
+  bytes: [u8; 40],
+  length: usize,
+}
+
+impl Writer for NumberText {
+  effect fn writeAll(self: &mut Self, value: &[u8]) -> ()
+    ! WriterError {
+    if value.length > 40 - self.length {
+      fail Writer.failure()
+    }
+    let mut k: usize = 0
+    while k < value.length {
+      self.bytes[self.length] = value[k]
+      self.length = self.length + 1
+      k = k + 1
+    }
+  }
+
+  effect fn flush(self: &mut Self) -> () ! WriterError {}
+}
+
+effect fn writeNumber(out: &mut Bytes, value: f64) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let finite = if f64.isFinite(value) {
+    value
+  } else {
+    0.0
+  }
+  let mut buffer = NumberText { bytes: [0; 40], length: 0 }
+  let written = run Effect.result(Format.display(&finite) |> Effect.provideMut<Writer>(&mut buffer))
+  match move written {
+    Result<(), WriterError>.Success { value: done } => run out.append(
+      Slice.view<u8>(&buffer.bytes, 0, buffer.length),
+    )
+    _ => run out.append(b"0")
+  }
+}
+
+effect fn render(value: &Value, out: &mut Bytes) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  match &value.* {
+    Value.Numbers { pieces, numbers: values } => {
+      let texts = pieces.asSlice()
+      let list = values.asSlice()
+      let mut k: usize = 0
+      while k < texts.length {
+        let part = Bytes.asSlice(&texts[k])
+        run out.append(part)
+        if k < list.length {
+          // A number after a unit or another number needs a space to stay separate.
+          let glued = part.length > 0
+            && (letter(part[part.length - 1]) || part[part.length - 1] == 37)
+          if out.length() > 0 && (part.length == 0 || glued) {
+            run out.append(b" ")
+          }
+          run writeNumber(&mut out.*, list[k])
+        }
+        k = k + 1
+      }
+    }
+    Value.Color { channels } => {
+      run out.append(b"rgb(")
+      let mut k: usize = 0
+      while k < 3 {
+        if k > 0 {
+          run out.append(b" ")
+        }
+        run writeNumber(&mut out.*, f64.max(0.0, f64.min(255.0, channels[k])))
+        k = k + 1
+      }
+      run out.append(b" / ")
+      run writeNumber(&mut out.*, f64.max(0.0, f64.min(1.0, channels[3])))
+      run out.append(b")")
+    }
+    Value.Text { bytes } => run out.append(Bytes.asSlice(&bytes))
+  }
+}
+
+effect fn transformText(kind: TransformType, value: &Value, out: &mut Bytes) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run out.append(
+    match kind {
+      TransformType.Translate => b"translate("
+      TransformType.Scale => b"scale("
+      TransformType.Rotate => b"rotate("
+      TransformType.SkewX => b"skewX("
+      TransformType.SkewY => b"skewY("
+    },
+  )
+  if let Value.Numbers { pieces, numbers: values } = &value.* {
+    let list = values.asSlice()
+    let mut k: usize = 0
+    while k < list.length {
+      if k > 0 {
+        run out.append(b" ")
+      }
+      run writeNumber(&mut out.*, list[k])
+      k = k + 1
+    }
+  }
+  run out.append(b")")
+}
+
+// The zero of an additive value type, for by-animations (SMIL Animation #AnimFuncValues).
+effect fn zero(like: &Value) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  match &like.* {
+    Value.Numbers { pieces, numbers: values } => {
+      let mut list = List<f64>.make()
+      let mut k: usize = 0
+      while k < values.length() {
+        run list.append(0.0)
+        k = k + 1
+      }
+      return Value.Numbers { pieces: run copyPieces(&pieces), numbers: move list }
+    }
+    Value.Color { channels } => {
+      return Value.Color { channels: [0.0, 0.0, 0.0, 0.0] }
+    }
+    _ => {}
+  }
+  return run copyValue(like)
+}
+
+// The y of a keySplines cubic at x (both from 0 to 1), by bisection on x.
+/// The cubic Bézier timing curve through (x1, y1) and (x2, y2), evaluated at `x`.
+pub fn spline(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+  let mut low: f64 = 0.0
+  let mut high: f64 = 1.0
+  let mut t = x
+  let mut step: usize = 0
+  while step < 60 {
+    t = (low + high) / 2.0
+    let u = 1.0 - t
+    let at = 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t
+    if at < x {
+      low = t
+    } else {
+      high = t
+    }
+    step = step + 1
+  }
+  let u = 1.0 - t
+  return 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t
+}
+
+/// Interpolates between CSS value texts for property `name` at `amount`: colours per
+/// channel, numbers inside matching text, and otherwise a switch at the halfway point
+/// (CSS Values 4 #combining-values).
+pub effect fn interpolate(name: &[u8], from: &[u8], to: &[u8], amount: f64, out: &mut Bytes) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let left = run textValue(name, from)
+  let right = run textValue(name, to)
+
+  // A unitless underlying value meets px keyframes: px is the user unit, so the numbers
+  // interpolate and keep the keyframe's units.
+  if let Value.Numbers { pieces: first, numbers: a } = &left {
+    if let Value.Numbers { pieces: second, numbers: b } = &right {
+      if !samePieces(&first, &second) && a.length() == b.length() {
+        let plainFirst = run withoutPx(&first)
+        let plainSecond = run withoutPx(&second)
+        if samePieces(&plainFirst, &plainSecond) {
+          let mut list = List<f64>.make()
+          let x = a.asSlice()
+          let y = b.asSlice()
+          let mut k: usize = 0
+          while k < x.length {
+            run list.append(x[k] + (y[k] - x[k]) * amount)
+            k = k + 1
+          }
+          let pieces = if px(&second) {
+            run copyPieces(&second)
+          } else {
+            run copyPieces(&first)
+          }
+          run render(&Value.Numbers { pieces: move pieces, numbers: move list }, &mut out.*)
+          return
+        }
+      }
+    }
+  }
+  let value = run combine(&left, &right, amount, false)
+  run render(&value, &mut out.*)
+}
+
+fn pxAt(piece: &[u8]) -> bool {
+  return piece.length >= 2 && (piece[0] == 112 || piece[0] == 80)
+    && (piece[1] == 120 || piece[1] == 88)
+    && (piece.length == 2 || !letter(piece[2]))
+}
+
+fn px(pieces: &List<Bytes>) -> bool {
+  let all = pieces.asSlice()
+  let mut k: usize = 1
+  while k < all.length {
+    if pxAt(Bytes.asSlice(&all[k])) {
+      return true
+    }
+    k = k + 1
+  }
+  return false
+}
+
+// The pieces with a px unit right after each number removed.
+effect fn withoutPx(pieces: &List<Bytes>) -> List<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<Bytes>.make()
+  let all = pieces.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    let text = Bytes.asSlice(&all[k])
+    run out.append(
+      if k > 0 && pxAt(text) {
+        run Bytes.copy(view(text, 2, text.length))
+      } else {
+        run Bytes.copy(text)
+      },
+    )
+    k = k + 1
+  }
+  return move out
+}
+
+effect fn textValue(name: &[u8], bytes: &[u8]) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if colored(name) {
+    if let Option<[f64; 4]>.Some { value } = run color(trim(bytes)) {
+      return Value.Color { channels: value }
+    }
+    return Value.Text { bytes: run Bytes.copy(trim(bytes)) }
+  }
+  return run numbersIn(trim(bytes), equal(name, b"d") || equal(name, b"points"), true)
+}
+
+/// The animation's values list resolved against the underlying value `base`.
+effect fn valueList(animation: &Animation, base: &Value, out: &mut List<Value>) -> bool
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let given = animation.values.asSlice()
+  if given.length > 0 && animation.kind != Kind.Set {
+    let mut k: usize = 0
+    while k < given.length {
+      run out.append(run parse(animation, Bytes.asSlice(&given[k])))
+      k = k + 1
+    }
+    return false
+  }
+  if animation.kind == Kind.Set {
+    if let Option<Bytes>.Some { value } = &animation.to {
+      run out.append(run parse(animation, Bytes.asSlice(&value)))
+    }
+    return false
+  }
+  match &animation.from {
+    Option<Bytes>.Some { value: from } => {
+      let start = run parse(animation, Bytes.asSlice(&from))
+      if let Option<Bytes>.Some { value: to } = &animation.to {
+        run out.append(move start)
+        run out.append(run parse(animation, Bytes.asSlice(&to)))
+      } else if let Option<Bytes>.Some { value: by } = &animation.by {
+        let step = run parse(animation, Bytes.asSlice(&by))
+        let end = run combine(&start, &step, 1.0, true)
+        run out.append(move start)
+        run out.append(move end)
+      }
+      return false
+    }
+    _ => {
+      if let Option<Bytes>.Some { value: to } = &animation.to {
+        run out.append(run copyValue(base))
+        run out.append(run parse(animation, Bytes.asSlice(&to)))
+        return true
+      }
+      if let Option<Bytes>.Some { value: by } = &animation.by {
+        let step = run parse(animation, Bytes.asSlice(&by))
+        run out.append(run zero(&step))
+        run out.append(move step)
+      }
+      return false
+    }
+  }
+}
+
+// The animation function at simple-time fraction `progress` (SMIL Animation #AnimFuncCalcMode).
+effect fn simpleValue(animation: &Animation, values: &[Value], progress: f64) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = values.length
+  let times = animation.keyTimes.asSlice()
+  if animation.calc == Calc.Discrete || count == 1 {
+    if progress >= 1.0 {
+      return run copyValue(&values[count - 1])
+    }
+    let mut chosen: usize = 0
+    let mut k: usize = 0
+    while k < count {
+      let start = if times.length == count {
+        times[k]
+      } else {
+        usize.toF64(k) / usize.toF64(count)
+      }
+      if start <= progress {
+        chosen = k
+      }
+      k = k + 1
+    }
+    return run copyValue(&values[chosen])
+  }
+  if progress >= 1.0 {
+    return run copyValue(&values[count - 1])
+  }
+  let mut stops = List<f64>.make()
+  if animation.calc == Calc.Paced {
+    let mut total: f64 = 0.0
+    run stops.append(0.0)
+    let mut k: usize = 1
+    while k < count {
+      total = total + distance(&values[k - 1], &values[k])
+      run stops.append(total)
+      k = k + 1
+    }
+    if total <= 0.0 {
+      return run copyValue(&values[0])
+    }
+    let all = stops.asMutSlice()
+    k = 0
+    while k < all.length {
+      all[k] = all[k] / total
+      k = k + 1
+    }
+  } else if times.length == count {
+    run stops.appendSlice(times)
+  } else {
+    let mut k: usize = 0
+    while k < count {
+      run stops.append(usize.toF64(k) / usize.toF64(count - 1))
+      k = k + 1
+    }
+  }
+  let marks = stops.asSlice()
+  let mut segment: usize = 0
+  while segment + 2 < count && marks[segment + 1] <= progress {
+    segment = segment + 1
+  }
+  let width = marks[segment + 1] - marks[segment]
+  let mut local = if width > 0.0 {
+    (progress - marks[segment]) / width
+  } else {
+    1.0
+  }
+  if animation.calc == Calc.Spline {
+    let splines = animation.keySplines.asSlice()
+    local = spline(
+      splines[4 * segment],
+      splines[4 * segment + 1],
+      splines[4 * segment + 2],
+      splines[4 * segment + 3],
+      local,
+    )
+  }
+  return run combine(&values[segment], &values[segment + 1], local, false)
+}
+
+// --- Collecting animation elements --------------------------------------------------------
+
+fn kindOf(name: &[u8]) -> Option<Kind> {
+  if equal(name, b"animate") {
+    return Option<Kind>.Some { value: Kind.Animate }
+  }
+  if equal(name, b"set") {
+    return Option<Kind>.Some { value: Kind.Set }
+  }
+  if equal(name, b"animateColor") {
+    return Option<Kind>.Some { value: Kind.AnimateColor }
+  }
+  if equal(name, b"animateTransform") {
+    return Option<Kind>.Some { value: Kind.AnimateTransform }
+  }
+  if equal(name, b"animateMotion") {
+    return Option<Kind>.Some { value: Kind.AnimateMotion }
+  }
+  return Option<Kind>.None
+}
+
+fn timed(document: &XmlDocument, node: XmlNodeId) -> bool {
+  return element(document, node)
+    && equal(
+      String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+      b"http://www.w3.org/2000/svg",
+    )
+    && kindOf(String.utf8Bytes(XmlDocument.localName(document, node))).isSome()
+}
+
+// A non-negative clock value, `indefinite` as infinity, or nothing for absent or invalid.
+fn duration(bytes: &[u8], indefinite: bool) -> Option<f64> {
+  if bytes.length == 0 {
+    return Option<f64>.None
+  }
+  if indefinite && equal(bytes, b"indefinite") {
+    return Option<f64>.Some { value: f64.INFINITY }
+  }
+  return match clock(bytes) {
+    Option<f64>.Some { value } => if value >= 0.0 {
+      Option<f64>.Some { value: value }
+    } else {
+      Option<f64>.None
+    }
+    _ => Option<f64>.None
+  }
+}
+
+effect fn numberList(bytes: &[u8], out: &mut List<f64>) -> bool
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut list = List<Bytes>.make()
+  run items(bytes, &mut list)
+  let all = list.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    let item = Bytes.asSlice(&all[k])
+    let mut start: usize = 0
+    while start < item.length {
+      while start < item.length && separator(item[start]) {
+        start = start + 1
+      }
+      let mut end = start
+      while end < item.length && !separator(item[end]) {
+        end = end + 1
+      }
+      if end > start {
+        match svg.number(view(item, start, end)) {
+          Option<f64>.Some { value } => run out.append(value)
+          _ => {
+            return false
+          }
+        }
+      }
+      start = end
+    }
+    k = k + 1
+  }
+  return true
+}
+
+effect fn collect(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  ids: &[Identified],
+  nodes: &[XmlNodeId],
+  computed: &[MotionPath],
+) -> Option<Animation>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let kind = match kindOf(String.utf8Bytes(XmlDocument.localName(document, node))) {
+    Option<Kind>.Some { value } => value
+    _ => {
+      return Option<Animation>.None
+    }
+  }
+
+  // The target: the element `href` names, else the parent (#TargetElement).
+  let mut href = text(document, node, "href")
+  if href.length == 0 {
+    href = match (XmlDocument.attribute(document, node, "http://www.w3.org/1999/xlink", "href")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => trim(value)
+      _ => b""
+    }
+  }
+  let target = if href.length > 0 {
+    if href[0] != 35 {
+      return Option<Animation>.None
+    }
+    match findId(ids, view(href, 1, href.length)) {
+      Option<XmlNodeId>.Some { value } => value
+      _ => {
+        return Option<Animation>.None
+      }
+    }
+  } else {
+    match XmlDocument.nodes(document)[node.index].parent {
+      Option<XmlNodeId>.Some { value } => value
+      _ => {
+        return Option<Animation>.None
+      }
+    }
+  }
+  if !element(document, target) {
+    return Option<Animation>.None
+  }
+
+  // attributeName, with the xlink prefix as the only one recognized.
+  let mut name = text(document, node, "attributeName")
+  let mut namespace: &[u8] = b""
+  if kind == Kind.AnimateTransform && name.length == 0 {
+    name = b"transform"
+  }
+
+  // Motion is not an attribute: it is a supplemental transform, written in front of the
+  // target's transform once every motion animation is combined.
+  if kind == Kind.AnimateMotion {
+    name = b"animateMotion"
+  }
+  if startsWith(name, b"xlink:") {
+    namespace = b"http://www.w3.org/1999/xlink"
+    name = view(name, 6, name.length)
+  } else {
+    let mut k: usize = 0
+    while k < name.length {
+      if name[k] == 58 {
+        return Option<Animation>.None
+      }
+      k = k + 1
+    }
+  }
+  if name.length == 0 {
+    return Option<Animation>.None
+  }
+  let typeText = text(document, node, "attributeType")
+  let property = namespace.length == 0
+    && document_styles.presentationAttribute(
+      String.utf8Bytes(XmlDocument.localName(document, target)),
+      name,
+    )
+  let css = if kind == Kind.AnimateMotion {
+    false
+  } else if equal(typeText, b"XML") {
+    false
+  } else if equal(typeText, b"CSS") {
+    if !property {
+      return Option<Animation>.None
+    }
+    true
+  } else {
+    property && kind != Kind.AnimateTransform
+  }
+
+  let mut begins = List<TimeValue>.make()
+  let beginText = text(document, node, "begin")
+  if beginText.length == 0 {
+    run begins.append(TimeValue.Offset { time: 0.0 })
+  } else {
+    run timeList(beginText, document, ids, nodes, &mut begins)
+  }
+  let mut ends = List<TimeValue>.make()
+  let endText = text(document, node, "end")
+  run timeList(endText, document, ids, nodes, &mut ends)
+  let calcText = text(document, node, "calcMode")
+  let calc = if kind == Kind.Set || equal(calcText, b"discrete") {
+    Calc.Discrete
+  } else if equal(calcText, b"paced") || kind == Kind.AnimateMotion && calcText.length == 0 {
+    Calc.Paced
+  } else if equal(calcText, b"spline") {
+    Calc.Spline
+  } else {
+    Calc.Linear
+  }
+  let mut values = List<Bytes>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, node, "values") {
+    run items(value, &mut values)
+  }
+  let mut keyTimes = List<f64>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, node, "keyTimes") {
+    if !run numberList(value, &mut keyTimes) {
+      return Option<Animation>.None
+    }
+  }
+  let mut keySplines = List<f64>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, node, "keySplines") {
+    if !run numberList(value, &mut keySplines) {
+      return Option<Animation>.None
+    }
+  }
+
+  // A motion path wins over values, from, to and by; its vertex count, or keyPoints,
+  // decides how many keyTimes it needs, checked once the path is measured.
+  let mut path = Option<Bytes>.None
+  let mut keyPoints = List<f64>.make()
+  let mut rotate = Rotate.Angle { value: 0.0 }
+  if kind == Kind.AnimateMotion {
+    path = run motionPath(document, node, ids, computed)
+    if let Option<&[u8]>.Some { value } = attribute(document, node, "keyPoints") {
+      if !run numberList(value, &mut keyPoints) {
+        return Option<Animation>.None
+      }
+      let points = keyPoints.asSlice()
+      let mut k: usize = 0
+      while k < points.length {
+        if points[k] < 0.0 || points[k] > 1.0 {
+          return Option<Animation>.None
+        }
+        k = k + 1
+      }
+    }
+    let rotateText = trim(text(document, node, "rotate"))
+    if equal(rotateText, b"auto") {
+      rotate = Rotate.Auto
+    } else if equal(rotateText, b"auto-reverse") {
+      rotate = Rotate.AutoReverse
+    } else if rotateText.length > 0 {
+      rotate = match svg.number(rotateText) {
+        Option<f64>.Some { value } => Rotate.Angle { value: value }
+        _ => {
+          return Option<Animation>.None
+        }
+      }
+    }
+  }
+  let deferred = path.isSome() || keyPoints.length() > 0
+
+  // Invalid keyTimes and keySplines disable the animation (SVG 1.1 #AnimationAttributesAndProperties).
+  let count = values.length()
+  let times = keyTimes.asSlice()
+  if times.length > 0 && calc != Calc.Paced {
+    if (!deferred && (count == 0 || times.length != count)) || times[0] != 0.0 {
+      return Option<Animation>.None
+    }
+    let mut k: usize = 1
+    while k < times.length {
+      if times[k] < times[k - 1] || times[k] > 1.0 {
+        return Option<Animation>.None
+      }
+      k = k + 1
+    }
+    if calc != Calc.Discrete && times[times.length - 1] != 1.0 {
+      return Option<Animation>.None
+    }
+  }
+  if calc == Calc.Spline && !deferred {
+    let segments = if count > 0 {
+      count - 1
+    } else {
+      1
+    }
+    if keySplines.length() != 4 * segments {
+      return Option<Animation>.None
+    }
+    let splines = keySplines.asSlice()
+    let mut k: usize = 0
+    while k < splines.length {
+      if splines[k] < 0.0 || splines[k] > 1.0 {
+        return Option<Animation>.None
+      }
+      k = k + 1
+    }
+  }
+  let transformText = text(document, node, "type")
+  let transform = if equal(transformText, b"scale") {
+    TransformType.Scale
+  } else if equal(transformText, b"rotate") {
+    TransformType.Rotate
+  } else if equal(transformText, b"skewX") {
+    TransformType.SkewX
+  } else if equal(transformText, b"skewY") {
+    TransformType.SkewY
+  } else {
+    TransformType.Translate
+  }
+  let restartText = text(document, node, "restart")
+  let mut minimum: f64 = 0.0
+  if let Option<f64>.Some { value } = duration(text(document, node, "min"), false) {
+    minimum = value
+  }
+  let mut maximum = f64.INFINITY
+  if let Option<f64>.Some { value } = duration(text(document, node, "max"), true) {
+    if value > 0.0 {
+      maximum = value
+    }
+  }
+  let repeatText = text(document, node, "repeatCount")
+  let repeatCount = if equal(repeatText, b"indefinite") {
+    Option<f64>.Some { value: f64.INFINITY }
+  } else {
+    match svg.number(repeatText) {
+      Option<f64>.Some { value } => if value > 0.0 {
+        Option<f64>.Some { value: value }
+      } else {
+        Option<f64>.None
+      }
+      _ => Option<f64>.None
+    }
+  }
+  let from = match attribute(document, node, "from") {
+    Option<&[u8]>.Some { value } => Option<Bytes>.Some { value: run Bytes.copy(value) }
+    _ => Option<Bytes>.None
+  }
+  let to = match attribute(document, node, "to") {
+    Option<&[u8]>.Some { value } => Option<Bytes>.Some { value: run Bytes.copy(value) }
+    _ => Option<Bytes>.None
+  }
+  let by = match attribute(document, node, "by") {
+    Option<&[u8]>.Some { value } => Option<Bytes>.Some { value: run Bytes.copy(value) }
+    _ => Option<Bytes>.None
+  }
+  if kind == Kind.Set && to.isNone() {
+    return Option<Animation>.None
+  }
+  if count == 0 && to.isNone() && by.isNone() && path.isNone() {
+    return Option<Animation>.None
+  }
+  return Option<Animation>.Some {
+    value: Animation {
+      node: node,
+      target: target,
+      kind: kind,
+      namespace: run Bytes.copy(namespace),
+      name: run Bytes.copy(name),
+      css: css,
+      begins: move begins,
+      ends: move ends,
+      hasEnd: endText.length > 0,
+      duration: match duration(text(document, node, "dur"), true) {
+        Option<f64>.Some { value } => value
+        _ => f64.INFINITY
+      },
+      repeatCount: repeatCount,
+      repeatDuration: duration(text(document, node, "repeatDur"), true),
+      minimum: minimum,
+      maximum: maximum,
+      restart: if equal(restartText, b"whenNotActive") {
+        Restart.WhenNotActive
+      } else if equal(restartText, b"never") {
+        Restart.Never
+      } else {
+        Restart.Always
+      },
+      freeze: equal(text(document, node, "fill"), b"freeze"),
+      calc: calc,
+      values: move values,
+      keyTimes: move keyTimes,
+      keySplines: move keySplines,
+      from: move from,
+      to: move to,
+      by: move by,
+      additive: equal(text(document, node, "additive"), b"sum"),
+      accumulate: equal(text(document, node, "accumulate"), b"sum"),
+      transform: transform,
+      path: move path,
+      keyPoints: move keyPoints,
+      rotate: rotate,
+      state: State.Pending,
+      intervals: List<Interval>.make(),
+    },
+  }
+}
+
+// --- Sampling ---------------------------------------------------------------------------------
+
+/// Where an animation stands at the sampled time.
+struct Sample {
+  animation: usize,
+  begin: f64,
+  progress: f64,
+  iteration: f64,
+}
+
+impl Copy for Sample {}
+
+fn sampleAt(animation: &Animation, index: usize, time: f64) -> Option<Sample> {
+  let intervals = animation.intervals.asSlice()
+  let mut chosen = Option<Interval>.None
+  let mut k: usize = 0
+  while k < intervals.length {
+    if intervals[k].begin <= time {
+      chosen = Option<Interval>.Some { value: intervals[k] }
+    }
+    k = k + 1
+  }
+  let interval = match chosen {
+    Option<Interval>.Some { value } => value
+    _ => {
+      return Option<Sample>.None
+    }
+  }
+  let active = time < interval.end
+  if !active && !animation.freeze {
+    return Option<Sample>.None
+  }
+  let elapsed = if active {
+    time - interval.begin
+  } else {
+    interval.end - interval.begin
+  }
+  let simple = animation.duration
+  let mut progress: f64 = 0.0
+  let mut iteration: f64 = 0.0
+  if simple == 0.0 {
+    progress = 1.0
+  } else if f64.isFinite(simple) {
+    iteration = f64.floor(elapsed / simple)
+    progress = (elapsed - iteration * simple) / simple
+
+    // A frozen end on an iteration boundary keeps the end of the last iteration.
+    if !active && elapsed > 0.0 && progress == 0.0 {
+      iteration = iteration - 1.0
+      progress = 1.0
+    }
+  }
+  return Option<Sample>.Some {
+    value: Sample {
+      animation: index,
+      begin: interval.begin,
+      progress: progress,
+      iteration: iteration,
+    },
+  }
+}
+
+fn sameTarget(left: &Animation, right: &Animation) -> bool {
+  return left.target.index == right.target.index && left.css == right.css
+    && equal(Bytes.asSlice(&left.namespace), Bytes.asSlice(&right.namespace))
+    && equal(Bytes.asSlice(&left.name), Bytes.asSlice(&right.name))
+}
+
+// The underlying value of an attribute before any animation applies.
+effect fn baseText(document: &XmlDocument, animation: &Animation) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  // Names are copied from XML text at ASCII delimiters; namespaces are ASCII constants.
+  let found = (XmlDocument.attribute(
+    document,
+    animation.target,
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&animation.namespace)),
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&animation.name)),
+  )
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+  return match found {
+    Option<&[u8]>.Some { value } => run Bytes.copy(value)
+    _ => Bytes.make()
+  }
+}
+
+// One animation's contribution on top of `underlying` (SMIL Animation #AnimationSandwich).
+effect fn apply(animation: &Animation, sample: Sample, underlying: &Value) -> Option<Value>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut values = List<Value>.make()
+  let toAnimation = run valueList(animation, underlying, &mut values)
+  if values.length() == 0 {
+    return Option<Value>.None
+  }
+  let mut result = run simpleValue(animation, values.asSlice(), sample.progress)
+  let byAnimation = animation.from.isNone() && animation.to.isNone() && animation.by.isSome()
+    && animation.values.length() == 0
+  if animation.accumulate && !toAnimation && animation.kind != Kind.Set && sample.iteration > 0.0 {
+    let last = &values.asSlice()[values.length() - 1]
+    result = run combine(last, &result, sample.iteration, true)
+  }
+  if (animation.additive || byAnimation) && !toAnimation && animation.kind != Kind.Set {
+    result = run combine(underlying, &result, 1.0, true)
+  }
+  return Option<Value>.Some { value: move result }
+}
+
+// --- Motion along a path ----------------------------------------------------------------------
+
+/// The computed `d` of an element that an mpath names, from a cascade run before sampling,
+/// so a `d` set in CSS is the motion path (SVG 2 #TheDProperty).
+pub struct MotionPath {
+  pub node: XmlNodeId,
+  pub data: Bytes,
+}
+
+// The element the first mpath child names. Only the first mpath child counts, even when its
+// reference is unusable (SVG Animations 2 #MPathElement).
+fn mpathTarget(document: &XmlDocument, node: XmlNodeId, ids: &[Identified]) -> Option<XmlNodeId> {
+  let mut child = XmlDocument.firstChild(document, node)
+  while let Option<XmlNodeId>.Some { value } = child {
+    if element(document, value)
+      && equal(
+        String.utf8Bytes(XmlDocument.namespaceUri(document, value)),
+        b"http://www.w3.org/2000/svg",
+      )
+      && equal(String.utf8Bytes(XmlDocument.localName(document, value)), b"mpath") {
+      let mut href = text(document, value, "href")
+      if href.length == 0 {
+        href = match (XmlDocument.attribute(document, value, "http://www.w3.org/1999/xlink", "href")
+          |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+          Option<&[u8]>.Some { value: found } => trim(found)
+          _ => b""
+        }
+      }
+      if href.length > 1 && href[0] == 35 {
+        return findId(ids, view(href, 1, href.length))
+      }
+      return Option<XmlNodeId>.None
+    }
+    child = XmlDocument.nextSibling(document, value)
+  }
+  return Option<XmlNodeId>.None
+}
+
+// The path data of the element the first mpath child names: its computed `d` when the caller
+// has one, else its `d` attribute. Without a usable mpath, the path attribute
+// (SVG Animations 2 #MPathElement, #AnimateMotionElement).
+effect fn motionPath(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  ids: &[Identified],
+  computed: &[MotionPath],
+) -> Option<Bytes>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if let Option<XmlNodeId>.Some { value: target } = mpathTarget(document, node, ids) {
+    let mut k: usize = 0
+    while k < computed.length {
+      if computed[k].node.index == target.index {
+        return Option<Bytes>.Some { value: run Bytes.copy(Bytes.asSlice(&computed[k].data)) }
+      }
+      k = k + 1
+    }
+    if let Option<&[u8]>.Some { value: data } = attribute(document, target, "d") {
+      return Option<Bytes>.Some { value: run Bytes.copy(data) }
+    }
+  }
+  return match attribute(document, node, "path") {
+    Option<&[u8]>.Some { value } => Option<Bytes>.Some { value: run Bytes.copy(value) }
+    _ => Option<Bytes>.None
+  }
+}
+
+effect fn identify(document: &XmlDocument) -> List<Identified>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut ids = List<Identified>.make()
+  let count = XmlDocument.nodes(document).length
+  let mut index: usize = 0
+  while index < count {
+    let node = XmlNodeId { index: index }
+    if element(document, node) {
+      if let Option<&[u8]>.Some { value } = attribute(document, node, "id") {
+        run ids.append(Identified { id: run Bytes.copy(trim(value)), node: node })
+      }
+    }
+    index = index + 1
+  }
+  return move ids
+}
+
+/// The elements that the mpath children of animateMotion elements name, whose computed `d`
+/// [`sample`] takes as [`MotionPath`] values.
+pub effect fn motionTargets(document: &XmlDocument) -> List<XmlNodeId>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut targets = List<XmlNodeId>.make()
+  let ids = run identify(document)
+  let count = XmlDocument.nodes(document).length
+  let mut index: usize = 0
+  while index < count {
+    let node = XmlNodeId { index: index }
+    index = index + 1
+    if element(document, node)
+      && equal(
+        String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+        b"http://www.w3.org/2000/svg",
+      )
+      && equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"animateMotion") {
+      if let Option<XmlNodeId>.Some { value } = mpathTarget(document, node, ids.asSlice()) {
+        run targets.append(value)
+      }
+    }
+  }
+  return move targets
+}
+
+/// Absolute path data for `path`, which parses back to the same segments.
+pub effect fn pathData(path: &Path) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let segments = path.segments()
+  let mut k: usize = 0
+  while k < segments.length {
+    if k > 0 {
+      run out.append(b" ")
+    }
+    match &segments[k] {
+      Segment.MoveTo { to } => {
+        run out.append(b"M")
+        run point(&mut out, to)
+      }
+      Segment.LineTo { to } => {
+        run out.append(b"L")
+        run point(&mut out, to)
+      }
+      Segment.QuadraticTo { control, to } => {
+        run out.append(b"Q")
+        run point(&mut out, control)
+        run out.append(b" ")
+        run point(&mut out, to)
+      }
+      Segment.CubicTo { control1, control2, to } => {
+        run out.append(b"C")
+        run point(&mut out, control1)
+        run out.append(b" ")
+        run point(&mut out, control2)
+        run out.append(b" ")
+        run point(&mut out, to)
+      }
+      Segment.ArcTo { arc } => {
+        run out.append(b"A")
+        run writeNumber(&mut out, arc.radii.width)
+        run out.append(b" ")
+        run writeNumber(&mut out, arc.radii.height)
+        run out.append(b" ")
+        run writeNumber(&mut out, arc.rotationDegrees)
+        run out.append(
+          if arc.largeArc {
+            b" 1 "
+          } else {
+            b" 0 "
+          },
+        )
+        run out.append(
+          if arc.sweep {
+            b"1 "
+          } else {
+            b"0 "
+          },
+        )
+        run point(&mut out, arc.to)
+      }
+      Segment.Close => run out.append(b"Z")
+    }
+    k = k + 1
+  }
+  return move out
+}
+
+effect fn point(out: &mut Bytes, at: Point) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let xy = at.coordinates()
+  run writeNumber(&mut out.*, xy[0])
+  run out.append(b" ")
+  run writeNumber(&mut out.*, xy[1])
+}
+
+// simpleValue for scalar values: discrete, linear or spline, on keyTimes or evenly.
+fn scalarAt(animation: &Animation, values: &[f64], progress: f64) -> f64 {
+  let count = values.length
+  let times = animation.keyTimes.asSlice()
+  if progress >= 1.0 {
+    return values[count - 1]
+  }
+  if animation.calc == Calc.Discrete || count == 1 {
+    let mut chosen: usize = 0
+    let mut k: usize = 0
+    while k < count {
+      let start = if times.length == count {
+        times[k]
+      } else {
+        usize.toF64(k) / usize.toF64(count)
+      }
+      if start <= progress {
+        chosen = k
+      }
+      k = k + 1
+    }
+    return values[chosen]
+  }
+  let mut segment: usize = 0
+  while segment + 2 < count && stop(times, count, segment + 1) <= progress {
+    segment = segment + 1
+  }
+  let first = stop(times, count, segment)
+  let width = stop(times, count, segment + 1) - first
+  let mut local = if width > 0.0 {
+    (progress - first) / width
+  } else {
+    1.0
+  }
+  if animation.calc == Calc.Spline {
+    let splines = animation.keySplines.asSlice()
+    local = spline(
+      splines[4 * segment],
+      splines[4 * segment + 1],
+      splines[4 * segment + 2],
+      splines[4 * segment + 3],
+      local,
+    )
+  }
+  return values[segment] + (values[segment + 1] - values[segment]) * local
+}
+
+fn stop(times: &[f64], count: usize, index: usize) -> f64 {
+  if times.length == count {
+    return times[index]
+  }
+  return usize.toF64(index) / usize.toF64(count - 1)
+}
+
+// A motion value: a translation, as a two-number value so it sums like any other.
+effect fn pair(x: f64, y: f64) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut pieces = List<Bytes>.make()
+  run pieces.append(Bytes.make())
+  run pieces.append(Bytes.make())
+  run pieces.append(Bytes.make())
+  let mut numbers = List<f64>.make()
+  run numbers.append(x)
+  run numbers.append(y)
+  return Value.Numbers { pieces: move pieces, numbers: move numbers }
+}
+
+fn coordinates(value: &Value) -> [f64; 2] {
+  if let Value.Numbers { pieces, numbers } = &value.* {
+    let list = numbers.asSlice()
+    if list.length >= 2 {
+      return [list[0], list[1]]
+    }
+    if list.length == 1 {
+      return [list[0], 0.0]
+    }
+  }
+  return [0.0, 0.0]
+}
+
+struct Motion {
+  value: Value,
+  angle: f64,
+}
+
+// Path lengths at each value of a motion path: the start, then the end of every segment
+// except moveto commands after the first (SVG 1.1 #AnimateMotionElement).
+effect fn vertices(path: &Path, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let segments = path.segments()
+  let mut prefix = Path.make()
+  let mut k: usize = 0
+  while k < segments.length {
+    let segment = segments[k]
+    drop run prefix.append(segment)
+    let counted = match segment {
+      Segment.MoveTo { to } => k == 0
+      _ => true
+    }
+    if counted {
+      if k == 0 {
+        run out.append(0.0)
+      } else {
+        let measured = run OnPath.make(
+          &prefix,
+          Transform.identity(),
+          false,
+          0,
+          0,
+          Offset.Length { value: 0.0 },
+          Option<f64>.None,
+        )
+        run out.append(measured.length)
+      }
+    }
+    k = k + 1
+  }
+}
+
+// One animateMotion's position and rotation on top of `underlying` (SVG Animations 2
+// #AnimateMotionElement): along its path or the polyline through its values.
+effect fn motionApply(animation: &Animation, sample: Sample, underlying: &Value) -> Option<Motion>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut path = Path.make()
+  let mut stops = List<f64>.make()
+  let mut toAnimation = false
+  match &animation.path {
+    Option<Bytes>.Some { value } => {
+      let parsed = run svg.parsePath(Bytes.asSlice(&value))
+      path = move parsed.path
+      run vertices(&path, &mut stops)
+    }
+    _ => {
+      let mut values = List<Value>.make()
+      toAnimation = run valueList(animation, underlying, &mut values)
+      let list = values.asSlice()
+      let mut total: f64 = 0.0
+      let mut previous = [0.0, 0.0]
+      let mut k: usize = 0
+      while k < list.length {
+        let point = coordinates(&list[k])
+        let at = Point.new(point[0], point[1])
+        if k == 0 {
+          drop run path.append(Segment.MoveTo { to: at })
+        } else {
+          drop run path.append(Segment.LineTo { to: at })
+          let dx = point[0] - previous[0]
+          let dy = point[1] - previous[1]
+          total = total + f64.sqrt(dx * dx + dy * dy)
+        }
+        run stops.append(total)
+        previous = point
+        k = k + 1
+      }
+    }
+  }
+  let count = stops.length()
+  if count == 0 {
+    return Option<Motion>.None
+  }
+  let points = animation.keyPoints.asSlice()
+  let times = animation.keyTimes.asSlice()
+  let keyed = points.length > 0 && animation.calc != Calc.Paced
+  let needed = if keyed {
+    points.length
+  } else {
+    count
+  }
+  if animation.calc != Calc.Paced
+    && (times.length > 0 && times.length != needed
+      || animation.calc == Calc.Spline && animation.keySplines.length() != 4 * (needed - 1)) {
+    return Option<Motion>.None
+  }
+  if keyed && times.length != points.length {
+    return Option<Motion>.None
+  }
+  let measured = run OnPath.make(
+    &path,
+    Transform.identity(),
+    false,
+    0,
+    0,
+    Offset.Length { value: 0.0 },
+    Option<f64>.None,
+  )
+  let length = measured.length
+  let distance = if keyed {
+    scalarAt(animation, points, sample.progress) * length
+  } else if animation.calc == Calc.Paced {
+    f64.min(sample.progress, 1.0) * length
+  } else {
+    scalarAt(animation, stops.asSlice(), sample.progress)
+  }
+  let mut x: f64 = 0.0
+  let mut y: f64 = 0.0
+  let mut tangent: f64 = 0.0
+  let mut endX: f64 = 0.0
+  let mut endY: f64 = 0.0
+  if measured.valid {
+    let frame = measured.at(f64.max(0.0, f64.min(distance, length)))
+    x = frame.point.x
+    y = frame.point.y
+    tangent = f64.atan2(frame.tangentY, frame.tangentX) * 180.0 / f64.PI
+    let end = measured.at(length)
+    endX = end.point.x
+    endY = end.point.y
+  } else if let Option<Point>.Some { value } = path.currentPoint() {
+    x = value.x
+    y = value.y
+    endX = x
+    endY = y
+  }
+  let mut result = run pair(x, y)
+  let byAnimation = animation.path.isNone() && animation.from.isNone() && animation.to.isNone()
+    && animation.by.isSome()
+    && animation.values.length() == 0
+  if animation.accumulate && !toAnimation && sample.iteration > 0.0 {
+    let last = run pair(endX, endY)
+    result = run combine(&last, &result, sample.iteration, true)
+  }
+  if (animation.additive || byAnimation) && !toAnimation {
+    result = run combine(underlying, &result, 1.0, true)
+  }
+  let angle = match animation.rotate {
+    Rotate.Angle { value } => value
+    Rotate.Auto => tangent
+    Rotate.AutoReverse => tangent + 180.0
+  }
+  return Option<Motion>.Some { value: Motion { value: move result, angle: angle } }
+}
+
+/// Applies every animation of `document` at `time` seconds after the document begins.
+/// `computed` holds the computed `d` of the [`motionTargets`] that have one; it may be empty.
+pub effect fn sample(document: &mut XmlDocument, time: f64, computed: &[MotionPath]) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let found = run timeline(&document.*, computed)
+  run found.apply(&mut document.*, time)
+}
+
+/// The animations of one document with their intervals resolved, built once by
+/// [`timeline`] and applied at any number of times. Interval resolution reads only the
+/// timing attributes, which animations cannot change, so it holds for every time.
+pub struct Timeline {
+  animations: List<Animation>,
+}
+
+/// Finds the animation elements of `document` and resolves their intervals. `document`
+/// must hold its parsed values, not values written by an earlier [`Timeline.apply`].
+pub effect fn timeline(document: &XmlDocument, computed: &[MotionPath]) -> Timeline
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = XmlDocument.nodes(document).length
+  let mut ids = List<Identified>.make()
+  let mut nodes = List<XmlNodeId>.make()
+  let mut index: usize = 0
+  while index < count {
+    let node = XmlNodeId { index: index }
+    if element(document, node) {
+      if let Option<&[u8]>.Some { value } = attribute(document, node, "id") {
+        run ids.append(Identified { id: run Bytes.copy(trim(value)), node: node })
+      }
+      if timed(document, node) {
+        run nodes.append(node)
+      }
+    }
+    index = index + 1
+  }
+  if nodes.length() == 0 {
+    return Timeline { animations: List<Animation>.make() }
+  }
+
+  // Elements that are not usable animations still occupy their slot, so syncbase
+  // references index the same list; they never get intervals.
+  let mut animations = List<Animation>.make()
+  let all = nodes.asSlice()
+  index = 0
+  while index < all.length {
+    let found = run collect(document, all[index], ids.asSlice(), all, computed)
+    match move found {
+      Option<Animation>.Some { value } => run animations.append(move value)
+      _ => {
+        run animations.append(
+          Animation {
+            node: all[index],
+            target: all[index],
+            kind: Kind.Set,
+            namespace: Bytes.make(),
+            name: Bytes.make(),
+            css: false,
+            begins: List<TimeValue>.make(),
+            ends: List<TimeValue>.make(),
+            hasEnd: false,
+            duration: f64.INFINITY,
+            repeatCount: Option<f64>.None,
+            repeatDuration: Option<f64>.None,
+            minimum: 0.0,
+            maximum: f64.INFINITY,
+            restart: Restart.Always,
+            freeze: false,
+            calc: Calc.Discrete,
+            values: List<Bytes>.make(),
+            keyTimes: List<f64>.make(),
+            keySplines: List<f64>.make(),
+            from: Option<Bytes>.None,
+            to: Option<Bytes>.None,
+            by: Option<Bytes>.None,
+            additive: false,
+            accumulate: false,
+            transform: TransformType.Translate,
+            path: Option<Bytes>.None,
+            keyPoints: List<f64>.make(),
+            rotate: Rotate.Angle { value: 0.0 },
+            state: State.Done,
+            intervals: List<Interval>.make(),
+          },
+        )
+      }
+    }
+    index = index + 1
+  }
+  index = 0
+  while index < animations.length() {
+    run compute(&mut animations, index)
+    index = index + 1
+  }
+
+  return Timeline { animations: move animations }
+}
+
+impl Timeline {
+  /// Whether the document has any animation element.
+  pub fn animated(self: &Timeline) -> bool {
+    return self.animations.length() > 0
+  }
+
+  /// Writes every animated value at `time` seconds after the document begins into
+  /// `document`, which must hold its parsed values: the one `self` was built from, or a
+  /// restored [`silk.xml.document.XmlSnapshot`] of it.
+  pub effect fn apply(self: &Timeline, document: &mut XmlDocument, time: f64) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let animations = &self.animations
+
+    // Samples in priority order: by begin time, then document order (#AnimationSandwich).
+    let mut samples = List<Sample>.make()
+    let mut index: usize = 0
+    while index < animations.length() {
+      let animation = &animations.asSlice()[index]
+      if Bytes.length(&animation.name) > 0 {
+        if let Option<Sample>.Some { value } = sampleAt(animation, index, time) {
+          run samples.append(value)
+        }
+      }
+      index = index + 1
+    }
+    let ordered = samples.asMutSlice()
+    let mut k: usize = 1
+    while k < ordered.length {
+      let mut m = k
+      while m > 0 && ordered[m - 1].begin > ordered[m].begin {
+        let swap = ordered[m - 1]
+        ordered[m - 1] = ordered[m]
+        ordered[m] = swap
+        m = m - 1
+      }
+      k = k + 1
+    }
+    let mut done = List<bool>.make()
+    k = 0
+    while k < ordered.length {
+      run done.append(false)
+      k = k + 1
+    }
+    let mut writes = List<Write>.make()
+    let list = samples.asSlice()
+    k = 0
+    while k < list.length {
+      if !done.asSlice()[k] {
+        let first = &animations.asSlice()[list[k].animation]
+        let base = run baseText(&document.*, first)
+        let mut transformed = run Bytes.copy(Bytes.asSlice(&base))
+        let mut underlying = if first.kind == Kind.AnimateMotion {
+          run pair(0.0, 0.0)
+        } else {
+          run parse(first, Bytes.asSlice(&base))
+        }
+        let mut angle: f64 = 0.0
+        let mut m = k
+        while m < list.length {
+          let animation = &animations.asSlice()[list[m].animation]
+          if !done.asSlice()[m] && sameTarget(first, animation) {
+            let marks = done.asMutSlice()
+            marks[m] = true
+            if animation.kind == Kind.AnimateMotion {
+              if let Option<Motion>.Some { value } = run motionApply(
+                animation,
+                list[m],
+                &underlying,
+              ) {
+                let motion = move value
+                underlying = move motion.value
+                angle = motion.angle
+              }
+            } else if animation.kind == Kind.AnimateTransform {
+              let zeroed = run transformValue(animation.transform, &[])
+              let start = if animation.transform == TransformType.Scale && animation.by.isNone() {
+                run transformValue(animation.transform, &[1.0])
+              } else {
+                move zeroed
+              }
+              if let Option<Value>.Some { value } = run apply(animation, list[m], &start) {
+                let mut piece = Bytes.make()
+                run transformText(animation.transform, &value, &mut piece)
+                if animation.additive && Bytes.length(&transformed) > 0 {
+                  run transformed.append(b" ")
+                } else {
+                  transformed.clear()
+                }
+                run transformed.append(Bytes.asSlice(&piece))
+              }
+            } else if let Option<Value>.Some { value } = run apply(
+              animation,
+              list[m],
+              &underlying,
+            ) {
+              underlying = move value
+            }
+          }
+          m = m + 1
+        }
+        let mut out = Bytes.make()
+        if first.kind == Kind.AnimateTransform {
+          out = move transformed
+        } else if first.kind == Kind.AnimateMotion {
+          let offset = coordinates(&underlying)
+          run out.append(b"translate(")
+          run writeNumber(&mut out, offset[0])
+          run out.append(b" ")
+          run writeNumber(&mut out, offset[1])
+          run out.append(b") rotate(")
+          run writeNumber(&mut out, angle)
+          run out.append(b")")
+        } else {
+          run render(&underlying, &mut out)
+        }
+        let mut namespace = Bytes.make()
+        if first.css {
+          run namespace.append(String.utf8Bytes(animated()))
+        } else {
+          run namespace.append(Bytes.asSlice(&first.namespace))
+        }
+        run writes.append(
+          Write {
+            target: first.target,
+            namespace: move namespace,
+            name: run Bytes.copy(Bytes.asSlice(&first.name)),
+            value: move out,
+          },
+        )
+      }
+      k = k + 1
+    }
+
+    // Motion goes in front of the target's transform, animated or not, so it moves the
+    // element in its parent's user space (SVG Animations 2 #AnimateMotionElement).
+    let entries = writes.asMutSlice()
+    k = 0
+    while k < entries.length {
+      if equal(Bytes.asSlice(&entries[k].name), b"animateMotion")
+        && Bytes.length(&entries[k].namespace) == 0 {
+        let mut transform = run Bytes.copy(Bytes.asSlice(&entries[k].value))
+        let mut found = false
+        let mut m: usize = 0
+        while m < entries.length {
+          if entries[m].target.index == entries[k].target.index
+            && Bytes.length(&entries[m].namespace) == 0
+            && equal(Bytes.asSlice(&entries[m].name), b"transform") {
+            run transform.append(b" ")
+            run transform.append(Bytes.asSlice(&entries[m].value))
+            entries[m].value = run Bytes.copy(Bytes.asSlice(&transform))
+            found = true
+          }
+          m = m + 1
+        }
+        if !found {
+          if let Option<&[u8]>.Some { value } = attribute(
+            &document.*,
+            entries[k].target,
+            "transform",
+          ) {
+            run transform.append(b" ")
+            run transform.append(value)
+          }
+          entries[k].name = run Bytes.copy(b"transform")
+          entries[k].value = move transform
+        } else {
+          entries[k].name = Bytes.make()
+        }
+      }
+      k = k + 1
+    }
+    let pending = writes.asSlice()
+    k = 0
+    while k < pending.length {
+      if Bytes.length(&pending[k].name) == 0 {
+        k = k + 1
+        continue
+      }
+
+      // Names and raw pieces originate in valid XML text. Splits use ASCII boundaries,
+      // and interpolation adds only ASCII numbers and punctuation, preserving UTF-8.
+      run XmlDocument.setAttribute(
+        &mut document.*,
+        pending[k].target,
+        unsafe String.fromUtf8Unchecked(Bytes.asSlice(&pending[k].namespace)),
+        unsafe String.fromUtf8Unchecked(Bytes.asSlice(&pending[k].name)),
+        unsafe String.fromUtf8Unchecked(Bytes.asSlice(&pending[k].value)),
+      )
+      k = k + 1
+    }
+  }
+}
+
+/// An animated value waiting to be written.
+struct Write {
+  target: XmlNodeId,
+  namespace: Bytes,
+  name: Bytes,
+  value: Bytes,
+}

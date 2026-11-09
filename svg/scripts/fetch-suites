@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+// Fetch hash-pinned upstream data; this command never renders tests.
+import('./svg_suites.mjs').then(async ({ main }) => {
+  process.exitCode = await main();
+}).catch(error => { console.error(error.message); process.exitCode = 1; });

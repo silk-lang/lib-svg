@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="28">
+<defs>
+<meshgradient id="m" x="2" y="2" gradientUnits="userSpaceOnUse" type="bicubic">
+  <meshrow>
+    <meshpatch>
+      <stop path="l 8,0" stop-color="#fa0a0a"/>
+      <stop path="L 10 12" stop-color="#c85a1e"/>
+      <stop path="c -2.6666666666666665,0 -5.333333333333333,0 -8,0" stop-color="#f0f014"/>
+      <stop path="C 2,8.666666666666666 2,5.333333333333333" stop-color="#1e1ec8"/>
+    </meshpatch>
+    <meshpatch>
+      <stop path="l 12,0"/>
+      <stop path="L 22 12" stop-color="#3cc85a"/>
+      <stop path="c -4,0 -8,0" stop-color="#e614e6"/>
+    </meshpatch>
+    <meshpatch>
+      <stop path="C 27.333333333333332,2 32.666666666666664,2 38,2"/>
+      <stop path="l 0,10" stop-color="#0a28fa"/>
+      <stop path="L" stop-color="#14e6e6"/>
+    </meshpatch>
+  </meshrow>
+  <meshrow>
+    <meshpatch>
+      <stop path="c 0,4.666666666666667 0,9.333333333333334 0,14"/>
+      <stop path="C 7.333333333333334,26 4.666666666666667,26 2,26" stop-color="#0a783c"/>
+      <stop path="l" stop-color="#f08c0a"/>
+    </meshpatch>
+    <meshpatch>
+      <stop path="L 22 26"/>
+      <stop path="c -4,0 -8,0" stop-color="#646464"/>
+    </meshpatch>
+    <meshpatch>
+      <stop path="C 38,16.666666666666668 38,21.333333333333336 38,26"/>
+      <stop path="l" stop-color="#fafafa"/>
+    </meshpatch>
+  </meshrow>
+</meshgradient>
+</defs>
+<rect x="2" y="2" width="36" height="24" fill="url(#m)"/>
+</svg>

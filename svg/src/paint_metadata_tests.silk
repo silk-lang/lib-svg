@@ -1,0 +1,447 @@
+//! Non-CSS paint metadata; values stay specified until href resolution and use.
+import paint_metadata { Metadata, CoordinateUnits, MarkerUnits, MarkerOrient }
+import scene { SpreadMethod }
+import paint_metadata
+import used_viewports { Reference }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlError }
+import svg_css.dimensions { Store as NumericStore, ExprId, Context }
+import svg_css.dimensions
+import svg_css.tokens { Limits, CssError }
+import svg_geometry.geometry { Rect }
+import svg_geometry.svg { AspectRatio, Alignment }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn metadata(data: &[u8], numerics: &mut NumericStore<'_>) -> Metadata
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let document = run XmlDocument.parse(data)
+  return match &run paint_metadata.parse(
+    &document,
+    document.root(),
+    &mut numerics.*,
+    &Limits.make(),
+  ) {
+    Option<Metadata>.Some { value } => value
+    _ => {
+      run Testing.expect(false, "expected paint metadata")
+      return Intrinsic.trap("assertion")
+    }
+  }
+}
+
+fn absent(value: &Option<ExprId>) -> bool {
+  return match &value.* {
+    Option<ExprId>.None => true
+    _ => false
+  }
+}
+
+effect fn number(numerics: &mut NumericStore<'_>, value: &Option<ExprId>, basis: f64) -> f64
+  ! OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let id = match &value.* {
+    Option<ExprId>.Some { value: expression } => expression
+    _ => {
+      run Testing.expect(false, "expected numeric expression")
+      return Intrinsic.trap("assertion")
+    }
+  }
+  let computed = run dimensions.compute(&mut numerics.*, id, &Context.make(200.0, 100.0, 16.0))
+  return dimensions.evaluate(&numerics.*, computed, basis)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#LinearGradientAttributes
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates
+// https://www.w3.org/TR/css-values-4/#calc-type-checking
+test effect fn gradientCoordinatesRetainExpressionsAndMissingSlots() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<linearGradient xmlns='http://www.w3.org/2000/svg' gradientUnits='userSpaceOnUse' spreadMethod='reflect' x1='calc(25% + 2em)' y1='-3' x2='100%' gradientTransform='broken' style='x1:999px'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match &parsed {
+    Metadata.LinearGradient { value } => {
+      run Testing.expect(
+        match &value.units {
+          Option<CoordinateUnits>.Some { value: units } => units == CoordinateUnits.UserSpaceOnUse
+          _ => false
+        },
+        "explicit units retained",
+      )
+      run Testing.expect(
+        match &value.spread {
+          Option<SpreadMethod>.Some { value: spread } => spread == SpreadMethod.Reflect
+          _ => false
+        },
+        "explicit spread retained",
+      )
+      let x1 = run number(&mut numerics, &value.x1, 200.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      let y1 = run number(&mut numerics, &value.y1, 100.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      let x2 = run number(&mut numerics, &value.x2, 200.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      run Testing.expect(
+        x1 == 82.0 && y1 == -3.0 && x2 == 200.0 && absent(&value.y2),
+        "CSS math and SVG bare numbers use shared arena; missing is not zero",
+      )
+    }
+    _ => run Testing.expect(false, "linear gradient kind")
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientElementFXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientElementFRAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+test effect fn radialDefaultsWaitForTemplateResolution() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<radialGradient xmlns='http://www.w3.org/2000/svg' cx='20%' cy='3em' r='-1' fx='0' fy='' fr='-2%' gradientUnits='USERSPACEONUSE' spreadMethod='pad junk'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match &parsed {
+    Metadata.RadialGradient { value } => {
+      run Testing.expect(
+        absent(&value.r) && absent(&value.fr) && absent(&value.fy),
+        "negative radii and empty focal coordinate are unspecified",
+      )
+      let fx = run number(&mut numerics, &value.fx, 200.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      run Testing.expect(fx == 0.0, "explicit zero focal coordinate must not default to cx")
+      run Testing.expect(
+        match &value.units {
+          Option<CoordinateUnits>.None => true
+          _ => false
+        },
+        "XML enum is case sensitive",
+      )
+      run Testing.expect(
+        match &value.spread {
+          Option<SpreadMethod>.None => true
+          _ => false
+        },
+        "enum must consume entire attribute",
+      )
+    }
+    _ => run Testing.expect(false, "radial gradient kind")
+  }
+  let missing = run metadata(b"<radialGradient xmlns='http://www.w3.org/2000/svg'/>", &mut numerics)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &missing {
+      Metadata.RadialGradient { value } => absent(&value.cx) && absent(&value.cy)
+        && absent(&value.r)
+        && absent(&value.fx)
+        && absent(&value.fy)
+        && absent(&value.fr)
+      _ => false
+    },
+    "all six defaults remain deferred",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PatternElementAttributes
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ViewBoxAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute
+test effect fn patternMetadataKeepsDegenerateBoxesAndExplicitAspectRatio() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<pattern xmlns='http://www.w3.org/2000/svg' patternUnits='objectBoundingBox' patternContentUnits='userSpaceOnUse' x='-.5' y='10%' width='0' height='-2' viewBox='1 2 0 4' preserveAspectRatio='xMaxYMin slice'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match &parsed {
+    Metadata.Pattern { value } => {
+      run Testing.expect(
+        match &value.units {
+          Option<CoordinateUnits>.Some { value: units } => units
+            == CoordinateUnits.ObjectBoundingBox
+          _ => false
+        },
+        "pattern units",
+      )
+      run Testing.expect(
+        match &value.contentUnits {
+          Option<CoordinateUnits>.Some { value: units } => units == CoordinateUnits.UserSpaceOnUse
+          _ => false
+        },
+        "content units remain specified even with viewBox",
+      )
+      let width = run number(&mut numerics, &value.width, 200.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      run Testing.expect(
+        width == 0.0 && absent(&value.height),
+        "zero disables paint; negative height is invalid",
+      )
+      run Testing.expect(
+        match &value.viewBox {
+          Option<Rect>.Some { value: box } => box.xMin == 1.0 && box.xMax == 1.0
+          _ => false
+        },
+        "zero box retained for used-time suppression",
+      )
+      run Testing.expect(
+        match &value.aspectRatio {
+          Option<AspectRatio>.Some { value: ratio } => ratio.alignment == Alignment.XMaxYMin
+            && ratio.slice
+          _ => false
+        },
+        "explicit aspect ratio retained",
+      )
+    }
+    _ => run Testing.expect(false, "pattern kind")
+  }
+  let missing = run metadata(
+    b"<pattern xmlns='http://www.w3.org/2000/svg' viewBox='0 0 -1 2' preserveAspectRatio='garbage'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &missing {
+      Metadata.Pattern { value } => match &value.aspectRatio {
+        Option<AspectRatio>.None => match &value.viewBox {
+          Option<Rect>.None => true
+          _ => false
+        }
+        _ => false
+      }
+      _ => false
+    },
+    "invalid geometry permits template inheritance",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerWidthAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+test effect fn markerReferenceKeywordsAndOrientationRemainTyped() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='strokeWidth' markerWidth='4' markerHeight='50%' refX='right' refY='center' orient='auto-start-reverse'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match &parsed {
+    Metadata.Marker { value } => {
+      run Testing.expect(
+        match &value.units {
+          Option<MarkerUnits>.Some { value: units } => units == MarkerUnits.StrokeWidth
+          _ => false
+        },
+        "marker units",
+      )
+      run Testing.expect(
+        match &value.refX {
+          Option<Reference>.Some { value: reference } => match &reference {
+            Reference.Fraction { value: fraction } => fraction == 1.0
+            _ => false
+          }
+          _ => false
+        },
+        "horizontal keyword",
+      )
+      run Testing.expect(
+        match &value.refY {
+          Option<Reference>.Some { value: reference } => match &reference {
+            Reference.Fraction { value: fraction } => fraction == 0.5
+            _ => false
+          }
+          _ => false
+        },
+        "vertical keyword",
+      )
+      run Testing.expect(
+        match &value.orient {
+          Option<MarkerOrient>.Some { value: orient } => match &orient {
+            MarkerOrient.AutoStartReverse => true
+            _ => false
+          }
+          _ => false
+        },
+        "auto start reverse",
+      )
+    }
+    _ => run Testing.expect(false, "marker kind")
+  }
+  let angles: [&[u8]; 2] = [
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='90'/>",
+    b"<marker xmlns='http://www.w3.org/2000/svg' orient='calc(.25turn)'/>",
+  ]
+  let mut index: usize = 0
+  while index < angles.length {
+    let parsedAngle = run metadata(angles[index], &mut numerics)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    match &parsedAngle {
+      Metadata.Marker { value } => match &value.orient {
+        Option<MarkerOrient>.Some { value: orient } => match &orient {
+          MarkerOrient.Angle { expression } => {
+            let angle = run number(&mut numerics, &Option<ExprId>.Some { value: expression }, 1.0)
+              |> Effect.provideMut<Allocator>(&mut allocator)
+            run Testing.expect(angle == 90.0, "unitless degrees and angle math")
+          }
+          _ => run Testing.expect(false, "numeric orientation")
+        }
+        _ => run Testing.expect(false, "orientation present")
+      }
+      _ => run Testing.expect(false, "marker kind")
+    }
+    index = index + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopElementOffsetAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopNotes
+test effect fn stopOffsetsDeferClampingAndOrdering() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let inputs: [&[u8]; 2] = [
+    b"<stop xmlns='http://www.w3.org/2000/svg' offset='150%'/>",
+    b"<stop xmlns='http://www.w3.org/2000/svg' offset='-0.25'/>",
+  ]
+  let expected = [1.5, -0.25]
+  let mut index: usize = 0
+  while index < inputs.length {
+    let parsed = run metadata(inputs[index], &mut numerics)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    match &parsed {
+      Metadata.Stop { value } => {
+        let offset = run number(&mut numerics, &value.offset, 1.0)
+          |> Effect.provideMut<Allocator>(&mut allocator)
+        run Testing.expect(offset == expected[index], "no premature clamping")
+      }
+      _ => run Testing.expect(false, "stop kind")
+    }
+    index = index + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#ForeignNamespaces
+test effect fn malformedAndForeignMetadataRecoverWithoutInventingDefaults() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<linearGradient xmlns='http://www.w3.org/2000/svg' xmlns:f='urn:foreign' f:x1='2' y1='calc(2px +' x2='2px junk' y2='2s'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &parsed {
+      Metadata.LinearGradient { value } => absent(&value.x1) && absent(&value.y1)
+        && absent(&value.x2)
+        && absent(&value.y2)
+      _ => false
+    },
+    "wrong namespace, truncated math, trailing tokens and wrong dimensions are absent",
+  )
+  let foreign = run XmlDocument.parse(b"<linearGradient xmlns='urn:foreign'/>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run paint_metadata.parse(&foreign, foreign.root(), &mut numerics, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &result {
+      Option<Metadata>.None => true
+      _ => false
+    },
+    "foreign elements are not SVG paint servers",
+  )
+  let invalid = run paint_metadata.parse(
+    &foreign,
+    XmlNodeId { index: 999999 },
+    &mut numerics,
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &invalid {
+      Option<Metadata>.None => true
+      _ => false
+    },
+    "invalid node handles are harmless",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#OrientAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerHeightAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopElementOffsetAttribute
+test effect fn invalidMarkerAndStopAttributesStayUnspecified() -> ()
+  ! XmlError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut numerics = NumericStore.make()
+  let parsed = run metadata(
+    b"<marker xmlns='http://www.w3.org/2000/svg' markerUnits='objectBoundingBox' markerWidth='-1' markerHeight='0' refX='top' refY='right' orient='90px'/>",
+    &mut numerics,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match &parsed {
+    Metadata.Marker { value } => {
+      run Testing.expect(absent(&value.width), "negative marker width is unspecified")
+      let height = run number(&mut numerics, &value.height, 100.0)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      run Testing.expect(height == 0.0, "explicit zero marker height is retained")
+      run Testing.expect(
+        match &value.units {
+          Option<MarkerUnits>.None => true
+          _ => false
+        },
+        "invalid marker units",
+      )
+      run Testing.expect(
+        match &value.refX {
+          Option<Reference>.None => true
+          _ => false
+        },
+        "wrong-axis refX",
+      )
+      run Testing.expect(
+        match &value.refY {
+          Option<Reference>.None => true
+          _ => false
+        },
+        "wrong-axis refY",
+      )
+      run Testing.expect(
+        match &value.orient {
+          Option<MarkerOrient>.None => true
+          _ => false
+        },
+        "length is not an angle",
+      )
+    }
+    _ => run Testing.expect(false, "marker kind")
+  }
+  let inputs: [&[u8]; 4] = [
+    b"<stop xmlns='http://www.w3.org/2000/svg'/>",
+    b"<stop xmlns='http://www.w3.org/2000/svg' offset=''/>",
+    b"<stop xmlns='http://www.w3.org/2000/svg' offset='1px'/>",
+    b"<stop xmlns='http://www.w3.org/2000/svg' offset='20% junk'/>",
+  ]
+  let mut index: usize = 0
+  while index < inputs.length {
+    let stop = run metadata(inputs[index], &mut numerics)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      match &stop {
+        Metadata.Stop { value } => absent(&value.offset)
+        _ => false
+      },
+      "missing or invalid offset has no early default",
+    )
+    index = index + 1
+  }
+}

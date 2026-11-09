@@ -1,0 +1,300 @@
+//! Element-only selector links and inherited language over the immutable XML arena.
+import silk.text.string { String }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import svg_css.element { ElementTree, NO_ELEMENT, AttributeText }
+import svg_css.tokens { equal }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+
+struct Links {
+  first: usize,
+  next: usize,
+  previous: usize,
+  languageOwner: usize,
+  languageAttribute: usize,
+  empty: bool,
+  link: bool,
+}
+
+pub struct Metadata {
+  links: List<Links>,
+}
+
+pub struct Tree<'a> {
+  pub document: &'a XmlDocument,
+  metadata: Metadata,
+}
+
+impl Metadata {
+  pub fn localLanguageAttribute(self: &Self, node: XmlNodeId) -> Option<usize> {
+    if node.index >= self.links.length() {
+      return Option<usize>.None
+    }
+    let entry = &self.links.asSlice()[node.index]
+    return if entry.languageOwner == node.index {
+      Option<usize>.some(entry.languageAttribute)
+    } else {
+      Option<usize>.None
+    }
+  }
+
+  pub fn isEmpty(self: &Self, node: XmlNodeId) -> bool {
+    return node.index < self.links.length() && self.links.asSlice()[node.index].empty
+  }
+
+  pub fn isLink(self: &Self, node: XmlNodeId) -> bool {
+    return node.index < self.links.length() && self.links.asSlice()[node.index].link
+  }
+}
+
+fn index(id: Option<XmlNodeId>) -> usize {
+  return match &id {
+    Option<XmlNodeId>.Some { value } => value.index
+    _ => NO_ELEMENT
+  }
+}
+
+fn documentWhitespace(text: &[u8]) -> bool {
+  let mut i: usize = 0
+  while i < text.length {
+    let c = text[i]
+    if c != 9 && c != 10 && c != 13 && c != 32 {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// XML nodes are appended in document order, with parents before their children.
+// One pass over children and attributes prevents uncharged scans during matching.
+pub effect fn makeMetadata(document: &XmlDocument) -> Metadata
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let nodes = XmlDocument.nodes(document)
+  let mut links = run List<Links>.makeWithCapacity(nodes.length)
+  let mut i: usize = 0
+  while i < nodes.length {
+    run links.append(
+      Links {
+        first: NO_ELEMENT,
+        next: NO_ELEMENT,
+        previous: NO_ELEMENT,
+        languageOwner: NO_ELEMENT,
+        languageAttribute: NO_ELEMENT,
+        empty: true,
+        link: false,
+      },
+    )
+    i = i + 1
+  }
+  let mut entries = links.asMutSlice()
+  i = 0
+  while i < nodes.length {
+    if nodes[i].kind == XmlNodeKind.Element {
+      let id = XmlNodeId { index: i }
+      let parent = index(nodes[i].parent)
+      if parent != NO_ELEMENT {
+        entries[i].languageOwner = entries[parent].languageOwner
+        entries[i].languageAttribute = entries[parent].languageAttribute
+      }
+      let svg = equal(
+        String.utf8Bytes(XmlDocument.namespaceUri(document, id)),
+        b"http://www.w3.org/2000/svg",
+      )
+      let anchor = svg && equal(String.utf8Bytes(XmlDocument.localName(document, id)), b"a")
+      let attrs = XmlDocument.attributes(document, id)
+      let mut plainLanguage = NO_ELEMENT
+      let mut xmlLanguage = NO_ELEMENT
+      let mut attribute: usize = 0
+      while attribute < attrs.length {
+        let name = String.utf8Bytes(XmlDocument.attributeLocalName(document, attrs[attribute]))
+        let namespace = String.utf8Bytes(
+          XmlDocument.attributeNamespaceUri(document, attrs[attribute]),
+        )
+        if equal(name, b"lang") {
+          if equal(namespace, b"http://www.w3.org/XML/1998/namespace") {
+            xmlLanguage = attribute
+          } else if svg && namespace.length == 0 {
+            plainLanguage = attribute
+          }
+        }
+        if anchor && equal(name, b"href")
+          && (namespace.length == 0 || equal(namespace, b"http://www.w3.org/1999/xlink")) {
+          entries[i].link = true
+        }
+        attribute = attribute + 1
+      }
+
+      // https://www.w3.org/TR/SVG2/struct.html#LangSpaceAttrs
+      let language = if xmlLanguage != NO_ELEMENT {
+        xmlLanguage
+      } else {
+        plainLanguage
+      }
+      if language != NO_ELEMENT {
+        entries[i].languageOwner = i
+        entries[i].languageAttribute = language
+      }
+      let mut previous = NO_ELEMENT
+      let mut child = index(XmlDocument.firstChild(document, id))
+      while child != NO_ELEMENT {
+        let childId = XmlNodeId { index: child }
+        if nodes[child].kind == XmlNodeKind.Element {
+          entries[i].empty = false
+          entries[child].previous = previous
+          if previous == NO_ELEMENT {
+            entries[i].first = child
+          } else {
+            entries[previous].next = child
+          }
+          previous = child
+        } else if nodes[child].kind == XmlNodeKind.Text
+          && !documentWhitespace(String.utf8Bytes(XmlDocument.text(document, childId))) {
+          entries[i].empty = false
+        }
+        child = index(XmlDocument.nextSibling(document, childId))
+      }
+    }
+    i = i + 1
+  }
+  drop entries
+  return Metadata { links: move links }
+}
+
+pub effect fn make<'a>(document: &'a XmlDocument) -> Tree<'a>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let metadata = run makeMetadata(document)
+  return Tree { document: document, metadata: move metadata }
+}
+
+impl<'a> ElementTree for Tree<'a> {
+  fn containingHost(self: &Self, node: usize) -> usize {
+    return NO_ELEMENT
+  }
+
+  fn parent(self: &Self, node: usize) -> usize {
+    let nodes = XmlDocument.nodes(self.document)
+    return if node < nodes.length {
+      index(nodes[node].parent)
+    } else {
+      NO_ELEMENT
+    }
+  }
+
+  fn firstChild(self: &Self, node: usize) -> usize {
+    let entries = self.metadata.links.asSlice()
+    return if node < entries.length {
+      entries[node].first
+    } else {
+      NO_ELEMENT
+    }
+  }
+
+  fn nextSibling(self: &Self, node: usize) -> usize {
+    let entries = self.metadata.links.asSlice()
+    return if node < entries.length {
+      entries[node].next
+    } else {
+      NO_ELEMENT
+    }
+  }
+
+  fn previousSibling(self: &Self, node: usize) -> usize {
+    let entries = self.metadata.links.asSlice()
+    return if node < entries.length {
+      entries[node].previous
+    } else {
+      NO_ELEMENT
+    }
+  }
+
+  fn localName(self: &Self, node: usize) -> &[u8] {
+    return String.utf8Bytes(XmlDocument.localName(self.document, XmlNodeId { index: node }))
+  }
+
+  fn namespaceUri(self: &Self, node: usize) -> &[u8] {
+    return String.utf8Bytes(XmlDocument.namespaceUri(self.document, XmlNodeId { index: node }))
+  }
+
+  fn attributeCount(self: &Self, node: usize) -> usize {
+    return XmlDocument.attributes(self.document, XmlNodeId { index: node }).length
+  }
+
+  fn attributeName(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let attrs = XmlDocument.attributes(self.document, XmlNodeId { index: node })
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeLocalName(self.document, attrs[attribute]))
+    } else {
+      &[]
+    }
+  }
+
+  fn attributeNamespace(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let attrs = XmlDocument.attributes(self.document, XmlNodeId { index: node })
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeNamespaceUri(self.document, attrs[attribute]))
+    } else {
+      &[]
+    }
+  }
+
+  fn attributeValue(self: &Self, node: usize, attribute: usize) -> &[u8] {
+    let attrs = XmlDocument.attributes(self.document, XmlNodeId { index: node })
+    return if attribute < attrs.length {
+      String.utf8Bytes(XmlDocument.attributeValue(self.document, attrs[attribute]))
+    } else {
+      &[]
+    }
+  }
+
+  fn attribute<'t>(self: &'t Self, node: usize, attribute: usize) -> AttributeText<'t> {
+    return AttributeText<'t> {
+      namespace: ElementTree.attributeNamespace(self, node, attribute),
+      name: ElementTree.attributeName(self, node, attribute),
+      value: ElementTree.attributeValue(self, node, attribute),
+    }
+  }
+
+  fn attributeIsId(self: &Self, node: usize, attribute: usize) -> bool {
+    let id = XmlNodeId { index: node }
+    let attrs = XmlDocument.attributes(self.document, id)
+    if attribute >= attrs.length {
+      return false
+    }
+    let attr = attrs[attribute]
+    return XmlDocument.attributeIsId(self.document, attr)
+      || (String.utf8Bytes(XmlDocument.attributeNamespaceUri(self.document, attr)).length == 0
+        && equal(String.utf8Bytes(XmlDocument.attributeLocalName(self.document, attr)), b"id")
+        && equal(
+          String.utf8Bytes(XmlDocument.namespaceUri(self.document, id)),
+          b"http://www.w3.org/2000/svg",
+        ))
+  }
+
+  fn language(self: &Self, node: usize) -> &[u8] {
+    let entries = self.metadata.links.asSlice()
+    if node >= entries.length || entries[node].languageOwner == NO_ELEMENT {
+      return &[]
+    }
+    let entry = &entries[node]
+    let attrs = XmlDocument.attributes(self.document, XmlNodeId { index: entry.languageOwner })
+    return String.utf8Bytes(
+      XmlDocument.attributeValue(self.document, attrs[entry.languageAttribute]),
+    )
+  }
+
+  fn isRoot(self: &Self, node: usize) -> bool {
+    return XmlDocument.root(self.document).index == node
+  }
+
+  fn isEmpty(self: &Self, node: usize) -> bool {
+    return self.metadata.isEmpty(XmlNodeId { index: node })
+  }
+
+  fn isLink(self: &Self, node: usize) -> bool {
+    return self.metadata.isLink(XmlNodeId { index: node })
+  }
+}

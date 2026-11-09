@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">
+<clipPath id="c"><text x="10" y="50" font-family="Noto Sans" font-size="40">A<tspan fill="red">V</tspan>A</text></clipPath>
+<rect width="200" height="80" fill="blue" clip-path="url(#c)"/>
+</svg>

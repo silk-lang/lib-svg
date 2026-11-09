@@ -1,0 +1,212 @@
+//! SVG image positioning rectangles and sample-to-user mappings.
+//! Natural dimensions are measured after image orientation, before CSS transforms.
+import scene { RenderError }
+import image_assets { Asset, ColorMetadata }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.properties { Property }
+import svg_css.values { Value }
+import svg_css.value_keywords { Keyword }
+import svg_css.dimensions
+import svg_geometry.geometry { Size, Rect, Transform, Vector, checkedRect, isValidSize }
+import svg_geometry.svg { AspectRatio }
+import svg_geometry.svg
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.num.f64
+
+pub struct NaturalSize {
+  pub width: Option<f64>,
+  pub height: Option<f64>,
+  pub ratio: Option<f64>,
+}
+
+impl Copy for NaturalSize {}
+
+effect fn validate(value: Option<f64>, ratio: bool) -> ()
+  ! RenderError {
+  if let Option<f64>.Some { value: number } = &value {
+    if !f64.isFinite(number) || number < 0.0 || (ratio && number == 0.0) {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+fn fallback(value: Option<f64>, defaultValue: f64) -> f64 {
+  return match &value {
+    Option<f64>.Some { value: number } => number
+    _ => defaultValue
+  }
+}
+
+/// CSS Images 3 default sizing, with SVG's 300 by 150 default object size.
+/// None denotes auto/absent; explicit zero remains zero and disables painting.
+pub effect fn size(width: Option<f64>, height: Option<f64>, natural: NaturalSize) -> Size
+  ! RenderError {
+  run validate(width, false)
+  run validate(height, false)
+  run validate(natural.width, false)
+  run validate(natural.height, false)
+  run validate(natural.ratio, true)
+  let mut w = width
+  let mut h = height
+  if w.isNone() && h.isNone() {
+    w = natural.width
+    h = natural.height
+  }
+  let result = match &w {
+    Option<f64>.Some { value: x } => {
+      let y = match &h {
+        Option<f64>.Some { value } => value
+        _ => match &natural.ratio {
+          Option<f64>.Some { value } => x / value
+          _ => fallback(natural.height, 150.0)
+        }
+      }
+      Size.new(x, y)
+    }
+    _ => match &h {
+      Option<f64>.Some { value: y } => {
+        let x = match &natural.ratio {
+          Option<f64>.Some { value } => y * value
+          _ => fallback(natural.width, 300.0)
+        }
+        Size.new(x, y)
+      }
+      _ => match &natural.ratio {
+        Option<f64>.Some { value } => if value > 2.0 {
+          Size.new(300.0, 300.0 / value)
+        } else {
+          Size.new(150.0 * value, 150.0)
+        }
+        _ => Size.new(300.0, 150.0)
+      }
+    }
+  }
+  if !isValidSize(result) {
+    fail RenderError.InvalidGeometry
+  }
+  return result
+}
+
+/// Maps source samples into the positioning rectangle with preserveAspectRatio.
+/// The caller clips slice overflow separately and composes the element's full
+/// projective transform after this affine, local image placement.
+pub fn fit(width: f64, height: f64, target: Rect, aspect: AspectRatio) -> Option<Transform> {
+  if width <= 0.0 || height <= 0.0 || target.width() <= 0.0 || target.height() <= 0.0 {
+    return Option<Transform>.None
+  }
+  let source = match &checkedRect(0.0, 0.0, width, height) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      return Option<Transform>.None
+    }
+  }
+  return match &svg.viewportWithAspectRatio(source, target.width(), target.height(), aspect) {
+    Option<Transform>.Some { value } => {
+      let placed = Transform.translation(Vector.new(target.xMin, target.yMin)) * value
+      if placed.isFinite() {
+        Option<Transform>.some(placed)
+      } else {
+        Option<Transform>.None
+      }
+    }
+    _ => Option<Transform>.None
+  }
+}
+
+/// CSS Images 3 #the-image-orientation: rotation first, then horizontal flip.
+pub fn orientation(engine: &Engine<'_>, style: StyleId, asset: &Asset) -> u8 {
+  let metadata = match &asset.color {
+    ColorMetadata.Jpeg { value } => value.orientation
+    _ => 1
+  }
+  return orientationFromMetadata(engine, style, metadata)
+}
+
+/// SVG documents have no EXIF metadata, but use the same computed orientation.
+pub fn orientationFromMetadata(engine: &Engine<'_>, style: StyleId, metadata: u8) -> u8 {
+  if let Option<ComputedValue>.Some { value: entry } = &engine.get(
+    style,
+    Property.ImageOrientation,
+  ) {
+    match &engine.values.get(entry.value).* {
+      Value.Keyword { keyword } => {
+        if keyword == Keyword.None {
+          return 1
+        }
+      }
+      Value.ImageOrientation { angle, flip } => {
+        let degrees = dimensions.evaluate(&engine.values.numerics, angle, 0.0)
+        if degrees == 90.0 {
+          return if flip {
+            5
+          } else {
+            6
+          }
+        }
+        if degrees == 180.0 {
+          return if flip {
+            4
+          } else {
+            3
+          }
+        }
+        if degrees == 270.0 {
+          return if flip {
+            7
+          } else {
+            8
+          }
+        }
+        return if flip {
+          2
+        } else {
+          1
+        }
+      }
+      _ => {}
+    }
+  }
+  return metadata
+}
+
+/// Natural dimensions refer to the oriented image, including an optional ratio.
+pub fn orientedNatural(natural: NaturalSize, code: u8) -> NaturalSize {
+  if code < 5 || code > 8 {
+    return natural
+  }
+  return NaturalSize {
+    width: natural.height,
+    height: natural.width,
+    ratio: match &natural.ratio {
+      Option<f64>.Some { value } => Option<f64>.some(1.0 / value)
+      _ => Option<f64>.None
+    },
+  }
+}
+
+/// Maps raw sample boundaries into the oriented natural rectangle.
+pub fn orient(code: u8, width: f64, height: f64) -> Transform {
+  if code == 2 {
+    return Transform.new(-1.0, 0.0, 0.0, 1.0, width, 0.0)
+  }
+  if code == 3 {
+    return Transform.new(-1.0, 0.0, 0.0, -1.0, width, height)
+  }
+  if code == 4 {
+    return Transform.new(1.0, 0.0, 0.0, -1.0, 0.0, height)
+  }
+  if code == 5 {
+    return Transform.new(0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+  }
+  if code == 6 {
+    return Transform.new(0.0, 1.0, -1.0, 0.0, height, 0.0)
+  }
+  if code == 7 {
+    return Transform.new(0.0, -1.0, -1.0, 0.0, height, width)
+  }
+  if code == 8 {
+    return Transform.new(0.0, -1.0, 1.0, 0.0, 0.0, width)
+  }
+  return Transform.identity()
+}

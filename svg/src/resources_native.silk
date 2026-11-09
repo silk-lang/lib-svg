@@ -1,0 +1,278 @@
+//! Opt-in local resource provider. Portable URL and data decoding never import this module.
+//! The base and its parents must be trusted, as required by OsFileSystem. Its rooted
+//! traversal confines symlink targets as well as ordinary paths. This provider performs
+//! no writes, networking, or caching. File sizes are checked before and after reading;
+//! stdlib whole-file reads do not impose a hard allocation ceiling if a file grows
+//! concurrently between stat and read.
+static if (Intrinsic.targetOperatingSystem() == "windows"
+  && Intrinsic.targetArchitecture() == "x86_64"
+  && Intrinsic.targetAbi() == "msvc"
+  && Intrinsic.profileText("libc") == "system")
+  || Intrinsic.targetOperatingSystem() == "wasi"
+  || (Intrinsic.targetOperatingSystem() == "darwin" && Intrinsic.targetArchitecture() == "aarch64"
+    && Intrinsic.targetAbi() == "apple"
+    && Intrinsic.profileText("libc") == "system")
+  || (Intrinsic.targetOperatingSystem() == "linux" && Intrinsic.targetAbi() == "gnu"
+    && Intrinsic.profileText("libc") == "gnu"
+    && (Intrinsic.targetArchitecture() == "aarch64"
+      || Intrinsic.targetArchitecture() == "x86_64")) {
+  import resources { DataOnly, Limits, Resolver, Response, ResourceKind, ResourceError }
+  import url { Url, UrlError }
+  import silk.collections.bytes { Bytes }
+  import silk.collections.slice { Slice }
+  import silk.core.effect { Effect }
+  import silk.mem.allocator { Allocator, OutOfMemoryError }
+  import silk.system.filesystem {
+    FileSystem as HostFileSystem,
+    FileError,
+    FileInfo,
+    DirectoryInfo,
+    Path
+  }
+  import silk.system.filesystem_native { OsFileSystem }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    import silk.platform.windows.path { WindowsPath }
+    import silk.platform.windows.filesystem { WindowsFileSystem }
+  }
+
+  /// A Resolver confined to one normalized absolute machine directory.
+  /// Windows uses `/C:/directory` or `/UNC/server/share/directory`, as produced
+  /// by WindowsPath.fromNativeBytes; Unix and WASI use ordinary absolute paths.
+  /// File URLs must name that directory or its descendants after URL decoding.
+  /// On WASI the base must additionally be available through a host preopen.
+  pub struct FileSystem {
+    base: Bytes,
+    files: OsFileSystem,
+    limits: Limits,
+  }
+
+  impl FileSystem {
+    /// Rejects malformed/non-normalized bases with BlockedLocation before invoking
+    /// the native constructor, whose empty, relative, and NUL inputs would trap.
+    /// Construction does not open the root; filesystem failures are reported by fetch.
+    pub effect fn make(baseAbsolutePath: &[u8], limits: Limits) -> FileSystem
+      ! ResourceError | OutOfMemoryError
+      ? &mut Allocator {
+      if !normalizedAbsolute(baseAbsolutePath) {
+        fail ResourceError.BlockedLocation
+      }
+      let base = run Bytes.copy(baseAbsolutePath)
+      let files = run nativeFiles(baseAbsolutePath)
+      return FileSystem { base: move base, files: move files, limits: limits }
+    }
+
+    pub effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+      ! ResourceError | OutOfMemoryError
+      ? &mut Allocator {
+      if equal(Url.scheme(address), b"data") {
+        let mut data = DataOnly.make(self.limits)
+        return run DataOnly.fetch(&mut data, address, kind)
+      }
+      if !equal(Url.scheme(address), b"file") {
+        fail ResourceError.UnsupportedScheme
+      }
+
+      // URL Standard file-host-state already canonicalizes localhost to empty.
+      if Url.host(address).length != 0 {
+        fail ResourceError.BlockedLocation
+      }
+      run checkEncodedPath(Url.path(address))
+      let decoded = run Effect.catch<UrlError>(Url.decodedPath(address), invalidUrl)
+      let pathBytes = Bytes.asSlice(&decoded)
+
+      // Never reinterpret decoded separators or dot components through Path.resolve.
+      // URL dot-segment normalization has already happened in the URL parser.
+      if !normalizedAbsolute(pathBytes) {
+        fail ResourceError.BlockedLocation
+      }
+      let baseBytes = Bytes.asSlice(&self.base)
+      let mut relativeStart: usize = 0
+      if baseBytes.length != 1 {
+        if pathBytes.length < baseBytes.length {
+          fail ResourceError.BlockedLocation
+        }
+        if !equal(Slice.view<u8>(pathBytes, 0, baseBytes.length), baseBytes) {
+          fail ResourceError.BlockedLocation
+        }
+        if pathBytes.length > baseBytes.length && pathBytes[baseBytes.length] != 47 {
+          fail ResourceError.BlockedLocation
+        }
+        relativeStart = baseBytes.length
+      }
+
+      // Provider paths start with '/', but are rooted at self.files, not at the host root.
+      let relativeBytes: &[u8] = if relativeStart < pathBytes.length {
+        Slice.view<u8>(pathBytes, relativeStart, pathBytes.length - relativeStart)
+      } else {
+        b"/"
+      }
+      let path = run Effect.catch<FileError>(Path.fromBytes(relativeBytes), fileFailure)
+      let bytes = run Effect.catch<FileError>(
+        readBounded(&path, self.limits.maxResourceBytes)
+          |> Effect.provideMut<HostFileSystem>(&mut self.files),
+        fileFailure,
+      )
+      return Response.fromBytes(move bytes)
+    }
+  }
+
+  impl Resolver for FileSystem {
+    fetch: FileSystem.fetch
+  }
+
+  effect fn nativeFiles(root: &[u8]) -> OsFileSystem
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      let path = run Effect.catch<FileError>(Path.fromBytes(root), fileFailure)
+      let native = run Effect.catch<FileError>(WindowsPath.toNativeBytes(&path), fileFailure)
+
+      // WindowsPath returns a verbatim Win32 name; the confined provider takes
+      // an ordinary absolute drive/UNC root and validates it before opening.
+      let bytes = Bytes.asSlice(&native)
+      let mut providerRoot = Bytes.make()
+      if bytes.length >= 8 && equal(Slice.view<u8>(bytes, 4, 4), b"UNC\\") {
+        run Bytes.append(&mut providerRoot, b"\\\\")
+        run Bytes.append(&mut providerRoot, Slice.view<u8>(bytes, 8, bytes.length - 8))
+      } else {
+        run Bytes.append(&mut providerRoot, Slice.view<u8>(bytes, 4, bytes.length - 4))
+      }
+      if !WindowsFileSystem.validRootBytes(Bytes.asSlice(&providerRoot)) {
+        fail ResourceError.BlockedLocation
+      }
+      return run OsFileSystem.makeBytes(Bytes.asSlice(&providerRoot))
+    } else {
+      return run OsFileSystem.makeBytes(root)
+    }
+  }
+
+  fn equal(left: &[u8], right: &[u8]) -> bool {
+    if left.length != right.length {
+      return false
+    }
+    let mut index: usize = 0
+    while index < left.length {
+      if left[index] != right[index] {
+        return false
+      }
+      index = index + 1
+    }
+    return true
+  }
+
+  // Matches the portable Path invariant without allocating a temporary Path and
+  // copying both its full path and its name just to validate the native root.
+  fn normalizedAbsolute(path: &[u8]) -> bool {
+    if path.length == 0 || path[0] != 47 {
+      return false
+    }
+    if path.length == 1 {
+      return true
+    }
+    let mut start: usize = 1
+    let mut index: usize = 1
+    while index <= path.length {
+      if index == path.length || path[index] == 47 {
+        let length = index - start
+        if length == 0 {
+          return false
+        }
+        if length == 1 && path[start] == 46 {
+          return false
+        }
+        if length == 2 && path[start] == 46 && path[start + 1] == 46 {
+          return false
+        }
+        start = index + 1
+      } else {
+        if path[index] == 0 {
+          return false
+        }
+      }
+      index = index + 1
+    }
+    return true
+  }
+
+  fn hex(value: u8) -> u8 {
+    if value >= 48 && value <= 57 {
+      return value - 48
+    }
+    if value >= 65 && value <= 70 {
+      return value - 65 + 10
+    }
+    if value >= 97 && value <= 102 {
+      return value - 97 + 10
+    }
+    return 255
+  }
+
+  effect fn checkEncodedPath(path: &[u8]) -> ()
+    ! ResourceError {
+    let mut index: usize = 0
+    while index < path.length {
+      if path[index] == 37 {
+        if path.length - index < 3 {
+          fail ResourceError.InvalidData
+        }
+        let high = hex(path[index + 1])
+        let low = hex(path[index + 2])
+        if high == 255 || low == 255 {
+          fail ResourceError.InvalidData
+        }
+        let decoded = high * 16 + low
+        if decoded == 0 || decoded == 47 || decoded == 92 {
+          fail ResourceError.BlockedLocation
+        }
+        index = index + 3
+      } else {
+        if path[index] == 0 || path[index] == 92 {
+          fail ResourceError.BlockedLocation
+        }
+        index = index + 1
+      }
+    }
+  }
+
+  effect fn invalidUrl(error: UrlError) -> never
+    ! ResourceError {
+    if error == UrlError.InputLimit {
+      fail ResourceError.TooLarge
+    }
+    fail ResourceError.InvalidData
+  }
+
+  effect fn fileFailure(error: FileError) -> never
+    ! ResourceError {
+    let reason = error.reason.code
+    if reason == HostFileSystem.reasonCode(HostFileSystem.tooLarge()) {
+      fail ResourceError.TooLarge
+    }
+    if reason == HostFileSystem.reasonCode(HostFileSystem.invalidPath())
+      || reason == HostFileSystem.reasonCode(HostFileSystem.permissionDenied()) {
+      fail ResourceError.BlockedLocation
+    }
+    fail ResourceError.Io
+  }
+
+  effect fn readBounded(path: &Path, maximum: usize) -> Bytes
+    ! ResourceError | FileError | OutOfMemoryError
+    ? &mut HostFileSystem | &mut Allocator {
+    let info = run HostFileSystem.stat(path)
+    match &info {
+      FileInfo file => {
+        if file.byteLength > maximum {
+          fail ResourceError.TooLarge
+        }
+      }
+      DirectoryInfo directory => {
+        fail ResourceError.Io
+      }
+    }
+    let bytes = run HostFileSystem.readFile(path)
+    if Bytes.asSlice(&bytes).length > maximum {
+      fail ResourceError.TooLarge
+    }
+    return move bytes
+  }
+}

@@ -1,0 +1,420 @@
+//! Used reference-box percentages and full 4x4 CSS transform composition.
+import svg_css.values { Store, Value }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.properties { Property }
+import svg_css.dimensions { ExprId }
+import svg_css.dimensions
+import svg_css.transform_values {
+  TransformValue,
+  Operation,
+  PositionAxis,
+  Edge,
+  ReferenceBox,
+  Backface
+}
+import svg_geometry.geometry { Rect, Transform, isValidRect }
+import svg_geometry.transforms { Matrix }
+import svg_geometry.transforms
+import svg_geometry.math
+import silk.core.option { Option }
+import silk.num.f64
+
+fn number(store: &Store<'_>, expression: ExprId, basis: f64) -> f64 {
+  let limit = f64.fromBits(9218868437227405311)
+  return f64.max(-limit, f64.min(limit, dimensions.evaluate(&store.numerics, expression, basis)))
+}
+
+fn axis(store: &Store<'_>, position: PositionAxis, size: f64) -> f64 {
+  let offset = number(store, position.offset, size)
+  return match position.edge {
+    Edge.Start => offset
+    Edge.Center => size * 0.5 + offset
+    Edge.End => size - offset
+  }
+}
+
+fn operation(store: &Store<'_>, op: &Operation, box: Rect) -> Option<Matrix> {
+  let result = match &op.* {
+    Operation.Matrix2 { components } => transforms.fromAffine(
+      Transform.new(
+        number(store, components[0], 1.0),
+        number(store, components[1], 1.0),
+        number(store, components[2], 1.0),
+        number(store, components[3], 1.0),
+        number(store, components[4], 1.0),
+        number(store, components[5], 1.0),
+      ),
+    )
+    Operation.Matrix3 { components } => {
+      let mut values = [0.0; 16]
+      let mut i: usize = 0
+      while i < 16 {
+        values[i] = number(store, components[i], 1.0)
+        i = i + 1
+      }
+      transforms.fromColumnMajor(&values)
+    }
+    Operation.Translate { x, y, z, threeD } => transforms.translation(
+      number(store, x, box.width()),
+      number(store, y, box.height()),
+      number(store, z, 1.0),
+    )
+    Operation.Scale { x, y, z, threeD } => transforms.scale(
+      number(store, x, 1.0),
+      number(store, y, 1.0),
+      number(store, z, 1.0),
+    )
+    Operation.Rotate { x, y, z, angle, threeD } => transforms.rotation(
+      number(store, x, 1.0),
+      number(store, y, 1.0),
+      number(store, z, 1.0),
+      math.radians(number(store, angle, 1.0)),
+    )
+    Operation.Skew { x, y } => transforms.skew(
+      math.radians(number(store, x, 1.0)),
+      math.radians(number(store, y, 1.0)),
+    )
+    Operation.Perspective { depth } => {
+      match &depth {
+        Option<ExprId>.Some { value } => {
+          return transforms.perspective(f64.max(0.0, number(store, value, 1.0)))
+        }
+        _ => transforms.identity()
+      }
+    }
+  }
+  return if transforms.finite(&result) {
+    Option<Matrix>.Some { value: move result }
+  } else {
+    Option<Matrix>.None
+  }
+}
+
+pub fn value(store: &Store<'_>, value: &TransformValue, reference: Rect) -> Option<Matrix> {
+  if !isValidRect(reference) {
+    return Option<Matrix>.None
+  }
+  match &value.* {
+    TransformValue.None => {
+      return Option<Matrix>.Some { value: transforms.identity() }
+    }
+    TransformValue.Individual { operation: op } => {
+      return operation(store, &op, reference)
+    }
+    TransformValue.List { operations } => {
+      let mut result = transforms.identity()
+      let mut i: usize = 0
+      while i < operations.length() {
+        let next = operation(store, &operations.asSlice()[i], reference)
+        match &next {
+          Option<Matrix>.Some { value: matrix } => {
+            result = transforms.multiply(&result, &matrix)
+          }
+          _ => {
+            return Option<Matrix>.None
+          }
+        }
+        if !transforms.finite(&result) {
+          return Option<Matrix>.None
+        }
+        i = i + 1
+      }
+      return Option<Matrix>.Some { value: move result }
+    }
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+}
+
+pub fn referenceBox(engine: &Engine<'_>, style: StyleId) -> Option<ReferenceBox> {
+  return match &engine.get(style, Property.TransformBox) {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.Box { value: kind } => Option<ReferenceBox>.Some { value: kind }
+        _ => Option<ReferenceBox>.None
+      }
+      _ => Option<ReferenceBox>.None
+    }
+    _ => Option<ReferenceBox>.None
+  }
+}
+
+fn reference(
+  engine: &Engine<'_>,
+  style: StyleId,
+  viewport: Rect,
+  fill: Rect,
+  stroke: Rect,
+) -> Option<Rect> {
+  let box = match &referenceBox(engine, style) {
+    Option<ReferenceBox>.Some { value: kind } => {
+      if kind == ReferenceBox.Content || kind == ReferenceBox.Fill {
+        fill
+      } else if kind == ReferenceBox.Border || kind == ReferenceBox.Stroke {
+        stroke
+      } else {
+        viewport
+      }
+    }
+    _ => {
+      return Option<Rect>.None
+    }
+  }
+  return if isValidRect(box) {
+    Option<Rect>.some(box)
+  } else {
+    Option<Rect>.None
+  }
+}
+
+pub fn hasPerspective(engine: &Engine<'_>, style: StyleId) -> bool {
+  return match &engine.get(style, Property.Perspective) {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.Perspective { depth } => true
+        _ => false
+      }
+      _ => false
+    }
+    _ => false
+  }
+}
+
+pub fn transformed(engine: &Engine<'_>, style: StyleId) -> bool {
+  let properties = [Property.Translate, Property.Rotate, Property.Scale, Property.Transform]
+  let mut i: usize = 0
+  while i < properties.length {
+    match &engine.get(style, properties[i]) {
+      Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+        Value.Transform { value: transform } => match &transform {
+          TransformValue.None => {}
+          _ => {
+            return true
+          }
+        }
+        _ => {
+          return true
+        }
+      }
+      _ => {
+        return true
+      }
+    }
+    i = i + 1
+  }
+  return false
+}
+
+fn threeDimensional(operation: &Operation) -> bool {
+  return match &operation.* {
+    Operation.Matrix3 { components } => true
+    Operation.Perspective { depth } => true
+    Operation.Translate { x, y, z, threeD } => threeD
+    Operation.Scale { x, y, z, threeD } => threeD
+    Operation.Rotate { x, y, z, angle, threeD } => threeD
+    _ => false
+  }
+}
+
+// A specified 3D identity still isolates; inspecting the flattened matrix loses this.
+// https://www.w3.org/TR/compositing-1/#svgcompositing
+pub fn isolates(engine: &Engine<'_>, style: StyleId) -> bool {
+  if hasPerspective(engine, style) {
+    return true
+  }
+  let properties = [Property.Translate, Property.Rotate, Property.Scale, Property.Transform]
+  let mut i: usize = 0
+  while i < properties.length {
+    if let Option<ComputedValue>.Some { value: computed } = &engine.get(style, properties[i]) {
+      if let Value.Transform { value: transform } = &engine.values.get(computed.value).* {
+        match &transform {
+          TransformValue.Individual { operation } => {
+            if threeDimensional(&operation) {
+              return true
+            }
+          }
+          TransformValue.List { operations } => {
+            let mut j: usize = 0
+            while j < operations.length() {
+              if threeDimensional(&operations.asSlice()[j]) {
+                return true
+              }
+              j = j + 1
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+    i = i + 1
+  }
+  return false
+}
+
+pub fn hiddenBackface(engine: &Engine<'_>, style: StyleId) -> bool {
+  return match &engine.get(style, Property.BackfaceVisibility) {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.BackfaceVisibility { value } => value == Backface.Hidden
+        _ => false
+      }
+      _ => false
+    }
+    _ => false
+  }
+}
+
+// The perspective PROPERTY applies to children, before their individual plane
+// is flattened. Its origin uses the same used reference box as transform-origin.
+// https://drafts.csswg.org/css-transforms-2/#perspective-property
+pub fn perspective(
+  engine: &Engine<'_>,
+  style: StyleId,
+  viewport: Rect,
+  fill: Rect,
+  stroke: Rect,
+) -> Option<Matrix> {
+  let box = match &reference(engine, style, viewport, fill, stroke) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let depth = match &engine.get(style, Property.Perspective) {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.None => {
+          return Option<Matrix>.some(transforms.identity())
+        }
+        TransformValue.Perspective { depth } => number(&engine.values, depth, 1.0)
+        _ => {
+          return Option<Matrix>.None
+        }
+      }
+      _ => {
+        return Option<Matrix>.None
+      }
+    }
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let position = match &engine.get(style, Property.PerspectiveOrigin) {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.PerspectiveOrigin { position } => position
+        _ => {
+          return Option<Matrix>.None
+        }
+      }
+      _ => {
+        return Option<Matrix>.None
+      }
+    }
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let origin = box.origin().coordinates()
+  let x = origin[0] + axis(&engine.values, position.x, box.width())
+  let y = origin[1] + axis(&engine.values, position.y, box.height())
+  let projection = match &transforms.perspective(f64.max(0.0, depth)) {
+    Option<Matrix>.Some { value } => value
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let result = transforms.multiply(
+    &transforms.multiply(&transforms.translation(x, y, 0.0), &projection),
+    &transforms.translation(-x, -y, 0.0),
+  )
+  return if transforms.finite(&result) {
+    Option<Matrix>.some(result)
+  } else {
+    Option<Matrix>.None
+  }
+}
+
+// SVG elements without CSS layout boxes map content-box to fill-box and border-box
+// to stroke-box. The caller supplies bounds in the element's current user space.
+// https://www.w3.org/TR/css-transforms-1/#transform-box
+// https://drafts.csswg.org/css-transforms-2/#individual-transforms
+pub fn element(
+  engine: &Engine<'_>,
+  style: StyleId,
+  viewport: Rect,
+  fill: Rect,
+  stroke: Rect,
+) -> Option<Matrix> {
+  let reference = match &reference(engine, style, viewport, fill, stroke) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let origin = engine.get(style, Property.TransformOrigin)
+  let mut x = 0.0
+  let mut y = 0.0
+  let mut z = 0.0
+  match &origin {
+    Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
+      Value.Transform { value: transform } => match &transform {
+        TransformValue.Origin { position, z: depth } => {
+          let point = reference.origin().coordinates()
+          x = point[0] + axis(&engine.values, position.x, reference.width())
+          y = point[1] + axis(&engine.values, position.y, reference.height())
+          z = number(&engine.values, depth, 1.0)
+        }
+        _ => {
+          return Option<Matrix>.None
+        }
+      }
+      _ => {
+        return Option<Matrix>.None
+      }
+    }
+    _ => {
+      return Option<Matrix>.None
+    }
+  }
+  let mut result = transforms.translation(x, y, z)
+  let properties = [Property.Translate, Property.Rotate, Property.Scale, Property.Transform]
+  let mut i: usize = 0
+  while i < properties.length {
+    let computed = engine.get(style, properties[i])
+    match &computed {
+      Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
+        Value.Transform { value: transform } => {
+          match &transform {
+            TransformValue.None => {}
+            _ => {
+              let matrix = value(&engine.values, &transform, reference)
+              match &matrix {
+                Option<Matrix>.Some { value: used } => {
+                  result = transforms.multiply(&result, &used)
+                }
+                _ => {
+                  return Option<Matrix>.None
+                }
+              }
+            }
+          }
+        }
+        _ => {
+          return Option<Matrix>.None
+        }
+      }
+      _ => {
+        return Option<Matrix>.None
+      }
+    }
+    i = i + 1
+  }
+  result = transforms.multiply(&result, &transforms.translation(-x, -y, -z))
+  return if transforms.finite(&result) {
+    Option<Matrix>.Some { value: move result }
+  } else {
+    Option<Matrix>.None
+  }
+}

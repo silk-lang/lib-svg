@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="40">
+<defs><hatch id="base" hatchUnits="userSpaceOnUse" pitch="8">
+  <hatchpath offset="3" stroke="#108040" stroke-width="2"/>
+</hatch>
+<hatch id="h" href="#base" rotate="90" x="5" y="1"/></defs>
+<rect width="32" height="40" fill="url(#h)"/>
+</svg>

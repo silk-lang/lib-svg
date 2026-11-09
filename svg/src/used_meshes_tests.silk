@@ -1,0 +1,102 @@
+//! Mesh gradient edges and patch maps: 2016 CR pservers.html #MeshStructure and
+//! #MeshPatchPainting.
+import used_meshes { Patch }
+import used_meshes
+import scene { Color }
+import svg_geometry.geometry { Point }
+import silk.core.option { Option }
+import silk.num.f64
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn near(actual: Point, x: f64, y: f64) -> ()
+  ! AssertionError<'static> {
+  run Testing.expect(
+    f64.abs(actual.x - x) <= 1e-12 && f64.abs(actual.y - y) <= 1e-12,
+    "independently computed mesh point",
+  )
+}
+
+effect fn points(data: &[u8], closing: Option<Point>) -> [Point; 3]
+  ! AssertionError<'static> {
+  return match &used_meshes.edge(data, Point.new(10.0, 20.0), closing) {
+    Option<[Point; 3]>.Some { value } => value
+    _ => {
+      run Testing.expect(false, "a valid mesh edge")
+      [Point.new(0.0, 0.0); 3]
+    }
+  }
+}
+
+// https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshStructure
+test effect fn meshEdgesTakeOneCommandFromTheInitialPoint() -> ()
+  ! AssertionError<'static> {
+  let relative = run points(b"c 1,2 3,4 5,6", Option<Point>.None)
+  run near(relative[0], 11.0, 22.0)
+  run near(relative[1], 13.0, 24.0)
+  run near(relative[2], 15.0, 26.0)
+  let absolute = run points(b"C1 2 3 4 5 6", Option<Point>.None)
+  run near(absolute[0], 1.0, 2.0)
+  run near(absolute[2], 5.0, 6.0)
+
+  // Lines become cubics with controls at thirds.
+  let line = run points(b"l 3,-6", Option<Point>.None)
+  run near(line[0], 11.0, 18.0)
+  run near(line[1], 12.0, 16.0)
+  run near(line[2], 13.0, 14.0)
+}
+
+// https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshStructure
+test effect fn meshLastEdgeOmitsItsKnownEndPoint() -> ()
+  ! AssertionError<'static> {
+  let closing = Option<Point>.some(Point.new(16.0, 26.0))
+  let curve = run points(b"c 1,1 2,2", closing)
+  run near(curve[1], 12.0, 22.0)
+  run near(curve[2], 16.0, 26.0)
+  let line = run points(b"L", closing)
+  run near(line[0], 12.0, 22.0)
+
+  // A redundant end point is ignored in favour of the known corner.
+  let redundant = run points(b"l 9,9", closing)
+  run near(redundant[2], 16.0, 26.0)
+}
+
+test effect fn meshEdgesRejectOtherCommandsAndMissingPoints() -> ()
+  ! AssertionError<'static> {
+  let start = Point.new(0.0, 0.0)
+  run Testing.expect(used_meshes.edge(b"m 1,1", start, Option<Point>.None).isNone(), "moveto")
+  run Testing.expect(used_meshes.edge(b"c 1,1 2,2", start, Option<Point>.None).isNone(), "short c")
+  run Testing.expect(
+    used_meshes.edge(b"l 1,1 2,2", start, Option<Point>.None).isNone(),
+    "two lines",
+  )
+  run Testing.expect(used_meshes.edge(b"", start, Option<Point>.None).isNone(), "empty")
+}
+
+// https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#MeshPatchPainting
+test effect fn coonsPatchMeetsItsBoundaryCurves() -> ()
+  ! AssertionError<'static> {
+  // A unit square whose top edge bulges: S(u, 0) is the top cubic and S(u, 1) the
+  // straight bottom edge, and the interior blends them linearly in v.
+  let black = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+  let patch = Patch {
+    points: [
+      Point.new(0.0, 0.0),
+      Point.new(1.0 / 3.0, -1.0),
+      Point.new(2.0 / 3.0, -1.0),
+      Point.new(1.0, 0.0),
+      Point.new(1.0, 1.0 / 3.0),
+      Point.new(1.0, 2.0 / 3.0),
+      Point.new(1.0, 1.0),
+      Point.new(2.0 / 3.0, 1.0),
+      Point.new(1.0 / 3.0, 1.0),
+      Point.new(0.0, 1.0),
+      Point.new(0.0, 2.0 / 3.0),
+      Point.new(0.0, 1.0 / 3.0),
+    ],
+    colors: [black; 4],
+  }
+  run near(used_meshes.surface(&patch, 0.5, 0.0), 0.5, -0.75)
+  run near(used_meshes.surface(&patch, 0.5, 1.0), 0.5, 1.0)
+  run near(used_meshes.surface(&patch, 0.5, 0.5), 0.5, 0.125)
+  run near(used_meshes.surface(&patch, 0.0, 0.5), 0.0, 0.5)
+}

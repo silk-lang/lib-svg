@@ -1,0 +1,72 @@
+//! Coordinate systems for clipPath resources, independent of their paint styles.
+import silk.text.string { String }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.tokens { equal }
+import svg_geometry.geometry { Rect, Transform, isEmptyRect, isValidRect }
+import scene { RenderError }
+import silk.core.option { Option }
+import silk.collections.slice { Slice }
+import silk.num.f64
+import silk.core.ownership { Copy }
+
+pub struct Coordinates {
+  pub mapping: Transform,
+  pub user: Rect,
+}
+
+impl Copy for Coordinates {}
+
+fn whitespace(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+fn objectUnits(document: &XmlDocument, node: XmlNodeId) -> bool {
+  let bytes = match &(document.attribute(node, "", "clipPathUnits")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  let mut start: usize = 0
+  let mut end = bytes.length
+  while start < end && whitespace(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && whitespace(bytes[end - 1]) {
+    end = end - 1
+  }
+  return equal(Slice.view<u8>(bytes, start, end - start), b"objectBoundingBox")
+}
+
+/// Resolves the units before applying the clipPath's own CSS transform.
+/// A degenerate object bounding box has no usable object coordinate system.
+/// https://www.w3.org/TR/css-masking-1/#element-attrdef-clippath-clippathunits
+pub effect fn coordinates(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  viewport: Rect,
+  bounds: Rect,
+) -> Option<Coordinates>
+  ! RenderError {
+  if !isValidRect(viewport) || !isValidRect(bounds) || !f64.isFinite(viewport.width())
+    || !f64.isFinite(viewport.height())
+    || !f64.isFinite(bounds.width())
+    || !f64.isFinite(bounds.height()) {
+    fail RenderError.InvalidGeometry
+  }
+  if !objectUnits(document, node) {
+    return Option<Coordinates>.some(Coordinates { mapping: Transform.identity(), user: viewport })
+  }
+  if isEmptyRect(bounds) {
+    return Option<Coordinates>.None
+  }
+  return Option<Coordinates>.some(
+    Coordinates {
+      mapping: Transform.new(bounds.width(), 0.0, 0.0, bounds.height(), bounds.xMin, bounds.yMin),
+      // Content percentages keep the nearest SVG viewport even in bbox units
+      // (SVG 2 coords.html#ObjectBoundingBoxUnits).
+      user: viewport,
+    },
+  )
+}

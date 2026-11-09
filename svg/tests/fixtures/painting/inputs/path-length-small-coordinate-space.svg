@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute -->
+<g transform="scale(1000000000)" fill="none" stroke="black" stroke-width=".000000002">
+<circle cx=".000000016" cy=".000000016" r=".000000008" pathLength="4" stroke-dasharray="1 1"/>
+<path d="M.000000020 .000000016L.000000020 .000000016" pathLength="4" stroke-dasharray="1 3" stroke-linecap="round"/>
+</g>
+</svg>

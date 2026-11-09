@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><defs><clipPath id="edge"><rect width="8" height="4"/></clipPath></defs><g style="transform:perspective(30px) rotateY(30deg)" clip-path="url(#edge)"><rect x="-100" y="-100" width="200" height="200" fill="blue"/><rect x="-100" y="-100" width="104" height="200" fill="red" shape-rendering="crispEdges"/></g></svg>

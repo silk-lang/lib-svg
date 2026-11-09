@@ -1,0 +1,624 @@
+//! Used gradient geometry and shared stop palettes; no backend shaders are retained here.
+//! SVG2 pservers.html #PaintServerTemplates, #LinearGradientAttributes,
+//! #RadialGradientAttributes and #StopNotes.
+import silk.text.string { String }
+import scene { Paint, Color, Gradient, GradientGeometry, GradientStop, PaintInstance, RenderError }
+import scene { SpreadMethod }
+import structure { Graph, OccurrenceId }
+import document_styles { StyledGraph }
+import paint_metadata { Metadata, CoordinateUnits, PatternMetadata }
+import paint_metadata
+import mapping { Mapping }
+import used_transforms
+import silk.xml.document { XmlDocument }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.dimensions { ExprId, Context }
+import svg_css.dimensions
+import svg_css.values { Value }
+import svg_css.properties { Property }
+import svg_css.value_keywords { Keyword }
+import svg_css.colors
+import svg_css.colors { Identity }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_geometry.geometry { Rect, Point, Transform }
+import svg_geometry.transforms { Matrix }
+import svg_geometry.math
+import vector.geometry_error { GeometryError }
+import silk.collections.list { List }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_map { HashMap }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+import silk.num.usize
+
+struct SourceKey {
+  document: usize,
+  node: usize
+}
+
+impl Copy for SourceKey {}
+
+impl HashKey for SourceKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.document == b.document && a.node == b.node
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    return Hash.combine(Hash.mix(seed, usize.toU64(value.document)), usize.toU64(value.node))
+  }
+}
+
+struct GradientKey {
+  node: usize,
+  width: f64,
+  height: f64
+}
+
+impl Copy for GradientKey {}
+
+impl HashKey for GradientKey {
+  fn equals(a: &Self, b: &Self) -> bool {
+    return a.node == b.node && a.width == b.width && a.height == b.height
+  }
+
+  fn hash(value: &Self, seed: &HashSeed) -> u64 {
+    return Hash.combine(
+      Hash.combine(
+        Hash.mix(seed, usize.toU64(value.node)),
+        f64.toBits(
+          if value.width == 0.0 {
+            0.0
+          } else {
+            value.width
+          },
+        ),
+      ),
+      f64.toBits(
+        if value.height == 0.0 {
+          0.0
+        } else {
+          value.height
+        },
+      ),
+    )
+  }
+}
+
+struct MergedGradient {
+  radial: bool,
+  units: CoordinateUnits,
+  spread: SpreadMethod,
+  coordinates: [Option<ExprId>; 6],
+}
+
+pub struct Store {
+  metadataKeys: HashMap<SourceKey, usize>,
+  pub metadata: List<Metadata>,
+  mergedKeys: HashMap<usize, usize>,
+  merged: List<MergedGradient>,
+  patternKeys: HashMap<usize, usize>,
+  pub patterns: List<PatternMetadata>,
+  stopKeys: HashMap<usize, usize>,
+  gradientKeys: HashMap<GradientKey, usize>,
+  pub gradientStops: List<List<GradientStop>>,
+  pub gradients: List<Gradient>,
+  pub paints: List<PaintInstance>,
+}
+
+impl Store {
+  pub fn make() -> Store {
+    return Store {
+      metadataKeys: HashMap<SourceKey, usize>.make(Hash.seed(0)),
+      metadata: List<Metadata>.make(),
+      mergedKeys: HashMap<usize, usize>.make(Hash.seed(0)),
+      merged: List<MergedGradient>.make(),
+      patternKeys: HashMap<usize, usize>.make(Hash.seed(0)),
+      patterns: List<PatternMetadata>.make(),
+      stopKeys: HashMap<usize, usize>.make(Hash.seed(0)),
+      gradientKeys: HashMap<GradientKey, usize>.make(Hash.seed(0)),
+      gradientStops: List<List<GradientStop>>.make(),
+      gradients: List<Gradient>.make(),
+      paints: List<PaintInstance>.make(),
+    }
+  }
+}
+
+pub effect fn metadataIndex(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> Option<usize>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = graph.occurrences.asSlice()[node.index].source
+  let key = SourceKey { document: source.document.index, node: source.node.index }
+  let cached: Option<usize> = store.metadataKeys.get(key)
+  if let Option<usize>.Some { value } = cached {
+    return if value == usize.MAX {
+      Option<usize>.None
+    } else {
+      Option<usize>.some(value)
+    }
+  }
+  let parsed = run paint_metadata.parse(
+    graph.sourceDocument(source),
+    source.node,
+    &mut styles.catalog.engine.values.numerics,
+    limits,
+  )
+  let mut index = usize.MAX
+  match move parsed {
+    Option<Metadata>.Some { value } => {
+      index = store.metadata.length()
+      run store.metadata.append(move value)
+    }
+    _ => {}
+  }
+  drop run store.metadataKeys.insert(key, index)
+  return if index == usize.MAX {
+    Option<usize>.None
+  } else {
+    Option<usize>.some(index)
+  }
+}
+
+fn inherit<T: Copy>(current: Option<T>, template: Option<T>) -> Option<T> {
+  return match &current {
+    Option<T>.Some { value } => current
+    _ => template
+  }
+}
+
+// Templates are styled occurrence edges, not source-DOM href walks. Children
+// have already been instantiated by the same closure used by gradients.
+pub effect fn mergedPattern(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> Option<usize>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let cached: Option<usize> = store.patternKeys.get(node.index)
+  if cached.isSome() {
+    return cached
+  }
+  let first = match &(run metadataIndex(&mut store.*, graph, &mut styles.*, node, limits)) {
+    Option<usize>.Some { value } => value
+    _ => {
+      return Option<usize>.None
+    }
+  }
+  let mut data = match &store.metadata.asSlice()[first] {
+    Metadata.Pattern { value } => value
+    _ => {
+      return Option<usize>.None
+    }
+  }
+  let mut current = styles.template(node)
+  let mut count: usize = 0
+  while let Option<OccurrenceId>.Some { value: target } = &current {
+    if count >= graph.occurrences.length() {
+      fail RenderError.TooLarge
+    }
+    count = count + 1
+    let index = match &(run metadataIndex(&mut store.*, graph, &mut styles.*, target, limits)) {
+      Option<usize>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    match &store.metadata.asSlice()[index] {
+      Metadata.Pattern { value } => {
+        data.units = inherit(data.units, value.units)
+        data.contentUnits = inherit(data.contentUnits, value.contentUnits)
+        data.x = inherit(data.x, value.x)
+        data.y = inherit(data.y, value.y)
+        data.width = inherit(data.width, value.width)
+        data.height = inherit(data.height, value.height)
+        data.viewBox = inherit(data.viewBox, value.viewBox)
+        data.aspectRatio = inherit(data.aspectRatio, value.aspectRatio)
+      }
+      _ => {
+        break
+      }
+    }
+    current = styles.template(target)
+  }
+  let index = store.patterns.length()
+  run store.patterns.append(data)
+  drop run store.patternKeys.insert(node.index, index)
+  return Option<usize>.some(index)
+}
+
+effect fn mergedGradient(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> Option<usize>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let cached: Option<usize> = store.mergedKeys.get(node.index)
+  if cached.isSome() {
+    return cached
+  }
+  let first = match &(run metadataIndex(&mut store.*, graph, &mut styles.*, node, limits)) {
+    Option<usize>.Some { value } => value
+    _ => {
+      return Option<usize>.None
+    }
+  }
+  let radial = match &store.metadata.asSlice()[first] {
+    Metadata.LinearGradient { value } => false
+    Metadata.RadialGradient { value } => true
+    _ => {
+      return Option<usize>.None
+    }
+  }
+  let mut units = Option<CoordinateUnits>.None
+  let mut spread = Option<SpreadMethod>.None
+  let mut coordinates = [Option<ExprId>.None; 6]
+  let mut current = node
+  let mut count: usize = 0
+  while true {
+    if count >= graph.occurrences.length() {
+      fail RenderError.TooLarge
+    }
+    count = count + 1
+    let index = match &(run metadataIndex(&mut store.*, graph, &mut styles.*, current, limits)) {
+      Option<usize>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    match &store.metadata.asSlice()[index] {
+      Metadata.LinearGradient { value } => {
+        units = inherit(units, value.units)
+        spread = inherit(spread, value.spread)
+
+        // #PaintServerTemplates: exhaust the valid chain before applying initials.
+        // Opposite-kind gradients have no coordinates of this kind, but do not
+        // terminate lookup in later same-kind templates.
+        if !radial {
+          coordinates[0] = inherit(coordinates[0], value.x1)
+          coordinates[1] = inherit(coordinates[1], value.y1)
+          coordinates[2] = inherit(coordinates[2], value.x2)
+          coordinates[3] = inherit(coordinates[3], value.y2)
+        }
+      }
+      Metadata.RadialGradient { value } => {
+        units = inherit(units, value.units)
+        spread = inherit(spread, value.spread)
+        if radial {
+          coordinates[0] = inherit(coordinates[0], value.cx)
+          coordinates[1] = inherit(coordinates[1], value.cy)
+          coordinates[2] = inherit(coordinates[2], value.r)
+          coordinates[3] = inherit(coordinates[3], value.fx)
+          coordinates[4] = inherit(coordinates[4], value.fy)
+          coordinates[5] = inherit(coordinates[5], value.fr)
+        }
+      }
+      _ => {
+        break
+      }
+    }
+    current = match &styles.template(current) {
+      Option<OccurrenceId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+  }
+  let index = store.merged.length()
+  run store.merged.append(
+    MergedGradient {
+      radial: radial,
+      units: match &units {
+        Option<CoordinateUnits>.Some { value } => value
+        _ => CoordinateUnits.ObjectBoundingBox
+      },
+      spread: match &spread {
+        Option<SpreadMethod>.Some { value } => value
+        _ => SpreadMethod.Pad
+      },
+      coordinates: coordinates,
+    },
+  )
+  drop run store.mergedKeys.insert(node.index, index)
+  return Option<usize>.some(index)
+}
+
+pub effect fn styleId(styles: &StyledGraph<'_>, node: OccurrenceId) -> StyleId
+  ! RenderError {
+  return match &styles.nodeStyle(node) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+}
+
+pub effect fn number(
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  expression: Option<ExprId>,
+  basis: f64,
+  initial: f64,
+) -> f64
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let id = match &expression {
+    Option<ExprId>.Some { value } => value
+    _ => {
+      return initial
+    }
+  }
+  let context = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let computed = run dimensions.compute(&mut engine.values.numerics, id, &context)
+  let value = dimensions.evaluate(&engine.values.numerics, computed, basis)
+  if !f64.isFinite(value) {
+    fail RenderError.InvalidGeometry
+  }
+  return value
+}
+
+// Computed values keep currentColor (css-color-4 #resolving-other-colors); the used
+// colour is the element's own computed `color`.
+pub fn resolveCurrent(engine: &Engine<'_>, style: StyleId, color: colors.Color) -> colors.Color {
+  match &color.identity {
+    Identity.CurrentColor => {}
+    _ => {
+      return color
+    }
+  }
+  return match &engine.get(style, Property.Color) {
+    Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
+      Value.Color { color: value } => value
+      Value.IccColor { color: value, icc } => value
+      _ => color
+    }
+    _ => color
+  }
+}
+
+pub effect fn stopColor(engine: &Engine<'_>, style: StyleId) -> Color
+  ! RenderError {
+  let entry = match &engine.get(style, Property.StopColor) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let color = match &engine.values.get(entry.value).* {
+    Value.Color { color: value } => colors.toSrgb(resolveCurrent(engine, style, value))
+    Value.IccColor { color: value, icc } => colors.toSrgb(resolveCurrent(engine, style, value))
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let opacity = match &engine.number(style, Property.StopOpacity, 1.0) {
+    Option<f64>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return Color { r: color.r, g: color.g, b: color.b, a: color.a * opacity }
+}
+
+effect fn stops(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> usize
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let cached: Option<usize> = store.stopKeys.get(node.index)
+  if let Option<usize>.Some { value } = cached {
+    return value
+  }
+  let occurrence = &graph.occurrences.asSlice()[node.index]
+  let mut child = match &occurrence.shadow {
+    Option<OccurrenceId>.Some { value } => Option<OccurrenceId>.some(value)
+    _ => occurrence.firstChild
+  }
+  let mut palette = List<GradientStop>.make()
+  let mut previous = 0.0
+  while true {
+    let next = match &child {
+      Option<OccurrenceId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    child = graph.occurrences.asSlice()[next.index].nextSibling
+    let source = graph.occurrences.asSlice()[next.index].source
+    let document = graph.sourceDocument(source)
+    if equal(
+      String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)),
+      b"http://www.w3.org/2000/svg",
+    )
+      && equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"stop") {
+      let index = match &(run metadataIndex(&mut store.*, graph, &mut styles.*, next, limits)) {
+        Option<usize>.Some { value } => value
+        _ => {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      let offset = match &store.metadata.asSlice()[index] {
+        Metadata.Stop { value } => value.offset
+        _ => {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      let style = run styleId(&styles.*, next)
+      let value = run number(&mut styles.catalog.engine, style, offset, 1.0, 0.0)
+      previous = f64.max(previous, f64.min(1.0, f64.max(0.0, value)))
+      run palette.append(
+        GradientStop { offset: previous, color: run stopColor(&styles.catalog.engine, style) },
+      )
+    }
+  }
+  let index = store.gradientStops.length()
+  run store.gradientStops.append(move palette)
+  drop run store.stopKeys.insert(node.index, index)
+  return index
+}
+
+effect fn linearRgb(engine: &Engine<'_>, style: StyleId) -> bool
+  ! RenderError {
+  let entry = match &engine.get(style, Property.ColorInterpolation) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  return match &engine.values.get(entry.value).* {
+    Value.Keyword { keyword } => keyword == Keyword.LinearRGB
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+pub effect fn gradient(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  viewport: Rect,
+  bounds: Rect,
+  transform: &Mapping,
+  limits: &Limits,
+) -> Option<Paint>
+  ! CssError | RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let merged = match &(run mergedGradient(&mut store.*, graph, &mut styles.*, node, limits)) {
+    Option<usize>.Some { value } => value
+    _ => {
+      return Option<Paint>.None
+    }
+  }
+  let objectUnits = store.merged.asSlice()[merged].units == CoordinateUnits.ObjectBoundingBox
+  if objectUnits && (bounds.width() == 0.0 || bounds.height() == 0.0) {
+    return Option<Paint>.some(Paint.None)
+  }
+
+  // #StopNotes: one stop is a solid fill, not a degenerate radial distribution.
+  // #ObjectBoundingBox's zero-dimension rule above still suppresses that fill.
+  let palette = run stops(&mut store.*, graph, &mut styles.*, node, limits)
+  let colors = store.gradientStops.asSlice()[palette].asSlice()
+  if colors.length == 0 {
+    return Option<Paint>.some(Paint.None)
+  }
+  if colors.length == 1 {
+    return Option<Paint>.some(Paint.Solid { color: colors[0].color })
+  }
+  let reference = if objectUnits {
+    Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  } else {
+    viewport
+  }
+  let key = GradientKey { node: node.index, width: reference.width(), height: reference.height() }
+  let cached: Option<usize> = store.gradientKeys.get(key)
+  let definition = match &cached {
+    Option<usize>.Some { value } => value
+    _ => {
+      let style = run styleId(&styles.*, node)
+      let data = &store.merged.asSlice()[merged]
+      let coordinates = &data.coordinates
+      let width = reference.width()
+      let height = reference.height()
+      let geometry = if data.radial {
+        let basis = math.hypot(width, height) / 1.4142135623730951
+        let cx = run number(&mut styles.catalog.engine, style, coordinates[0], width, width * 0.5)
+        let cy = run number(&mut styles.catalog.engine, style, coordinates[1], height, height * 0.5)
+
+        // Negative literals were rejected before template lookup. CSS Values
+        // #calc-range keeps math expressions valid and clamps their final used
+        // result; a negative calc must not select a template's radius instead.
+        let r = f64.max(
+          0.0,
+          run number(&mut styles.catalog.engine, style, coordinates[2], basis, basis * 0.5),
+        )
+        let fx = run number(&mut styles.catalog.engine, style, coordinates[3], width, cx)
+        let fy = run number(&mut styles.catalog.engine, style, coordinates[4], height, cy)
+        let fr = f64.max(
+          0.0,
+          run number(&mut styles.catalog.engine, style, coordinates[5], basis, 0.0),
+        )
+        GradientGeometry.Radial {
+          center: Point.new(cx, cy),
+          radius: r,
+          focal: Point.new(fx, fy),
+          focalRadius: fr,
+        }
+      } else {
+        GradientGeometry.Linear {
+          start: Point.new(
+            run number(&mut styles.catalog.engine, style, coordinates[0], width, 0.0),
+            run number(&mut styles.catalog.engine, style, coordinates[1], height, 0.0),
+          ),
+          end: Point.new(
+            run number(&mut styles.catalog.engine, style, coordinates[2], width, width),
+            run number(&mut styles.catalog.engine, style, coordinates[3], height, 0.0),
+          ),
+        }
+      }
+      let index = store.gradients.length()
+      run store.gradients.append(
+        Gradient {
+          geometry: geometry,
+          stops: palette,
+          spread: data.spread,
+          linearRgb: run linearRgb(&styles.catalog.engine, style),
+          premultiplied: false,
+        },
+      )
+      drop run store.gradientKeys.insert(key, index)
+      index
+    }
+  }
+  let style = run styleId(&styles.*, node)
+  let fillReference = if objectUnits {
+    reference
+  } else {
+    bounds
+  }
+  let local = match &used_transforms.element(
+    &styles.catalog.engine,
+    style,
+    reference,
+    fillReference,
+    fillReference,
+  ) {
+    Option<Matrix>.Some { value } => run Mapping.fromMatrix(&value)
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let coordinateMap = if objectUnits {
+    Mapping.Affine {
+      value: Transform.new(bounds.width(), 0.0, 0.0, bounds.height(), bounds.xMin, bounds.yMin),
+    }
+  } else {
+    Mapping.identity()
+  }
+  let paintMap = run transform.compose(&(run coordinateMap.compose(&local)))
+  let index = store.paints.length()
+  run store.paints.append(PaintInstance.Gradient { gradient: definition, transform: paintMap })
+  return Option<Paint>.some(Paint.Server { index: index })
+}

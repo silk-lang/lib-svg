@@ -1,0 +1,1267 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "image-natural",
+      "input": "inputs/natural.svg",
+      "references": [
+        {
+          "path": "references/natural.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original 2x1 red/blue RGBA PNG built with Python zlib and explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-none",
+      "input": "inputs/none.svg",
+      "references": [
+        {
+          "path": "references/none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original 2x1 red/blue RGBA PNG built with Python zlib and explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-meet",
+      "input": "inputs/meet.svg",
+      "references": [
+        {
+          "path": "references/meet.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original 2x1 red/blue RGBA PNG built with Python zlib and explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-zero",
+      "input": "inputs/zero.svg",
+      "references": [
+        {
+          "path": "references/zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original 2x1 red/blue RGBA PNG built with Python zlib and explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-broken",
+      "input": "inputs/broken.svg",
+      "references": [
+        {
+          "path": "references/broken.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original 2x1 red/blue RGBA PNG built with Python zlib and explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-jpeg-orientation",
+      "input": "inputs/jpeg-orientation.svg",
+      "references": [
+        {
+          "path": "references/jpeg-orientation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-opacity",
+      "input": "inputs/opacity.svg",
+      "references": [
+        {
+          "path": "references/opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-ignore-fill-stroke",
+      "input": "inputs/ignore-fill-stroke.svg",
+      "references": [
+        {
+          "path": "references/ignore-fill-stroke.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-transform",
+      "input": "inputs/transform.svg",
+      "references": [
+        {
+          "path": "references/transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeated",
+      "input": "inputs/repeated.svg",
+      "references": [
+        {
+          "path": "references/repeated.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-use",
+      "input": "inputs/use.svg",
+      "references": [
+        {
+          "path": "references/use.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-slice",
+      "input": "inputs/slice.svg",
+      "references": [
+        {
+          "path": "references/slice.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-projective",
+      "input": "inputs/projective.svg",
+      "references": [
+        {
+          "path": "references/projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-source-alpha",
+      "input": "inputs/source-alpha.svg",
+      "references": [
+        {
+          "path": "references/source-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original two-sample PNG verifies premultiplied source alpha and images used inside retained mask/pattern pictures.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-mask-content",
+      "input": "inputs/mask-content.svg",
+      "references": [
+        {
+          "path": "references/mask-content.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original two-sample PNG verifies premultiplied source alpha and images used inside retained mask/pattern pictures.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-pattern-content",
+      "input": "inputs/pattern-content.svg",
+      "references": [
+        {
+          "path": "references/pattern-content.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Original two-sample PNG verifies premultiplied source alpha and images used inside retained mask/pattern pictures.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-orientation-none",
+      "input": "inputs/orientation-none.svg",
+      "references": [
+        {
+          "path": "references/orientation-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-clockwise",
+      "input": "inputs/orientation-clockwise.svg",
+      "references": [
+        {
+          "path": "references/orientation-clockwise.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-half-turn",
+      "input": "inputs/orientation-half-turn.svg",
+      "references": [
+        {
+          "path": "references/orientation-half-turn.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-counterclockwise",
+      "input": "inputs/orientation-counterclockwise.svg",
+      "references": [
+        {
+          "path": "references/orientation-counterclockwise.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-flip",
+      "input": "inputs/orientation-flip.svg",
+      "references": [
+        {
+          "path": "references/orientation-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-clockwise-flip",
+      "input": "inputs/orientation-clockwise-flip.svg",
+      "references": [
+        {
+          "path": "references/orientation-clockwise-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-half-turn-flip",
+      "input": "inputs/orientation-half-turn-flip.svg",
+      "references": [
+        {
+          "path": "references/orientation-half-turn-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-counterclockwise-flip",
+      "input": "inputs/orientation-counterclockwise-flip.svg",
+      "references": [
+        {
+          "path": "references/orientation-counterclockwise-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-positive-tie",
+      "input": "inputs/orientation-positive-tie.svg",
+      "references": [
+        {
+          "path": "references/orientation-positive-tie.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-negative-tie",
+      "input": "inputs/orientation-negative-tie.svg",
+      "references": [
+        {
+          "path": "references/orientation-negative-tie.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-negative-half-tie",
+      "input": "inputs/orientation-negative-half-tie.svg",
+      "references": [
+        {
+          "path": "references/orientation-negative-half-tie.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-wrapped-angle",
+      "input": "inputs/orientation-wrapped-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-wrapped-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-calculated-angle",
+      "input": "inputs/orientation-calculated-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-calculated-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-inherit",
+      "input": "inputs/orientation-inherit.svg",
+      "references": [
+        {
+          "path": "references/orientation-inherit.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-unset",
+      "input": "inputs/orientation-unset.svg",
+      "references": [
+        {
+          "path": "references/orientation-unset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-initial",
+      "input": "inputs/orientation-initial.svg",
+      "references": [
+        {
+          "path": "references/orientation-initial.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-all-inherit",
+      "input": "inputs/orientation-all-inherit.svg",
+      "references": [
+        {
+          "path": "references/orientation-all-inherit.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-all-initial",
+      "input": "inputs/orientation-all-initial.svg",
+      "references": [
+        {
+          "path": "references/orientation-all-initial.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-infinite-angle",
+      "input": "inputs/orientation-infinite-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-infinite-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-values-4/#numeric-data-types",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-negative-infinite-angle",
+      "input": "inputs/orientation-negative-infinite-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-negative-infinite-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-values-4/#numeric-data-types",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-nan-angle",
+      "input": "inputs/orientation-nan-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-nan-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-values-4/#numeric-data-types",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-overflow-angle",
+      "input": "inputs/orientation-overflow-angle.svg",
+      "references": [
+        {
+          "path": "references/orientation-overflow-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-values-4/#numeric-data-types",
+      "reason": "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally."
+    },
+    {
+      "id": "image-orientation-shared-resource",
+      "input": "inputs/orientation-shared-resource.svg",
+      "references": [
+        {
+          "path": "references/orientation-shared-resource.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Shared source pixels retain independent per-occurrence CSS orientation; EXIF is used only by from-image."
+    },
+    {
+      "id": "image-orientation-jpeg-none",
+      "input": "inputs/orientation-jpeg-none.svg",
+      "references": [
+        {
+          "path": "references/orientation-jpeg-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Shared source pixels retain independent per-occurrence CSS orientation; EXIF is used only by from-image."
+    },
+    {
+      "id": "image-sampling-crisp-edges",
+      "input": "inputs/sampling-crisp-edges.svg",
+      "references": [
+        {
+          "path": "references/sampling-crisp-edges.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-pixelated-integer",
+      "input": "inputs/sampling-pixelated-integer.svg",
+      "references": [
+        {
+          "path": "references/sampling-pixelated-integer.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-pixelated-round-down",
+      "input": "inputs/sampling-pixelated-round-down.svg",
+      "references": [
+        {
+          "path": "references/sampling-pixelated-round-down.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-pixelated-round-up",
+      "input": "inputs/sampling-pixelated-round-up.svg",
+      "references": [
+        {
+          "path": "references/sampling-pixelated-round-up.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-pixelated-anisotropic",
+      "input": "inputs/sampling-pixelated-anisotropic.svg",
+      "references": [
+        {
+          "path": "references/sampling-pixelated-anisotropic.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-pixelated-downscale",
+      "input": "inputs/sampling-pixelated-downscale.svg",
+      "references": [
+        {
+          "path": "references/sampling-pixelated-downscale.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-smooth",
+      "input": "inputs/sampling-smooth.svg",
+      "references": [
+        {
+          "path": "references/sampling-smooth.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-high-quality",
+      "input": "inputs/sampling-high-quality.svg",
+      "references": [
+        {
+          "path": "references/sampling-high-quality.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm."
+    },
+    {
+      "id": "image-sampling-scaled",
+      "input": "inputs/sampling-scaled.svg",
+      "references": [
+        {
+          "path": "references/sampling-scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Complete device mapping determines the nearest integer expansion; the independent reference expands threefold before the same scale and rotation."
+    },
+    {
+      "id": "image-sampling-rotated-scaled",
+      "input": "inputs/sampling-rotated-scaled.svg",
+      "references": [
+        {
+          "path": "references/sampling-rotated-scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "Complete device mapping determines the nearest integer expansion; the independent reference expands threefold before the same scale and rotation."
+    },
+    {
+      "id": "image-sampling-projective",
+      "input": "inputs/sampling-projective.svg",
+      "references": [
+        {
+          "path": "references/sampling-projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "A finite perspective image uses a threefold independently expanded reference before the same projective bilinear mapping."
+    },
+    {
+      "id": "image-sampling-shared-resource-scales",
+      "input": "inputs/sampling-shared-resource-scales.svg",
+      "references": [
+        {
+          "path": "references/sampling-shared-resource-scales.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-rendering",
+      "reason": "One decoded resource is used at two anisotropic integer expansions and then reuses the first expansion; independent references have duplicated samples for each scale."
+    },
+    {
+      "id": "image-nested-intrinsic",
+      "input": "inputs/nested-intrinsic.svg",
+      "references": [
+        {
+          "path": "references/nested-intrinsic.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Absolute root dimensions provide intrinsic size; the embedded SVG is an independent document."
+    },
+    {
+      "id": "image-nested-meet",
+      "input": "inputs/nested-meet.svg",
+      "references": [
+        {
+          "path": "references/nested-meet.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Default xMidYMid meet fits the intrinsic two-to-one ratio into the image positioning rectangle."
+    },
+    {
+      "id": "image-nested-none",
+      "input": "inputs/nested-none.svg",
+      "references": [
+        {
+          "path": "references/nested-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "The embedded root preserveAspectRatio is treated as none; the image attribute controls fitting."
+    },
+    {
+      "id": "image-nested-style-isolation",
+      "input": "inputs/nested-style-isolation.svg",
+      "references": [
+        {
+          "path": "references/nested-style-isolation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Outer selectors and inherited fill must not enter the separate embedded document."
+    },
+    {
+      "id": "image-nested-percentage-viewport",
+      "input": "inputs/nested-percentage-viewport.svg",
+      "references": [
+        {
+          "path": "references/nested-percentage-viewport.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Percentages in the independent document resolve against its image-rendering viewport."
+    },
+    {
+      "id": "image-nested-secure-external",
+      "input": "inputs/nested-secure-external.svg",
+      "references": [
+        {
+          "path": "references/nested-secure-external.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "The outer static document may fetch the SVG; its embedded document is secure-static and cannot fetch a sibling SVG."
+    },
+    {
+      "id": "image-nested-shared-viewports",
+      "input": "inputs/nested-shared-viewports.svg",
+      "references": [
+        {
+          "path": "references/nested-shared-viewports.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "The same resource renders at two occurrence-specific viewport sizes without sharing the wrong layout."
+    },
+    {
+      "id": "image-nested-rotated",
+      "input": "inputs/nested-rotated.svg",
+      "references": [
+        {
+          "path": "references/nested-rotated.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "The image document and its viewport clips follow a non-axis-aligned affine placement."
+    },
+    {
+      "id": "image-nested-projective",
+      "input": "inputs/nested-projective.svg",
+      "references": [
+        {
+          "path": "references/nested-projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Projective image placement transforms both child geometry and physical viewport clip planes."
+    },
+    {
+      "id": "image-nested-overflow-visible",
+      "input": "inputs/nested-overflow-visible.svg",
+      "references": [
+        {
+          "path": "references/nested-overflow-visible.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Visible overflow on both image and document root preserves content beyond the image viewport."
+    },
+    {
+      "id": "image-nested-no-viewbox",
+      "input": "inputs/nested-no-viewbox.svg",
+      "references": [
+        {
+          "path": "references/nested-no-viewbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Without a viewBox the new SVG viewport does not scale fixed user-unit geometry."
+    },
+    {
+      "id": "image-nested-overflow-hidden",
+      "input": "inputs/nested-overflow-hidden.svg",
+      "references": [
+        {
+          "path": "references/nested-overflow-hidden.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Hidden overflow on the image clips independently of visible overflow on its document root."
+    },
+    {
+      "id": "image-nested-recursive-data",
+      "input": "inputs/nested-recursive-data.svg",
+      "references": [
+        {
+          "path": "references/nested-recursive-data.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Secure embedded documents permit nested data images and retain their independent layouts."
+    },
+    {
+      "id": "image-nested-group-opacity",
+      "input": "inputs/nested-group-opacity.svg",
+      "references": [
+        {
+          "path": "references/nested-group-opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Image opacity is applied once to the isolated embedded document output."
+    },
+    {
+      "id": "image-nested-defer",
+      "input": "inputs/nested-defer.svg",
+      "references": [
+        {
+          "path": "references/nested-defer.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "SVG 1.1 defer uses the explicitly supplied child aspect-ratio alignment before SVG2 viewport layout."
+    },
+    {
+      "id": "image-nested-ignore-root-par",
+      "input": "inputs/nested-ignore-root-par.svg",
+      "references": [
+        {
+          "path": "references/nested-ignore-root-par.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Without defer, image alignment wins over the child root aspect-ratio attribute."
+    },
+    {
+      "id": "image-nested-in-pattern",
+      "input": "inputs/nested-in-pattern.svg",
+      "references": [
+        {
+          "path": "references/nested-in-pattern.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Embedded commands also execute in retained pattern pictures at tile resolution."
+    },
+    {
+      "id": "image-nested-in-mask",
+      "input": "inputs/nested-in-mask.svg",
+      "references": [
+        {
+          "path": "references/nested-in-mask.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "An embedded image supplies alpha coverage as content of an SVG mask."
+    },
+    {
+      "id": "image-nested-gradient-projective",
+      "input": "inputs/nested-gradient-projective.svg",
+      "references": [
+        {
+          "path": "references/nested-gradient-projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Child gradient sampling composes the image placement instead of retaining source-device coordinates."
+    },
+    {
+      "id": "image-nested-in-overflow-pattern",
+      "input": "inputs/nested-in-overflow-pattern.svg",
+      "references": [
+        {
+          "path": "references/nested-in-overflow-pattern.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Pattern overflow enumeration includes child document painting beyond the image positioning rectangle, including overlapping alpha."
+    },
+    {
+      "id": "image-nested-control-nested-external",
+      "input": "inputs/nested-external.svg",
+      "references": [
+        {
+          "path": "references/control-nested-external.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Direct static rendering validates the resource content and that external image loading works outside secure embedded mode."
+    },
+    {
+      "id": "image-nested-control-nested-secure-source",
+      "input": "inputs/nested-secure-source.svg",
+      "references": [
+        {
+          "path": "references/control-nested-secure-source.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement",
+      "reason": "Direct static rendering validates the resource content and that external image loading works outside secure embedded mode."
+    },
+    {
+      "id": "image-svg-orientation-0",
+      "input": "inputs/svg-orientation-0.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-0.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-0-flip",
+      "input": "inputs/svg-orientation-0-flip.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-0-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-90",
+      "input": "inputs/svg-orientation-90.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-90.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-90-flip",
+      "input": "inputs/svg-orientation-90-flip.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-90-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-180",
+      "input": "inputs/svg-orientation-180.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-180.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-180-flip",
+      "input": "inputs/svg-orientation-180-flip.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-180-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-270",
+      "input": "inputs/svg-orientation-270.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-270.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-270-flip",
+      "input": "inputs/svg-orientation-270-flip.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-270-flip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation."
+    },
+    {
+      "id": "image-svg-orientation-stretched",
+      "input": "inputs/svg-orientation-stretched.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-stretched.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "The independent SVG viewport is negotiated before orientation, and final width/height address the oriented axes."
+    },
+    {
+      "id": "image-svg-orientation-auto-height",
+      "input": "inputs/svg-orientation-auto-height.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-auto-height.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Auto height is derived from the reciprocal intrinsic aspect ratio after a quarter turn."
+    },
+    {
+      "id": "image-svg-orientation-percentage-viewport",
+      "input": "inputs/svg-orientation-percentage-viewport.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-percentage-viewport.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "A quarter turn supplies the independent document a 4 by 6 logical viewport before rotating its percentage geometry."
+    },
+    {
+      "id": "image-svg-orientation-shared-inherited",
+      "input": "inputs/svg-orientation-shared-inherited.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-shared-inherited.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "Different inherited orientations share the same raw 4 by 6 layout while retaining separate placements."
+    },
+    {
+      "id": "image-svg-orientation-viewbox-auto-height",
+      "input": "inputs/svg-orientation-viewbox-auto-height.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-viewbox-auto-height.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "A viewBox-only natural ratio is inverted before resolving auto height, without inventing intrinsic dimensions."
+    },
+    {
+      "id": "image-svg-orientation-projective",
+      "input": "inputs/svg-orientation-projective.svg",
+      "references": [
+        {
+          "path": "references/svg-orientation-projective.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+      "reason": "CSS transforms follow image orientation; retained child clips compose through perspective. The independent cell reference preserves source painting order (SVG2 render.html#RenderingOrder)."
+    },
+    {
+      "id": "image-raster-legacy-clip",
+      "input": "inputs/raster-legacy-clip.svg",
+      "references": [
+        {
+          "path": "references/raster-legacy-clip.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "tolerance": {},
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty",
+      "reason": "A raster image establishes a viewport, so a legacy clip rectangle (user-space positions) clips it like an SVG image."
+    },
+    {
+      "id": "data-url-header-whitespace",
+      "input": "inputs/data-url-header-whitespace.svg",
+      "references": [
+        {
+          "path": "references/data-url-header-whitespace.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Fetch's data URL processor trims ASCII whitespace around the MIME type, so a header with spaces still names image/svg+xml.",
+      "spec": "https://fetch.spec.whatwg.org/#data-url-processor",
+      "tolerance": {}
+    }
+  ]
+}

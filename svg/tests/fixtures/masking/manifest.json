@@ -1,0 +1,917 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "luminance-white",
+      "input": "inputs/luminance-white.svg",
+      "references": [
+        {
+          "path": "references/luminance-white.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask luminance-white produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-black",
+      "input": "inputs/luminance-black.svg",
+      "references": [
+        {
+          "path": "references/luminance-black.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask luminance-black produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "alpha-black",
+      "input": "inputs/alpha-black.svg",
+      "references": [
+        {
+          "path": "references/alpha-black.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask alpha-black produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "empty",
+      "input": "inputs/empty.svg",
+      "references": [
+        {
+          "path": "references/empty.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask empty produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "content-object-units",
+      "input": "inputs/content-object-units.svg",
+      "references": [
+        {
+          "path": "references/content-object-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask content-object-units produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "region-user-units",
+      "input": "inputs/region-user-units.svg",
+      "references": [
+        {
+          "path": "references/region-user-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask region-user-units produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "nested",
+      "input": "inputs/nested.svg",
+      "references": [
+        {
+          "path": "references/nested.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask nested produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "earlier-sibling",
+      "input": "inputs/earlier-sibling.svg",
+      "references": [
+        {
+          "path": "references/earlier-sibling.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask earlier-sibling produces the literal reference geometry without changing earlier siblings.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-gray-srgb",
+      "input": "inputs/luminance-gray-srgb.svg",
+      "references": [
+        {
+          "path": "references/luminance-gray-srgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent CSS Masking luminance coefficients 0.2125/0.7154/0.0721, with sRGB transfer for linearRGB, give rounded alpha 128.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskValues",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-gray-linear",
+      "input": "inputs/luminance-gray-linear.svg",
+      "references": [
+        {
+          "path": "references/luminance-gray-linear.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent CSS Masking luminance coefficients 0.2125/0.7154/0.0721, with sRGB transfer for linearRGB, give rounded alpha 55.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskValues",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-red",
+      "input": "inputs/luminance-red.svg",
+      "references": [
+        {
+          "path": "references/luminance-red.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent CSS Masking luminance coefficients 0.2125/0.7154/0.0721, with sRGB transfer for linearRGB, give rounded alpha 54.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskValues",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-green",
+      "input": "inputs/luminance-green.svg",
+      "references": [
+        {
+          "path": "references/luminance-green.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent CSS Masking luminance coefficients 0.2125/0.7154/0.0721, with sRGB transfer for linearRGB, give rounded alpha 182.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskValues",
+      "tolerance": {}
+    },
+    {
+      "id": "luminance-blue",
+      "input": "inputs/luminance-blue.svg",
+      "references": [
+        {
+          "path": "references/luminance-blue.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent CSS Masking luminance coefficients 0.2125/0.7154/0.0721, with sRGB transfer for linearRGB, give rounded alpha 18.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskValues",
+      "tolerance": {}
+    },
+    {
+      "id": "mode-alpha",
+      "input": "inputs/mode-alpha.svg",
+      "references": [
+        {
+          "path": "references/mode-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Explicit mask-mode overrides the referenced mask element mask-type.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-mode",
+      "tolerance": {}
+    },
+    {
+      "id": "mode-luminance",
+      "input": "inputs/mode-luminance.svg",
+      "references": [
+        {
+          "path": "references/mode-luminance.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Explicit mask-mode overrides the referenced mask element mask-type.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-mode",
+      "tolerance": {}
+    },
+    {
+      "id": "missing-reference",
+      "input": "inputs/missing-reference.svg",
+      "references": [
+        {
+          "path": "references/missing-reference.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An unavailable mask image is transparent black; the sole none value creates no mask.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-image",
+      "tolerance": {}
+    },
+    {
+      "id": "none",
+      "input": "inputs/none.svg",
+      "references": [
+        {
+          "path": "references/none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An unavailable mask image is transparent black; the sole none value creates no mask.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-image",
+      "tolerance": {}
+    },
+    {
+      "id": "layers-add",
+      "input": "inputs/layers-add.svg",
+      "references": [
+        {
+          "path": "references/layers-add.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask layers compose front to back using add with the first image as source.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "layers-subtract",
+      "input": "inputs/layers-subtract.svg",
+      "references": [
+        {
+          "path": "references/layers-subtract.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask layers compose front to back using subtract with the first image as source.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "layers-intersect",
+      "input": "inputs/layers-intersect.svg",
+      "references": [
+        {
+          "path": "references/layers-intersect.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask layers compose front to back using intersect with the first image as source.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "layers-exclude",
+      "input": "inputs/layers-exclude.svg",
+      "references": [
+        {
+          "path": "references/layers-exclude.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mask layers compose front to back using exclude with the first image as source.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "partial-add",
+      "input": "inputs/partial-add.svg",
+      "references": [
+        {
+          "path": "references/partial-add.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent Porter\u2013Duff coverage with source alpha 64/255 and destination alpha 128/255.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "partial-subtract",
+      "input": "inputs/partial-subtract.svg",
+      "references": [
+        {
+          "path": "references/partial-subtract.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent Porter\u2013Duff coverage with source alpha 64/255 and destination alpha 128/255.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "partial-intersect",
+      "input": "inputs/partial-intersect.svg",
+      "references": [
+        {
+          "path": "references/partial-intersect.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent Porter\u2013Duff coverage with source alpha 64/255 and destination alpha 128/255.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "partial-exclude",
+      "input": "inputs/partial-exclude.svg",
+      "references": [
+        {
+          "path": "references/partial-exclude.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Independent Porter\u2013Duff coverage with source alpha 64/255 and destination alpha 128/255.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "three-layer-order",
+      "input": "inputs/three-layer-order.svg",
+      "references": [
+        {
+          "path": "references/three-layer-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Back-to-front subtract computes a minus (b minus c); the bottom operator is ignored.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "three-layer-operators",
+      "input": "inputs/three-layer-operators.svg",
+      "references": [
+        {
+          "path": "references/three-layer-operators.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each source uses its corresponding operator: a minus (b intersect c).",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "mode-list-repeat",
+      "input": "inputs/mode-list-repeat.svg",
+      "references": [
+        {
+          "path": "references/mode-list-repeat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A shorter mode list repeats: black masks use alpha, luminance, then alpha.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-mode",
+      "tolerance": {}
+    },
+    {
+      "id": "content-object-units-whitespace",
+      "input": "inputs/content-object-units-whitespace.svg",
+      "references": [
+        {
+          "path": "references/content-object-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "XML mask unit values accept surrounding whitespace.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "region-user-units-whitespace",
+      "input": "inputs/region-user-units-whitespace.svg",
+      "references": [
+        {
+          "path": "references/region-user-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "XML mask unit values accept surrounding whitespace.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "mask-transform-ignored",
+      "input": "inputs/mask-transform-ignored.svg",
+      "references": [
+        {
+          "path": "references/mask-transform-ignored.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The SVG transform attribute does not apply to the mask resource element.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-default",
+      "input": "inputs/image-linear-default.svg",
+      "references": [
+        {
+          "path": "references/image-linear-default.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A linear-gradient() mask layer defaults to a top-to-bottom gradient sized to the stroke box and masks by alpha (match-source with an <image>).",
+      "spec": "https://www.w3.org/TR/css-images-3/#linear-gradients",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-angle",
+      "input": "inputs/image-linear-angle.svg",
+      "references": [
+        {
+          "path": "references/image-linear-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A 90deg gradient line runs from the left to the right edge; percentage stops are fractions of its length.",
+      "spec": "https://www.w3.org/TR/css-images-3/#linear-gradient-syntax",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-corner",
+      "input": "inputs/image-linear-corner.svg",
+      "references": [
+        {
+          "path": "references/image-linear-corner.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A corner direction is perpendicular to the line through the two neighbouring corners; the line length is |w sin A| + |h cos A| (16x8 box: (4.8,-2.4) to (11.2,10.4)).",
+      "spec": "https://www.w3.org/TR/css-images-3/#linear-gradient-syntax",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-outside",
+      "input": "inputs/image-linear-outside.svg",
+      "references": [
+        {
+          "path": "references/image-linear-outside.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Color stops may lie outside the gradient line; the gradient extends along it.",
+      "spec": "https://www.w3.org/TR/css-images-3/#color-stop-syntax",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-hint-edge",
+      "input": "inputs/image-linear-hint-edge.svg",
+      "references": [
+        {
+          "path": "references/image-linear-hint-edge.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A transition hint at the preceding stop's position makes the following color start immediately.",
+      "spec": "https://www.w3.org/TR/css-images-3/#coloring-gradient-line",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-hint-middle",
+      "input": "inputs/image-linear-hint-middle.svg",
+      "references": [
+        {
+          "path": "references/image-linear-hint-middle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A transition hint halfway between two stops is the linear interpolation.",
+      "spec": "https://www.w3.org/TR/css-images-3/#coloring-gradient-line",
+      "tolerance": {}
+    },
+    {
+      "id": "image-linear-current-color",
+      "input": "inputs/image-linear-current-color.svg",
+      "references": [
+        {
+          "path": "references/image-linear-current-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "currentColor in a gradient stop uses the masked element's color.",
+      "spec": "https://www.w3.org/TR/css-images-3/#color-stop-syntax",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeating-linear",
+      "input": "inputs/image-repeating-linear.svg",
+      "references": [
+        {
+          "path": "references/image-repeating-linear.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A repeating gradient repeats the span between its first and last stops in both directions.",
+      "spec": "https://www.w3.org/TR/css-images-3/#repeating-gradients",
+      "tolerance": {}
+    },
+    {
+      "id": "image-radial-closest-side",
+      "input": "inputs/image-radial-closest-side.svg",
+      "references": [
+        {
+          "path": "references/image-radial-closest-side.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A closest-side circle touches the nearest side of the gradient box.",
+      "spec": "https://www.w3.org/TR/css-images-3/#radial-gradients",
+      "tolerance": {}
+    },
+    {
+      "id": "image-radial-farthest-corner",
+      "input": "inputs/image-radial-farthest-corner.svg",
+      "references": [
+        {
+          "path": "references/image-radial-farthest-corner.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The default ellipse passes through the farthest corner with the aspect ratio of farthest-side.",
+      "spec": "https://www.w3.org/TR/css-images-3/#radial-gradients",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeating-radial",
+      "input": "inputs/image-repeating-radial.svg",
+      "references": [
+        {
+          "path": "references/image-repeating-radial.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A repeating radial gradient repeats its stop span outward from the center.",
+      "spec": "https://www.w3.org/TR/css-images-3/#repeating-gradients",
+      "tolerance": {}
+    },
+    {
+      "id": "image-luminance",
+      "input": "inputs/image-luminance.svg",
+      "references": [
+        {
+          "path": "references/image-luminance.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "mask-mode: luminance uses the image's luminance.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-mode",
+      "tolerance": {}
+    },
+    {
+      "id": "image-size-position",
+      "input": "inputs/image-size-position.svg",
+      "references": [
+        {
+          "path": "references/image-size-position.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "mask-size and mask-position place one unrepeated layer image in the positioning area.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-position",
+      "tolerance": {}
+    },
+    {
+      "id": "image-size-percent",
+      "input": "inputs/image-size-percent.svg",
+      "references": [
+        {
+          "path": "references/image-size-percent.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Percentage sizes and positions resolve against the positioning area (position against area minus image size).",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#background-position",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeat",
+      "input": "inputs/image-repeat.svg",
+      "references": [
+        {
+          "path": "references/image-repeat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The initial mask-repeat tiles the sized image over the painting area.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-repeat",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeat-x",
+      "input": "inputs/image-repeat-x.svg",
+      "references": [
+        {
+          "path": "references/image-repeat-x.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "repeat-x tiles horizontally only.",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#background-repeat",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeat-space",
+      "input": "inputs/image-repeat-space.svg",
+      "references": [
+        {
+          "path": "references/image-repeat-space.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "space places as many whole images as fit, the first and last touching the edges, with equal gaps.",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#background-repeat",
+      "tolerance": {}
+    },
+    {
+      "id": "image-repeat-round",
+      "input": "inputs/image-repeat-round.svg",
+      "references": [
+        {
+          "path": "references/image-repeat-round.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "round rescales the image so a whole number of copies fit (12/5 rounds to 2, so 6px tiles).",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#background-repeat",
+      "tolerance": {}
+    },
+    {
+      "id": "image-clip-fill-box",
+      "input": "inputs/image-clip-fill-box.svg",
+      "references": [
+        {
+          "path": "references/image-clip-fill-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "mask-clip: fill-box restricts the layer to the object bounding box.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-clip",
+      "tolerance": {}
+    },
+    {
+      "id": "image-stroke-box-default",
+      "input": "inputs/image-stroke-box-default.svg",
+      "references": [
+        {
+          "path": "references/image-stroke-box-default.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "For SVG elements the initial border-box origin and clip compute to stroke-box.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-clip",
+      "tolerance": {}
+    },
+    {
+      "id": "image-origin-fill-box",
+      "input": "inputs/image-origin-fill-box.svg",
+      "references": [
+        {
+          "path": "references/image-origin-fill-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "mask-origin: fill-box positions the image at the object bounding box; no-clip does not restrict painting.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-origin",
+      "tolerance": {}
+    },
+    {
+      "id": "image-origin-view-box",
+      "input": "inputs/image-origin-view-box.svg",
+      "references": [
+        {
+          "path": "references/image-origin-view-box.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "view-box uses the nearest viewport as the positioning area.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-origin",
+      "tolerance": {}
+    },
+    {
+      "id": "image-layers-gradient-and-mask",
+      "input": "inputs/image-layers-gradient-and-mask.svg",
+      "references": [
+        {
+          "path": "references/image-layers-gradient-and-mask.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Image layers and mask-element layers compose with mask-composite; shorter lists repeat.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-png-natural",
+      "input": "inputs/image-url-png-natural.svg",
+      "references": [
+        {
+          "path": "references/image-url-png-natural.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A raster url() layer is an <image> at its natural size; match-source masks by its alpha.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-image",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-png-repeat",
+      "input": "inputs/image-url-png-repeat.svg",
+      "references": [
+        {
+          "path": "references/image-url-png-repeat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A raster layer scales to mask-size and tiles with the initial mask-repeat.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-repeat",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-png-contain",
+      "input": "inputs/image-url-png-contain.svg",
+      "references": [
+        {
+          "path": "references/image-url-png-contain.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "contain scales the image's natural ratio to fit the positioning area.",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#valdef-background-size-contain",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-png-auto-height",
+      "input": "inputs/image-url-png-auto-height.svg",
+      "references": [
+        {
+          "path": "references/image-url-png-auto-height.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An auto mask-size component follows the natural aspect ratio.",
+      "spec": "https://www.w3.org/TR/css-backgrounds-3/#background-size",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-svg-repeat",
+      "input": "inputs/image-url-svg-repeat.svg",
+      "references": [
+        {
+          "path": "references/image-url-svg-repeat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An SVG url() layer is laid out at its natural size and tiled.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-image",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-svg-clipped",
+      "input": "inputs/image-url-svg-clipped.svg",
+      "references": [
+        {
+          "path": "references/image-url-svg-clipped.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A layer image paints only within its own rectangle, even when SVG content overflows its viewport.",
+      "spec": "https://www.w3.org/TR/css-images-3/#concrete-object-size",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-svg-sized",
+      "input": "inputs/image-url-svg-sized.svg",
+      "references": [
+        {
+          "path": "references/image-url-svg-sized.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An SVG layer image is laid out in the concrete object size given by mask-size.",
+      "spec": "https://www.w3.org/TR/css-images-3/#default-sizing",
+      "tolerance": {}
+    },
+    {
+      "id": "image-url-broken",
+      "input": "inputs/image-url-broken.svg",
+      "references": [
+        {
+          "path": "references/image-url-broken.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A url() layer that is not a decodable image is a transparent black layer, which masks everything out.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-mask-image",
+      "tolerance": {}
+    },
+    {
+      "id": "mask-element-filter-opacity",
+      "input": "inputs/mask-element-filter-opacity.svg",
+      "references": [
+        {
+          "path": "references/mask-element-filter-opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "opacity and filter do not apply to the mask element; its content is used unfiltered and opaque.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#MaskElement",
+      "tolerance": {}
+    },
+    {
+      "id": "clip-bbox-content-percentage",
+      "input": "inputs/clip-bbox-content-percentage.svg",
+      "references": [
+        {
+          "path": "references/clip-bbox-content-percentage.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "In objectBoundingBox units, percentages inside clipPath content still resolve against the viewport, then scale with the bounding box.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ObjectBoundingBoxUnits",
+      "tolerance": {}
+    },
+    {
+      "id": "clip-path-on-clippath-target-space",
+      "input": "inputs/clip-path-on-clippath-target-space.svg",
+      "references": [
+        {
+          "path": "references/clip-path-on-clippath-target-space.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A clipPath's own clip-path is resolved for the element being clipped, so its objectBoundingBox is that element's bounding box.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    }
+  ]
+}

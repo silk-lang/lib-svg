@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">
+<style>@font-face { font-family: "Doc Local"; src: local(Missing Face), local("NOTOMONO"); }</style>
+<text x="10" y="50" font-family="Doc Local, Noto Sans" font-size="30">Hamburg</text>
+</svg>

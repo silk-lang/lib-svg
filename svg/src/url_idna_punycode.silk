@@ -1,0 +1,254 @@
+// Original RFC3492 bootstring implementation for the UTS46 label pipeline.
+// All generalized-integer arithmetic is checked even on wasm32.
+import silk.collections.list { List }
+import silk.collections.bytes { Bytes }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.u32
+import silk.num.u64
+import silk.num.usize
+
+// Implementation budgets are distinct from malformed or arithmetic-invalid labels.
+pub enum IdnaError {
+  InputLimit
+}
+
+fn threshold(k: u64, bias: u64) -> u64 {
+  if k <= bias {
+    return 1
+  }
+  if k - bias >= 26 {
+    return 26
+  }
+  return k - bias
+}
+
+fn adapt(value: u64, points: u64, first: bool) -> u64 {
+  let mut delta = value / 2
+  if first {
+    delta = value / 700
+  }
+
+  // Division by at least two (or 700) above leaves room for this sum.
+  delta = delta + delta / points
+  let mut bias: u64 = 0
+  while delta > 455 {
+    delta = delta / 35
+    bias = bias + 36
+  }
+  return bias + 36 * delta / (delta + 38)
+}
+
+fn digit(cp: u32) -> u64 {
+  if cp >= 97 && cp <= 122 {
+    return u32.toU64(cp - 97)
+  }
+  if cp >= 65 && cp <= 90 {
+    return u32.toU64(cp - 65)
+  }
+  if cp >= 48 && cp <= 57 {
+    return u32.toU64(cp - 48 + 26)
+  }
+  return 36
+}
+
+fn encoded(value: u64) -> u8 {
+  if value < 26 {
+    return u64.toU8(97 + value)
+  }
+  return u64.toU8(48 + value - 26)
+}
+
+pub effect fn spend(work: &mut usize, amount: usize) -> ()
+  ! IdnaError {
+  if amount > work.* {
+    fail IdnaError.InputLimit
+  }
+  work.* = work.* - amount
+}
+
+// Input is the suffix after xn--; the caller validates decoded Unicode/NFC.
+pub effect fn decode(input: &[u32], output: &mut List<u32>, work: &mut usize) -> bool
+  ! IdnaError | OutOfMemoryError
+  ? &mut Allocator {
+  output.clear()
+  let mut cursor: usize = 0
+  let mut delimiter: usize = 0
+  let mut hasDelimiter = false
+  while cursor < input.length {
+    if input[cursor] >= 128 {
+      return false
+    }
+    if input[cursor] == 45 {
+      delimiter = cursor
+      hasDelimiter = true
+    }
+    cursor = cursor + 1
+  }
+  cursor = 0
+  if hasDelimiter {
+    if delimiter > 16384 {
+      fail IdnaError.InputLimit
+    }
+    while cursor < delimiter {
+      run output.append(input[cursor])
+      cursor = cursor + 1
+    }
+    cursor = delimiter + 1
+  }
+  let mut n: u64 = 128
+  let mut insertion: u64 = 0
+  let mut bias: u64 = 72
+  while cursor < input.length {
+    let old = insertion
+    let mut weight: u64 = 1
+    let mut k: u64 = 36
+    while true {
+      if cursor >= input.length {
+        return false
+      }
+      let d = digit(input[cursor])
+      if d >= 36 {
+        return false
+      }
+      cursor = cursor + 1
+      let term = match move u64.checkedMultiply(d, weight) {
+        Option<u64>.Some { value } => value
+        Option<u64>.None => {
+          return false
+        }
+      }
+      insertion = match move u64.checkedAdd(insertion, term) {
+        Option<u64>.Some { value } => value
+        Option<u64>.None => {
+          return false
+        }
+      }
+      let t = threshold(k, bias)
+      if d < t {
+        break
+      }
+      weight = match move u64.checkedMultiply(weight, 36 - t) {
+        Option<u64>.Some { value } => value
+        Option<u64>.None => {
+          return false
+        }
+      }
+
+      // A nonterminating integer necessarily overflows weight first.
+      k = k + 36
+    }
+    let count = output.length() + 1
+    if count > 16384 {
+      fail IdnaError.InputLimit
+    }
+    let wideCount = usize.toU64(count)
+    bias = adapt(insertion - old, wideCount, old == 0)
+    let increment = insertion / wideCount
+    if increment > 0x10ffff - n {
+      return false
+    }
+    n = n + increment
+    if n >= 0xd800 && n <= 0xdfff {
+      return false
+    }
+    insertion = insertion % wideCount
+    let index = u64.toUsize(insertion)
+    run spend(&mut work.*, count - index)
+    run output.insert(index, u64.toU32(n))
+    insertion = insertion + 1
+  }
+  return true
+}
+
+effect fn byte(output: &mut Bytes, value: u8) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = [value]
+  run output.append(&bytes)
+}
+
+pub effect fn encode(input: &[u32], output: &mut Bytes, work: &mut usize) -> bool
+  ! IdnaError | OutOfMemoryError
+  ? &mut Allocator {
+  run output.append(b"xn--")
+  let mut basic: usize = 0
+  let mut at: usize = 0
+  while at < input.length {
+    if input[at] < 128 {
+      run byte(&mut output.*, u32.toU8(input[at]))
+      basic = basic + 1
+    }
+    at = at + 1
+  }
+  if basic > 0 {
+    run byte(&mut output.*, 45)
+  }
+  let mut handled = basic
+  let mut n: u64 = 128
+  let mut delta: u64 = 0
+  let mut bias: u64 = 72
+  while handled < input.length {
+    run spend(&mut work.*, input.length * 2)
+    let mut minimum: u64 = 0x110000
+    at = 0
+    while at < input.length {
+      let cp = u32.toU64(input[at])
+      if cp >= n && cp < minimum {
+        minimum = cp
+      }
+      at = at + 1
+    }
+    let step = match move u64.checkedMultiply(minimum - n, usize.toU64(handled + 1)) {
+      Option<u64>.Some { value } => value
+      Option<u64>.None => {
+        return false
+      }
+    }
+    delta = match move u64.checkedAdd(delta, step) {
+      Option<u64>.Some { value } => value
+      Option<u64>.None => {
+        return false
+      }
+    }
+    n = minimum
+    at = 0
+    while at < input.length {
+      let cp = u32.toU64(input[at])
+      if cp < n {
+        delta = match move u64.checkedAdd(delta, 1) {
+          Option<u64>.Some { value } => value
+          Option<u64>.None => {
+            return false
+          }
+        }
+      }
+      if cp == n {
+        let mut q = delta
+        let mut k: u64 = 36
+        while true {
+          let t = threshold(k, bias)
+          if q < t {
+            break
+          }
+          run byte(&mut output.*, encoded(t + (q - t) % (36 - t)))
+          q = (q - t) / (36 - t)
+          k = k + 36
+        }
+        run byte(&mut output.*, encoded(q))
+        bias = adapt(delta, usize.toU64(handled + 1), handled == basic)
+        delta = 0
+        handled = handled + 1
+      }
+      at = at + 1
+    }
+    delta = match move u64.checkedAdd(delta, 1) {
+      Option<u64>.Some { value } => value
+      Option<u64>.None => {
+        return false
+      }
+    }
+    n = n + 1
+  }
+  return true
+}

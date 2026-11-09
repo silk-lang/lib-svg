@@ -1,0 +1,414 @@
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+//! Native filesystem driver; rendering and PNG serialization stay in their library packages.
+import options { Parsed, Action, ArgumentError }
+import options
+import svg_render.lib { RenderOptions }
+import svg_render.lib as renderer
+import svg_render.native_environment { NativeHost }
+import svg_fonts.database { Generic }
+import svg_core.url { Url }
+import svg_core.resources { Resolver, Limits as ResourceLimits }
+import svg_core.resources_native { FileSystem as NativeFileSystem }
+import svg_image.png
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.system.filesystem { Path, FileSystem, FileError, DirectoryEntry }
+import silk.system.filesystem_machine { MachineFileSystem }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter, StderrWriter }
+import silk.text.string { InvalidUtf8 }
+import silk.core.option { Option }
+import silk.num.u32
+
+enum Failure {
+  Input,
+  Output,
+  Render,
+  Encode
+}
+
+const HELP: string<
+  'static
+> = "usage: svg-render-test-harness input.svg -o output.png [--width N] [--height N] [--zoom Z]\n       [--viewport-width N] [--viewport-height N] [--resources-dir DIR]\n       [--mode static|animated|secure-static|secure-animated] [--fragment FRAGMENT]\n       [--font-dir DIR] [--language TAG] [--time T]\n       svg-render-test-harness --help | --version\n\nRender an SVG to a PNG file. Width and height are positive decimal integers;\nzoom is a positive finite decimal number. Omitted dimensions use SVG sizing.\nThe viewport width and height set the embedding viewport that percentage and\nauto root sizes resolve against (default 300 by 150); width and height then\nscale that intrinsic size to the output pixels.\nThe renderer applies its pixel limit after sizing and zoom.\nMode selects the SVG processing policy and defaults to static.\nFragment is encoded URL-fragment text; one optional leading # is stripped.\nAn empty fragment value explicitly clears the base fragment. Percent escapes\nare passed unchanged to SVG fragment resolution.\nText uses the fonts (.ttf, .otf, .ttc) in the font directory, read in name\norder, after the measured default face. Without --font-dir, the system font\ndirectories and their subdirectories are read instead.\nOptions take separate values and cannot repeat. Use -- before a dash-prefixed\ninput path, or prefix such file paths with ./ (including output paths).\nResources may use data URLs or files confined to the input directory, or to\nthe resources directory when one is given.\nLanguage is the user's language (a BCP 47 tag such as en-US) that\nsystemLanguage conditions match; without it no language condition is true.\nSecure modes block external resource requests; data URLs remain available.\nTime is a SMIL clock value such as 1.5s or 00:02; animations are sampled at\nthat document time, in animated mode, which a time selects unless a mode is\ngiven. Animated mode without a time samples time 0.\nNo stdin or stdout PNG, network resources or CSS options.\n"
+
+effect fn stderr(text: string) -> ()
+  ! WriterError {
+  let mut writer = StderrWriter.make()
+  run Writer.writeString(text) |> Effect.provideMut<Writer>(&mut writer)
+  run Writer.flush() |> Effect.provideMut<Writer>(&mut writer)
+}
+
+fn inputFailure<E>(error: E) -> Failure {
+  drop error
+  return Failure.Input
+}
+
+fn outputFailure<E>(error: E) -> Failure {
+  drop error
+  return Failure.Output
+}
+
+fn renderFailure<E>(error: E) -> Failure {
+  drop error
+  return Failure.Render
+}
+
+fn encodeFailure<E>(error: E) -> Failure {
+  drop error
+  return Failure.Encode
+}
+
+effect fn pathFromArgument(base: &Path, raw: &[u8]) -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.resolveBytes(base, raw)
+  }
+  if raw.length > 0 && raw[0] == 47 {
+    return run Path.fromBytes(raw)
+  }
+  if let Result<string, InvalidUtf8>.Success { value } = move HostInput.text(raw) {
+    return run Path.resolve(base, value)
+  }
+  return run Path.joinBytes(base, raw)
+}
+
+fn fontFile(name: &[u8]) -> bool {
+  if name.length < 4 || name[name.length - 4] != 46 {
+    return false
+  }
+  let a = name[name.length - 3] | 32
+  let b = name[name.length - 2] | 32
+  let c = name[name.length - 1] | 32
+  return (a == 116 && b == 116 && (c == 102 || c == 99)) || (a == 111 && b == 116 && c == 102)
+}
+
+fn before(left: &[u8], right: &[u8]) -> bool {
+  let mut index: usize = 0
+  while index < left.length && index < right.length {
+    if left[index] != right[index] {
+      return left[index] < right[index]
+    }
+    index = index + 1
+  }
+  return left.length < right.length
+}
+
+/// Adds the font files in `directory`, in byte order of their paths, then those of its
+/// subdirectories (in the same order) down to `depth` more levels.
+effect fn addFonts(host: &mut NativeHost, directory: &Path, depth: usize) -> ()
+  ! FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  let entries = run FileSystem.listDirectory(directory)
+  let listed = List<DirectoryEntry>.asSlice(&entries)
+  let order = run sorted(listed, false)
+  let mut index: usize = 0
+  while index < List<usize>.length(&order) {
+    let data = run FileSystem.readFile(&listed[List<usize>.get(&order, index)].path)
+    drop run host.fonts.add(move data)
+    index = index + 1
+  }
+  if depth > 0 {
+    let directories = run sorted(listed, true)
+    index = 0
+    while index < List<usize>.length(&directories) {
+      run addFonts(&mut host, &listed[List<usize>.get(&directories, index)].path, depth - 1)
+      index = index + 1
+    }
+  }
+}
+
+// CLI policy: generic families resolve to the first installed family of a list of
+// widely installed families per platform (CSS Fonts 4 #generic-font-families leaves
+// the choice to the user agent). Without one, the measured default face is used.
+effect fn addGenerics(host: &mut NativeHost) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let serif: &[string] = &[
+    "DejaVu Serif",
+    "Liberation Serif",
+    "Noto Serif",
+    "Times New Roman",
+    "Times",
+  ]
+  let sans: &[string] = &["DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial", "Helvetica"]
+  let mono: &[string] = &[
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Noto Mono",
+    "Courier New",
+    "Menlo",
+    "Courier",
+  ]
+  let mut index: usize = 0
+  while index < serif.length {
+    run host.fonts.addGeneric(Generic.Serif, Intrinsic.stringUtf8Bytes(serif[index]))
+    run host.fonts.addGeneric(Generic.UiSerif, Intrinsic.stringUtf8Bytes(serif[index]))
+    index = index + 1
+  }
+  index = 0
+  while index < sans.length {
+    run host.fonts.addGeneric(Generic.SansSerif, Intrinsic.stringUtf8Bytes(sans[index]))
+    run host.fonts.addGeneric(Generic.UiSansSerif, Intrinsic.stringUtf8Bytes(sans[index]))
+    run host.fonts.addGeneric(Generic.SystemUi, Intrinsic.stringUtf8Bytes(sans[index]))
+    index = index + 1
+  }
+  index = 0
+  while index < mono.length {
+    run host.fonts.addGeneric(Generic.Monospace, Intrinsic.stringUtf8Bytes(mono[index]))
+    run host.fonts.addGeneric(Generic.UiMonospace, Intrinsic.stringUtf8Bytes(mono[index]))
+    index = index + 1
+  }
+}
+
+/// System font directories, read when no --font-dir is given; missing ones are skipped.
+effect fn addSystemFonts(host: &mut NativeHost) -> ()
+  ! OutOfMemoryError | HostInputError
+  ? &mut HostInput | &mut FileSystem | &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    let directory = run HostInput.variable(b"SystemRoot")
+    if let Option<Bytes>.Some { value } = &directory {
+      let parsed = run Effect.result(WindowsPath.fromNativeBytes(Bytes.asSlice(&value)))
+      if let Result<Path, FileError | OutOfMemoryError>.Success { value: path } = move parsed {
+        let fonts = run Effect.result(Path.join(&path, "Fonts"))
+        if let Result<Path, FileError | OutOfMemoryError>.Success { value: fontPath } = move fonts {
+          drop run Effect.result(addFonts(&mut host, &fontPath, 8))
+        }
+      }
+    }
+    return
+  }
+  let directories: &[string] = &[
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+  ]
+  let mut index: usize = 0
+  while index < directories.length {
+    let parsed = run Effect.result(Path.make(directories[index]))
+    if let Result<Path, FileError | OutOfMemoryError>.Success { value: path } = move parsed {
+      drop run Effect.result(addFonts(&mut host, &path, 8))
+    }
+    index = index + 1
+  }
+}
+
+/// The indices of font files (or of directories) in `listed`, in byte order of their paths.
+effect fn sorted(listed: &[DirectoryEntry], directories: bool) -> List<usize>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut order = List<usize>.make()
+  let mut index: usize = 0
+  while index < listed.length {
+    let wanted = if directories {
+      listed[index].kind.code == 1
+    } else {
+      listed[index].kind.code != 1 && fontFile(Path.rawBytes(&listed[index].path))
+    }
+    if wanted {
+      let mut at = List<usize>.length(&order)
+      run List<usize>.append(&mut order, index)
+      let slots = List<usize>.asMutSlice(&mut order)
+      while at > 0
+        && before(Path.rawBytes(&listed[index].path), Path.rawBytes(&listed[slots[at - 1]].path)) {
+        slots[at] = slots[at - 1]
+        slots[at - 1] = index
+        at = at - 1
+      }
+    }
+    index = index + 1
+  }
+  return move order
+}
+
+effect fn renderFile(args: &[Bytes], parsed: &Parsed) -> i32
+  ! Failure | HostInputError | FileError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  let cwd = run HostInput.workingDirectory()
+  let base = run hostPath(Bytes.asSlice(&cwd))
+  let input = run Effect.mapError(
+    pathFromArgument(&base, Bytes.asSlice(&args[parsed.input])),
+    inputFailure,
+  )
+  let output = run Effect.mapError(
+    pathFromArgument(&base, Bytes.asSlice(&args[parsed.output])),
+    outputFailure,
+  )
+  let mut files = run MachineFileSystem.make()
+  let data = run Effect.mapError(FileSystem.readFile(&input), inputFailure)
+    |> Effect.provideMut<FileSystem>(&mut files)
+  let mut settings = RenderOptions.make()
+  settings.width = parsed.width
+  settings.height = parsed.height
+  settings.zoom = parsed.zoom
+  settings.time = parsed.time
+  let address = run Effect.mapError(Url.fromFilePath(Path.rawBytes(&input)), inputFailure)
+  let parent = if parsed.resourcesDir != args.length {
+    Option<Path>.Some {
+      value: run Effect.mapError(
+        pathFromArgument(&base, Bytes.asSlice(&args[parsed.resourcesDir])),
+        inputFailure,
+      ),
+    }
+  } else {
+    run Path.parent(&input)
+  }
+  let directory = match &parent {
+    Option<Path>.Some { value } => Path.rawBytes(&value)
+    _ => {
+      fail Failure.Input
+    }
+  }
+  let mut resolver = run Effect.mapError(
+    NativeFileSystem.make(directory, ResourceLimits.defaults()),
+    inputFailure,
+  )
+
+  // The embedding viewport is host policy; intrinsic SVG sizing remains in resolve.
+  let viewportWidth = if parsed.viewportWidth != 0 {
+    u32.toF64(parsed.viewportWidth)
+  } else {
+    300.0
+  }
+  let viewportHeight = if parsed.viewportHeight != 0 {
+    u32.toF64(parsed.viewportHeight)
+  } else {
+    150.0
+  }
+  let mut host = run Effect.mapError(NativeHost.make(viewportWidth, viewportHeight), renderFailure)
+  if parsed.fontDir != args.length {
+    let directory = run Effect.mapError(
+      pathFromArgument(&base, Bytes.asSlice(&args[parsed.fontDir])),
+      inputFailure,
+    )
+    run Effect.mapError(addFonts(&mut host, &directory, 0), inputFailure)
+      |> Effect.provideMut<FileSystem>(&mut files)
+  } else {
+    run addSystemFonts(&mut host) |> Effect.provideMut<FileSystem>(&mut files)
+  }
+  run addGenerics(&mut host)
+  let mut environment = host.environment(&address)
+  environment.structure.policy.mode = parsed.mode
+
+  // Without --language the index is args.length; the modulo keeps the unused view in range.
+  let languages = [Bytes.asSlice(&args[parsed.language % args.length])]
+  if parsed.language != args.length {
+    environment.structure.languages = Slice.view<&[u8]>(&languages, 0, 1)
+  }
+  if parsed.fragment != args.length {
+    let encoded = Bytes.asSlice(&args[parsed.fragment])
+    environment.structure.fragment = Option<&[u8]>.Some {
+      value: Slice.view<u8>(encoded, parsed.fragmentStart, encoded.length - parsed.fragmentStart),
+    }
+  }
+  let image = run Effect.mapError(
+    renderer.render(Bytes.asSlice(&data), &settings, &environment),
+    renderFailure,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  let encoded = run Effect.mapError(
+    png.encodePixels(image.width(), image.height(), image.data()),
+    encodeFailure,
+  )
+
+  // Only open/truncate the destination once the entire PNG has been produced successfully.
+  run Effect.mapError(FileSystem.writeFile(&output, Bytes.asSlice(&encoded)), outputFailure)
+    |> Effect.provideMut<FileSystem>(&mut files)
+  return 0
+}
+
+effect fn process() -> i32
+  ! Failure | HostInputError | FileError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator {
+  let count = run HostInput.argumentCount()
+  let mut args = List<Bytes>.make()
+  let mut index: usize = 1
+  while index < count {
+    let argument = run HostInput.argument(index)
+    if let Option<Bytes>.Some { value } = move argument {
+      run List<Bytes>.append(&mut args, move value)
+    } else {
+      run stderr("svg-render-test-harness: unable to obtain command-line argument\n")
+      return 1
+    }
+    index = index + 1
+  }
+  let values = List<Bytes>.asSlice(&args)
+  let result = options.parse(values)
+  if let Result<Parsed, ArgumentError>.Failure { error } = &result {
+    run stderr(options.message(error))
+    return 2
+  }
+  if let Result<Parsed, ArgumentError>.Success { value } = &result {
+    if value.action == Action.Render {
+      return run renderFile(values, &value)
+    }
+    let mut writer = StdoutWriter.make()
+    let text = if value.action == Action.Help {
+      HELP
+    } else {
+      "svg-render-test-harness 0.1.0\n"
+    }
+    run Writer.writeString(text) |> Effect.provideMut<Writer>(&mut writer)
+    run Writer.flush() |> Effect.provideMut<Writer>(&mut writer)
+    return 0
+  }
+  return 2
+}
+
+effect fn failedStage(error: Failure) -> i32
+  ! WriterError {
+  let text = match error {
+    Failure.Input => "svg-render-test-harness: unable to read input SVG file\n"
+    Failure.Output => "svg-render-test-harness: unable to write output PNG file\n"
+    Failure.Render => "svg-render-test-harness: render failed (invalid SVG or host style context, no usable installed serif font, invalid or excessive image size, geometry precision/resource limit, or allocation failure)\n"
+    Failure.Encode => "svg-render-test-harness: PNG encoding failed (invalid image size or allocation failure)\n"
+  }
+  run stderr(text)
+  return 1
+}
+
+effect fn failed<E>(error: E) -> i32
+  ! WriterError {
+  drop error
+  run stderr(
+    "svg-render-test-harness: host input, filesystem initialization, allocation, or console output failed\n",
+  )
+  return 1
+}
+
+// Even a broken stderr must produce a failure status, not an unhandled effect.
+effect fn failedDiagnostic<E>(error: E) -> i32 {
+  drop error
+  return 1
+}
+
+pub effect fn main() -> i32
+  ? &mut HostInput {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  return run Effect.catchAll(
+    Effect.catchAll(Effect.catch<Failure>(process(), failedStage), failed),
+    failedDiagnostic,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn hostPath(raw: &[u8]) -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.fromNativeBytes(raw)
+  } else {
+    return run Path.fromBytes(raw)
+  }
+}

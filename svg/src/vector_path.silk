@@ -1,0 +1,99 @@
+//! Shared SVG-to-vector path conversion. Exact ellipse primitives retain source
+//! tangents and curvature for stroke joins; flattening belongs to the backend.
+import scene { RenderError }
+import svg_geometry.geometry { Path, Point, Segment }
+import svg_geometry.arcs { NormalizedArc }
+import svg_geometry.arcs
+import vector.path { Path as VectorPath }
+import vector.geometry { Point as VectorPoint }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+/// Converts absolute SVG segments without approximation or device-scale variants.
+/// An unrepresentable normalized ellipse fails rather than substituting a line.
+pub effect fn convert(source: &Path) -> VectorPath
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = VectorPath.make()
+  let segments = source.segments()
+
+  // Room for every segment up front: an ellipse arc takes five points, the most of any.
+  let mut points: usize = 0
+  let mut k: usize = 0
+  while k < segments.length {
+    let count: usize = match &segments[k] {
+      Segment.MoveTo { to } => 1
+      Segment.LineTo { to } => 1
+      Segment.QuadraticTo { control, to } => 2
+      Segment.CubicTo { control1, control2, to } => 3
+      Segment.ArcTo { arc } => 5
+      Segment.Close => 0
+    }
+    points = points + count
+    k = k + 1
+  }
+  run result.reserve(segments.length, points)
+  let mut current = Point.new(0.0, 0.0)
+  let mut start = current
+  let mut i: usize = 0
+  while i < segments.length {
+    match &segments[i] {
+      Segment.MoveTo { to } => {
+        let xy = to.coordinates()
+        run result.moveTo(xy[0], xy[1])
+        current = to
+        start = to
+      }
+      Segment.LineTo { to } => {
+        let xy = to.coordinates()
+        run result.lineTo(xy[0], xy[1])
+        current = to
+      }
+      Segment.QuadraticTo { control, to } => {
+        let c = control.coordinates()
+        let xy = to.coordinates()
+        run result.quadTo(c[0], c[1], xy[0], xy[1])
+        current = to
+      }
+      Segment.CubicTo { control1, control2, to } => {
+        let a = control1.coordinates()
+        let b = control2.coordinates()
+        let xy = to.coordinates()
+        run result.cubicTo(a[0], a[1], b[0], b[1], xy[0], xy[1])
+        current = to
+      }
+      Segment.ArcTo { arc } => {
+        match &arcs.normalize(current, arc) {
+          NormalizedArc.Empty => {}
+          NormalizedArc.Line { end } => {
+            let xy = end.coordinates()
+            run result.lineTo(xy[0], xy[1])
+          }
+          NormalizedArc.Ellipse { center, axisX, axisY, sweep, end } => {
+            let c = center.coordinates()
+            let x = axisX.coordinates()
+            let y = axisY.coordinates()
+            let to = end.coordinates()
+            run result.ellipseArcTo(
+              VectorPoint.new(c[0], c[1]),
+              VectorPoint.new(x[0], x[1]),
+              VectorPoint.new(y[0], y[1]),
+              0.0,
+              sweep,
+              VectorPoint.new(to[0], to[1]),
+            )
+          }
+          NormalizedArc.Limited => {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        current = arc.to
+      }
+      Segment.Close => {
+        run result.close()
+        current = start
+      }
+    }
+    i = i + 1
+  }
+  return move result
+}

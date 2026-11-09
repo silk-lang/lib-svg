@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes; Object-bbox zero dimensions suppress even one-stop paint; otherwise zero/one stops resolve before geometric distribution, while two-or-more-stop identical circles (including radius zero) paint nothing. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="8">
+<rect x="0" y="0" width="32" height="8" fill="white"/><rect x="16" y="0" width="16" height="8" fill="lime"/>
+</svg>

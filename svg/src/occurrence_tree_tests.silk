@@ -1,0 +1,109 @@
+//! Selector behavior over actual use occurrences, not a synthetic tree provider.
+import silk.text.string { String }
+import occurrence_tree { Tree, Cache }
+import occurrence_tree
+import structure { Graph, Options, StructureError }
+import structure
+import resources { Resolver, DataOnly, Limits as ResourceLimits }
+import url { Url, UrlError }
+import silk.xml.document { XmlDocument }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.lexer
+import svg_css.selectors { SelectorList, Specificity }
+import svg_css.selectors
+import svg_css.element { MatchContext, NO_ELEMENT }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn named(graph: &Graph, name: &[u8], shadow: bool) -> usize {
+  let mut i: usize = 0
+  while i < graph.occurrences.length() {
+    let occurrence = &graph.occurrences.asSlice()[i]
+    if (occurrence.scope != 0) == shadow {
+      let document = &graph.documents.asSlice()[occurrence.source.document.index].document
+      match &(XmlDocument.attribute(document, occurrence.source.node, "", "id")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => {
+          if equal(value, name) {
+            return i
+          }
+        }
+        _ => {}
+      }
+    }
+    i = i + 1
+  }
+  return NO_ELEMENT
+}
+
+effect fn check(tree: &Tree<'_>, selector: &[u8], node: usize, host: usize, expected: bool) -> ()
+  ! CssError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run Testing.expect(node != NO_ELEMENT, "fixture element exists")
+  let tokens = run lexer.tokenize(selector, &Limits.make())
+  let parsed = run selectors.parse(&tokens, tokens.all(), &[], &Limits.make())
+  let mut context = MatchContext.make(tree.graph.root.index, NO_ELEMENT)
+  context.shadowHost = host
+  let actual = match &parsed {
+    Option<SelectorList>.Some { value } => match &run selectors.matchElement(
+      &value,
+      &tokens,
+      tree,
+      node,
+      &mut context,
+    ) {
+      Option<Specificity>.Some { value: specificity } => true
+      _ => false
+    }
+    _ => {
+      run Testing.expect(false, "valid fixture selector")
+      return
+    }
+  }
+  run Testing.expect(
+    actual == expected,
+    "selector sees only the requested tree scope and correct inherited language",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance
+// https://drafts.csswg.org/css-shadow-1/#host-element-in-tree
+// https://drafts.csswg.org/css-shadow-1/#host-selector
+// https://www.w3.org/TR/selectors-4/#lang-pseudo
+test effect fn actualShadowAndLightChildrenStayInTheirSelectorScopes() -> ()
+  ! CssError | UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let base = run Url.parseAbsolute(b"https://example.test/input.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let graph = run structure.build(
+    b"<svg xmlns='http://www.w3.org/2000/svg' lang='en'><defs class='source'><g id='shape'><rect id='leaf'/></g></defs><use id='host' class='hot' href='#shape' lang='fr'><rect id='light'/></use></svg>",
+    &base,
+    &Options.defaults(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut cache = Cache.make()
+  run cache.extend(&graph) |> Effect.provideMut<Allocator>(&mut allocator)
+  let tree = occurrence_tree.make(&graph, &cache)
+  let host = named(&graph, b"host", false)
+  let leaf = named(&graph, b"leaf", true)
+  let light = named(&graph, b"light", false)
+  run check(&tree, b".source rect", leaf, host, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b"use rect", leaf, host, false) |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b":host(.hot) > g > rect:lang(fr)", leaf, host, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b":host:has(> #shape)", host, host, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b":host:has(> #light)", host, host, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b":host(:has(> #light))", host, host, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b"use > rect:first-child:last-child", light, NO_ELEMENT, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run check(&tree, b":root", named(&graph, b"shape", true), host, false)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

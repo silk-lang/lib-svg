@@ -1,0 +1,313 @@
+// Frames of a document parsed once must match a fresh parse at the same time, in any time
+// order. https://svgwg.org/specs/animations/ and https://www.w3.org/TR/css-animations-1/
+import lib { RenderOptions, RenderError, Animated, Pixmap as Image }
+import lib as renderer
+import environment { Environment, noHostStyles }
+import svg_core.structure { Options as StructureOptions }
+import svg_core.resources {
+  Resolver,
+  DataOnly,
+  Limits as ResourceLimits,
+  ProcessingMode,
+  ResourceKind,
+  ResourceError,
+  Response
+}
+import silk.collections.bytes { Bytes }
+import silk.core.ownership { Copy }
+import svg_core.url { Url, UrlError }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import svg_fonts.database { FontDatabase }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.core.option { Option }
+import silk.num.usize
+
+fn animatedEnvironment<'a>(base: &'a Url, fonts: &'a FontDatabase) -> Environment<'a, 'a> {
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let mut structure = StructureOptions.defaults()
+  structure.policy.mode = ProcessingMode.Animated
+  return Environment<'a, 'a> {
+    base: base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: move structure,
+    fonts: fonts,
+    styles: noHostStyles(),
+  }
+}
+
+effect fn invalidBase(error: UrlError) -> never
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidStyleContext
+}
+
+fn same(left: &Image, right: &Image) -> bool {
+  if Image.width(left) != Image.width(right) || Image.height(left) != Image.height(right) {
+    return false
+  }
+  let a = Image.data(left)
+  let b = Image.data(right)
+  let mut i: usize = 0
+  while i < a.length {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// Forward, backward, repeated and past-the-end times.
+const TIMES: [f64; 10] = [0.0, 0.5, 1.0, 1.5, 2.25, 3.0, 0.25, 1.0, 6.0, 0.75]
+
+/// 0 when every frame of `data` matches its fresh render and some frame differs from the
+/// first; else 1 + the index of the first time whose frame differs from its fresh render,
+/// or 100 when the document never changes.
+effect fn framesMatch(data: &[u8]) -> usize
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Effect.catch<UrlError>(Url.fromFilePath(b"/fixtures/input.svg"), invalidBase)
+  let fonts = FontDatabase.make()
+  let environment = animatedEnvironment(&base, &fonts)
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut animated = run renderer.parseAnimated(data, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  let mut options = RenderOptions.make()
+  let mut changes = false
+  let mut first = Option<Image>.None
+  let mut i: usize = 0
+  while i < TIMES.length {
+    options.time = TIMES[i]
+    let list = run animated.frame(&options, &environment)
+      |> Effect.provideMut<Resolver>(&mut resolver)
+    let frame = run renderer.renderDisplayList(&list)
+    let fresh = run renderer.render(data, &options, &environment)
+      |> Effect.provideMut<Resolver>(&mut resolver)
+    if !same(&frame, &fresh) {
+      return i + 1
+    }
+    match &first {
+      Option<Image>.Some { value } => {
+        if !same(&frame, &value) {
+          changes = true
+        }
+      }
+      _ => {}
+    }
+    if i == 0 {
+      first = Option<Image>.some(move frame)
+    }
+    i = i + 1
+  }
+  return if changes {
+    0
+  } else {
+    100
+  }
+}
+
+test effect fn smilFramesMatchFreshParses() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let cases: [&[u8]; 6] = [
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='20' height='20' fill='green'><animate attributeName='x' from='0' to='20' dur='2s' repeatCount='2' accumulate='sum'/></rect></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='20' height='20' fill='blue'><set id='a' attributeName='fill' to='green' begin='1s' dur='1s'/><set attributeName='fill' to='red' begin='a.end'/><animate attributeName='width' values='20;40;10' keyTimes='0;0.3;1' dur='3s' fill='freeze'/></rect></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='10' height='10' fill='green' transform='scale(2)'><animateTransform attributeName='transform' type='rotate' from='0 5 5' to='90 5 5' dur='2s' additive='sum'/><animateMotion from='0,0' to='40,0' dur='2s'/></rect></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><path id='p' d='M10 0 V40' fill='none'/><rect width='10' height='10' fill='green'><animateMotion dur='2s' rotate='auto' repeatCount='indefinite'><mpath href='#p'/></animateMotion></rect></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><defs><linearGradient id='a'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'><animate attributeName='stop-color' to='yellow' dur='2s'/></stop></linearGradient><linearGradient id='b'><stop stop-color='green'/></linearGradient></defs><rect width='60' height='60' fill='url(#a)'><set attributeName='fill' to='url(#b)' begin='1.4s' dur='1s'/></rect></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><defs><circle id='c' r='10' fill='green'/><rect id='s' width='20' height='20' fill='blue'/></defs><use href='#c' x='20' y='20'><animate attributeName='x' from='10' to='50' dur='3s'/></use><circle cx='5' cy='5' r='5'><animate attributeName='r' values='5;1;5' dur='1s' repeatCount='indefinite'/></circle></svg>",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let code = run framesMatch(cases[i]) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(code != 100, "every case animates")
+    run Testing.expect(code == 0, "frames of a document parsed once match fresh parses")
+    i = i + 1
+  }
+}
+
+test effect fn cssAnimationFramesMatchFreshParses() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let cases: [&[u8]; 3] = [
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><style>@keyframes m { from { x: 0px } to { x: 40px } } rect { animation: m 1s linear 2 alternate }</style><rect width='10' height='10' fill='green'/></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><style>@keyframes c { from { fill: rgb(0,0,0) } to { fill: rgb(0,200,100) } } @keyframes t { to { transform: translate(40px, 20px) } } rect { animation: c 2s linear, t 3s linear 0.5s }</style><rect width='20' height='20'/></svg>",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><style>@keyframes m { from { x: 0px } to { x: 40px } } rect { animation: m 2s linear }</style><rect width='10' height='10' fill='green'><set attributeName='y' to='30' begin='1s'/></rect></svg>",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    run Testing.expect(
+      (run framesMatch(cases[i]) |> Effect.provideMut<Allocator>(&mut allocator)) == 0,
+      "CSS animation frames match fresh parses",
+    )
+    i = i + 1
+  }
+}
+
+// The retained document's storage stays bounded however many frames render.
+test effect fn framesDoNotAccumulateWrites() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let data = b"<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20'><rect width='10' height='10' fill='green'><animate attributeName='x' from='0' to='10' dur='1s' repeatCount='indefinite'/></rect></svg>"
+  let base = run Effect.catch<UrlError>(Url.fromFilePath(b"/fixtures/input.svg"), invalidBase)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let fonts = FontDatabase.make()
+  let environment = animatedEnvironment(&base, &fonts)
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let mut animated = run renderer.parseAnimated(data, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(animated.animated(), "the document has a SMIL animation")
+  let mut options = RenderOptions.make()
+
+  // Frames 1 and 39 sample the same time, so they write values of the same length.
+  let mut counts: [usize; 2] = [0, 0]
+  let mut i: usize = 0
+  while i < 40 {
+    options.time = if i == 1 || i == 39 {
+      0.25
+    } else {
+      usize.toF64(i) * 0.1
+    }
+    let list = run animated.frame(&options, &environment)
+      |> Effect.provideMut<Resolver>(&mut resolver)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    drop list
+    if i == 1 {
+      counts[0] = animated.retainedBytes()
+    }
+    i = i + 1
+  }
+  counts[1] = animated.retainedBytes()
+  run Testing.expect(counts[0] == counts[1], "document storage is the same after 40 frames")
+}
+
+// 4 x 4 PNGs: opaque red, and blue at half alpha.
+fn redPng() -> &'static [u8] {
+  return b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x04\x00\x00\x00\x04\x08\x06\x00\x00\x00\xa9\xf1\x9e\x7e\x00\x00\x00\x12\x49\x44\x41\x54\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x19\x33\x90\x2e\x00\x00\x3c\x40\x1f\xe1\xe0\x81\x77\xb4\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82"
+}
+
+fn bluePng() -> &'static [u8] {
+  return b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x04\x00\x00\x00\x04\x08\x06\x00\x00\x00\xa9\xf1\x9e\x7e\x00\x00\x00\x11\x49\x44\x41\x54\x78\x9c\x63\x60\x60\xf8\xdf\x80\x8a\x49\x16\x00\x00\x1a\x59\x17\xf1\x55\xf1\xb6\xdc\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82"
+}
+
+fn endsWith(text: &[u8], suffix: &[u8]) -> bool {
+  if text.length < suffix.length {
+    return false
+  }
+  let start = text.length - suffix.length
+  let mut i: usize = 0
+  while i < suffix.length {
+    if text[start + i] != suffix[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+/// Serves red.png, blue.png and missing.png (a failure), counting every fetch.
+struct Counting {
+  fetches: usize,
+}
+
+impl Counting {
+  effect fn fetch(self: &mut Self, url: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    drop kind
+    self.fetches = self.fetches + 1
+    let text = url.bytes()
+    if endsWith(text, b"/red.png") {
+      return Response.fromBytes(run Bytes.copy(redPng()))
+    }
+    if endsWith(text, b"/blue.png") {
+      return Response.fromBytes(run Bytes.copy(bluePng()))
+    }
+    fail ResourceError.Io
+  }
+}
+
+impl Resolver for Counting {
+  fetch: Counting.fetch
+}
+
+struct Fetched {
+  // 0 when every frame matched its fresh render, else 1 + the first mismatching frame.
+  mismatch: usize,
+  // Fetches made by the frames of the document parsed once.
+  fetches: usize,
+  kept: usize,
+}
+
+impl Copy for Fetched {}
+
+effect fn imageFrames(data: &[u8], times: &[f64]) -> Fetched
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Effect.catch<UrlError>(Url.fromFilePath(b"/fixtures/input.svg"), invalidBase)
+  let fonts = FontDatabase.make()
+  let environment = animatedEnvironment(&base, &fonts)
+  let mut retained = Counting { fetches: 0 }
+  let mut fresh = Counting { fetches: 0 }
+  let mut animated = run renderer.parseAnimated(data, &environment)
+    |> Effect.provideMut<Resolver>(&mut retained)
+  let mut options = RenderOptions.make()
+  let mut result = Fetched { mismatch: 0, fetches: 0, kept: 0 }
+  let mut i: usize = 0
+  while i < times.length {
+    options.time = times[i]
+    let list = run animated.frame(&options, &environment)
+      |> Effect.provideMut<Resolver>(&mut retained)
+    let frame = run renderer.renderDisplayList(&list)
+    let expected = run renderer.render(data, &options, &environment)
+      |> Effect.provideMut<Resolver>(&mut fresh)
+    if result.mismatch == 0 && !same(&frame, &expected) {
+      result.mismatch = i + 1
+    }
+    i = i + 1
+  }
+  result.fetches = retained.fetches
+  result.kept = animated.keptImages()
+  return result
+}
+
+// Images are fetched and decoded once, not once per frame, and frames still match fresh parses.
+test effect fn framesKeepDecodedImages() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let moving = b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'><image href='http://example.test/red.png' width='20' height='20'><animate attributeName='x' from='0' to='20' dur='2s'/></image><image href='http://example.test/missing.png' width='20' height='20'/></svg>"
+  let result = run imageFrames(moving, &TIMES) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(result.mismatch == 0, "frames with images match fresh parses")
+  run Testing.expect(
+    result.fetches == 2,
+    "each URL is fetched once over ten frames, failures included",
+  )
+  run Testing.expect(result.kept == 2, "both URLs stay kept while frames use them")
+}
+
+// An animated href switches between kept images; an image unused for two frames is dropped.
+test effect fn framesDropImagesNoLongerUsed() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let switching = b"<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20'><image href='http://example.test/red.png' width='20' height='20'><set attributeName='href' to='http://example.test/blue.png' begin='1s' dur='1s'/></image></svg>"
+  let alternating: [f64; 5] = [0.0, 1.5, 0.5, 1.25, 0.25]
+  let result = run imageFrames(switching, &alternating)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(result.mismatch == 0, "frames with an animated href match fresh parses")
+  run Testing.expect(result.fetches == 2, "red and blue are each fetched once")
+  run Testing.expect(result.kept == 2, "an image skipped by one frame stays kept")
+  let gap: [f64; 4] = [1.5, 3.0, 3.0, 1.5]
+  let after = run imageFrames(switching, &gap) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(after.mismatch == 0, "frames after the set ends match fresh parses")
+  run Testing.expect(after.fetches == 3, "blue is fetched again after two frames without it")
+  run Testing.expect(after.kept == 2, "blue was used last frame and red the one before")
+}

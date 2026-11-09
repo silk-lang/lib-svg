@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140">
+<g font-family="Noto Sans" font-size="40" stroke-width="5" stroke-opacity="0.5">
+<text x="10" y="50" fill="blue" text-decoration="underline">test</text>
+<text x="10" y="50" fill="none" stroke="lime" text-decoration="underline">test</text>
+<text x="120" y="50" fill="none" stroke="lime" text-decoration="underline">test</text>
+<text x="120" y="50" fill="blue" text-decoration="underline">test</text>
+<text x="10" y="110" fill="blue" text-decoration="line-through">test</text>
+<text x="10" y="110" fill="none" stroke="lime" text-decoration="line-through">test</text>
+</g>
+</svg>

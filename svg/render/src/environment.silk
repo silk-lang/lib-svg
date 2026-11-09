@@ -1,0 +1,588 @@
+//! Host-owned styling inputs. Font metrics and system palettes are explicit, not OS guesses.
+import svg_core.document_styles { StyledGraph }
+import svg_core.document_styles
+import svg_core.stylesheets { Catalog, HostStyles, HostFonts, HostSnapshot, PreparedCatalog }
+import svg_core.resources { Resolver, ProcessingMode, Policy }
+import svg_geometry.geometry { Size }
+import svg_core.url { Url }
+import svg_core.scene { RenderError }
+import svg_core.structure { Options as StructureOptions, Graph, StructureError }
+import svg_core.view_selection
+import svg_css.computed { HostContext, ComputedError }
+import svg_css.dimensions { Context as DimensionContext }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Context as ColorContext, Color, Identity }
+import silk.num.u64
+import svg_css.tokens { Limits, CssError }
+import svg_css.tokens
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.value_cursor { Cursor }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Value, Mode }
+import svg_css.values
+import svg_css.text_values { TextValue }
+import svg_css.text_values
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+import svg_fonts.database { FontDatabase }
+
+pub struct Environment<'a, 'h> {
+  pub base: &'a Url,
+  // Initial metrics must describe the host's selected font; finite/nonnegative
+  // validation cannot establish their provenance. NativeHost measures a real face.
+  pub media: MediaEnvironment,
+  // Absolute, fully resolved host colors; currentColor/system references are invalid.
+  pub colors: ColorContext,
+  // A parsed family list, not a CSS-wide initial/inherit/unset/revert keyword.
+  pub fontFamily: &'a [u8],
+  // Concrete font shorthand values, indexed caption/icon/menu/message-box/small-caption/status-bar.
+  pub systemFonts: [&'a [u8]; 6],
+  pub cssLimits: Limits,
+  pub structure: StructureOptions<'a>,
+  /// The faces text may use (CSS Fonts 4 #font-matching-algorithm's installed fonts).
+  pub fonts: &'a FontDatabase,
+  /// Initial values and the user-agent sheet prepared once by the host, so documents skip
+  /// parsing them; none parses them per document.
+  pub styles: Option<&'h HostStyles>,
+}
+
+fn nonnegative(value: f64) -> bool {
+  return f64.isFinite(value) && value >= 0.0
+}
+
+fn absolute(color: &Color) -> bool {
+  match &color.identity {
+    Identity.Absolute => {}
+    _ => {
+      return false
+    }
+  }
+  return color.missing == 0 && f64.isFinite(color.channels[0]) && f64.isFinite(color.channels[1])
+    && f64.isFinite(color.channels[2])
+    && nonnegative(color.alpha)
+    && color.alpha <= 1.0
+}
+
+effect fn validate(environment: &Environment<'_, '_>) -> ()
+  ! RenderError {
+  let context = &environment.media.initial
+  let metrics = [
+    context.fontSize,
+    context.rootFontSize,
+    context.xHeight,
+    context.rootXHeight,
+    context.capHeight,
+    context.rootCapHeight,
+    context.zeroAdvance,
+    context.rootZeroAdvance,
+    context.ideographAdvance,
+    context.rootIdeographAdvance,
+    context.lineHeight,
+    context.rootLineHeight,
+    context.viewportWidth,
+    context.viewportHeight,
+    context.smallViewportWidth,
+    context.smallViewportHeight,
+    context.dynamicViewportWidth,
+    context.dynamicViewportHeight,
+    context.parentFontSize,
+    context.parentXHeight,
+    context.parentCapHeight,
+    context.parentZeroAdvance,
+    context.parentIdeographAdvance,
+    context.parentLineHeight,
+    context.initialFontSize,
+    context.mathFontSize,
+    environment.media.deviceWidth,
+    environment.media.deviceHeight,
+    environment.media.resolutionDppx,
+  ]
+  let mut i: usize = 0
+  while i < metrics.length {
+    if !nonnegative(metrics[i]) {
+      fail RenderError.InvalidStyleContext
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < context.fontSizeKeywords.length {
+    if !nonnegative(context.fontSizeKeywords[i]) {
+      fail RenderError.InvalidStyleContext
+    }
+    i = i + 1
+  }
+  if !f64.isFinite(context.parentFontWeight) || context.parentFontWeight < 1.0
+    || context.parentFontWeight > 1000.0
+    || !nonnegative(context.parentFontStretch)
+    || context.parentFontStretch == 0.0
+    || (!environment.media.infiniteResolution && environment.media.resolutionDppx == 0.0)
+    || !absolute(&environment.colors.currentColor) {
+    fail RenderError.InvalidStyleContext
+  }
+  i = 0
+  while i < environment.colors.system.length {
+    if !absolute(&environment.colors.system[i]) {
+      fail RenderError.InvalidStyleContext
+    }
+    i = i + 1
+  }
+}
+
+effect fn systemFont(catalog: &mut Catalog<'_>, source: &[u8], limits: &Limits) -> TextValue
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let tokens = run lexer.tokenize(source, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let parsed = run text_values.parse(
+    &mut catalog.engine.values.numerics,
+    Property.Font,
+    &input,
+    &mut cursor,
+    false,
+  )
+  if !cursor.done(&input) {
+    fail RenderError.InvalidStyleContext
+  }
+  match move parsed {
+    Option<TextValue>.Some { value } => {
+      let mut size = false
+      let mut family = false
+      let mut i: usize = 0
+      while i < value.items.length() {
+        if value.items.asSlice()[i].property == Property.FontSize {
+          size = true
+        }
+        if value.items.asSlice()[i].property == Property.FontFamily {
+          family = true
+        }
+        i = i + 1
+      }
+      if !size || !family {
+        fail RenderError.InvalidStyleContext
+      }
+      return move value
+    }
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+}
+
+effect fn familyValue(catalog: &mut Catalog<'_>, source: &[u8], limits: &Limits) -> ValueId
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let tokens = run lexer.tokenize(source, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let parsed = run values.parse(&mut catalog.engine.values, Property.FontFamily, &input, Mode.Css)
+  let family = match &parsed {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+
+  // values.parse also accepts CSS-wide keywords. A host initial value cannot
+  // inherit/revert to another host and must contain an actual family list.
+  match &catalog.engine.values.get(family).* {
+    Value.Text { value } => {
+      if value.property != Property.FontFamily || value.items.length() == 0 {
+        fail RenderError.InvalidStyleContext
+      }
+    }
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  return family
+}
+
+effect fn sameFont(
+  catalog: &mut Catalog<'_>,
+  environment: &Environment<'_, '_>,
+  index: usize,
+  first: &TextValue,
+) -> TextValue
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = environment.systemFonts[index]
+  if tokens.equal(source, environment.systemFonts[0]) {
+    return run values.copyText(first)
+  }
+  return run systemFont(&mut catalog.*, source, &environment.cssLimits)
+}
+
+effect fn compute<'a, 'h>(graph: &mut Graph, environment: &Environment<'a, 'h>) -> StyledGraph<'h>
+  ! CssError | ComputedError | StructureError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  run validate(environment)
+  let mut catalog = run HostStyles.catalogFor(environment.styles, &environment.cssLimits)
+
+  // The host's fonts, parsed once into the values this catalog reads in place.
+  if catalog.readsHost() {
+    if let Option<&HostStyles>.Some { value: styles } = &environment.styles {
+      if let Option<HostFonts>.Some { value: prepared } = &styles.fonts {
+        if prepared.matches(environment.fontFamily, &environment.systemFonts) {
+          let host = HostContext {
+            dimensions: environment.media.initial,
+            colors: environment.colors,
+            systemFonts: &prepared.fonts,
+            fontFamily: prepared.family,
+            revision: hostRevision(
+              &prepared.primed,
+              &environment.media.initial,
+              &environment.colors,
+            ),
+          }
+          return run styledWith(&mut graph.*, environment, move catalog, &host)
+        }
+      }
+    }
+  }
+  let family = run familyValue(&mut catalog, environment.fontFamily, &environment.cssLimits)
+
+  // Hosts often give one shorthand for all six; it is parsed once and the rest share its values.
+  let first = run systemFont(&mut catalog, environment.systemFonts[0], &environment.cssLimits)
+  let second = run sameFont(&mut catalog, environment, 1, &first)
+  let third = run sameFont(&mut catalog, environment, 2, &first)
+  let fourth = run sameFont(&mut catalog, environment, 3, &first)
+  let fifth = run sameFont(&mut catalog, environment, 4, &first)
+  let sixth = run sameFont(&mut catalog, environment, 5, &first)
+  let fonts = [move first, move second, move third, move fourth, move fifth, move sixth]
+  let host = HostContext {
+    dimensions: environment.media.initial,
+    colors: environment.colors,
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  return run styledWith(&mut graph.*, environment, move catalog, &host)
+}
+
+effect fn styledWith<'a, 'h>(
+  graph: &mut Graph,
+  environment: &Environment<'a, 'h>,
+  catalog: Catalog<'h>,
+  host: &HostContext<'_>,
+) -> StyledGraph<'h>
+  ! CssError | ComputedError | StructureError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = move catalog
+  let fragment = match &environment.structure.fragment {
+    Option<&[u8]>.Some { value } => value
+    _ => match &environment.base.fragment() {
+      Option<&[u8]>.Some { value } => value
+      _ => b""
+    }
+  }
+  let selection = run view_selection.select(
+    &graph.*,
+    fragment,
+    &mut catalog.engine.values,
+    &environment.cssLimits,
+  )
+  return run document_styles.buildGraph(
+    &mut graph.*,
+    move catalog,
+    host,
+    &environment.media,
+    move selection,
+    &environment.cssLimits,
+    &environment.structure,
+  )
+}
+
+/// Parses the host's font family and system fonts once into the prepared catalog of `styles`,
+/// for documents whose environment gives the same sources. Sources a document would reject
+/// are left for each document to parse and report.
+///
+/// The prepared engine's initial values are also computed once for `initial` and `colors`,
+/// for documents whose environment gives the same metrics and palette as well.
+pub effect fn prepareFonts(
+  styles: &mut HostStyles,
+  fontFamily: &[u8],
+  systemFonts: &[&[u8]; 6],
+  initial: &DimensionContext,
+  colors: &ColorContext,
+  limits: &Limits,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if let Option<PreparedCatalog>.Some { value: prepared } = &mut styles.catalog {
+    let mut parsed = run Effect.catch<CssError | RenderError>(
+      hostFonts(&mut prepared.catalog, fontFamily, systemFonts, limits),
+      unprepared,
+    )
+    if let Option<HostFonts>.Some { value: fonts } = &mut parsed {
+      let host = HostContext {
+        dimensions: initial.*,
+        colors: colors.*,
+        systemFonts: &fonts.fonts,
+        fontFamily: fonts.family,
+        revision: PRIMED_REVISION,
+      }
+      let primed = run Effect.catch<CssError | ComputedError>(
+        primeInitials(&mut prepared.catalog, &host, limits),
+        notPrimed,
+      )
+      if primed {
+        fonts.primed = Option<HostSnapshot>.some(
+          HostSnapshot { dimensions: initial.*, colors: colors.* },
+        )
+      }
+    }
+    styles.fonts = move parsed
+  }
+}
+
+// The revision of a host context whose initial values the prepared engine already holds.
+// Any other context uses revision 0, so a document engine copied from the prepared one
+// recomputes its initials.
+const PRIMED_REVISION: usize = 1
+
+// Computes the prepared engine's initial values for `host` (see Engine.primeInitials).
+effect fn primeInitials(catalog: &mut Catalog<'_>, host: &HostContext<'_>, limits: &Limits) -> bool
+  ! CssError | ComputedError | OutOfMemoryError
+  ? &mut Allocator {
+  return run catalog.engine.primeInitials(catalog.buffers.view(), host, limits)
+}
+
+effect fn notPrimed(error: CssError | ComputedError) -> bool {
+  drop error
+  return false
+}
+
+// The host context revision for a document whose metrics and palette are `initial` and
+// `colors`, given what the prepared engine's initial values were computed for.
+fn hostRevision(
+  primed: &Option<HostSnapshot>,
+  initial: &DimensionContext,
+  colors: &ColorContext,
+) -> usize {
+  if let Option<HostSnapshot>.Some { value } = &primed.* {
+    if sameDimensions(&value.dimensions, initial) && sameColors(&value.colors, colors) {
+      return PRIMED_REVISION
+    }
+  }
+  return 0
+}
+
+fn sameNumber(a: f64, b: f64) -> bool {
+  return f64.toBits(a) == f64.toBits(b)
+}
+
+fn sameDimensions(a: &DimensionContext, b: &DimensionContext) -> bool {
+  let mut i: usize = 0
+  while i < 8 {
+    if !sameNumber(a.fontSizeKeywords[i], b.fontSizeKeywords[i]) {
+      return false
+    }
+    i = i + 1
+  }
+  return a.vertical == b.vertical && sameNumber(a.fontSize, b.fontSize)
+    && sameNumber(a.rootFontSize, b.rootFontSize)
+    && sameNumber(a.xHeight, b.xHeight)
+    && sameNumber(a.rootXHeight, b.rootXHeight)
+    && sameNumber(a.capHeight, b.capHeight)
+    && sameNumber(a.rootCapHeight, b.rootCapHeight)
+    && sameNumber(a.zeroAdvance, b.zeroAdvance)
+    && sameNumber(a.rootZeroAdvance, b.rootZeroAdvance)
+    && sameNumber(a.ideographAdvance, b.ideographAdvance)
+    && sameNumber(a.rootIdeographAdvance, b.rootIdeographAdvance)
+    && sameNumber(a.lineHeight, b.lineHeight)
+    && sameNumber(a.rootLineHeight, b.rootLineHeight)
+    && sameNumber(a.viewportWidth, b.viewportWidth)
+    && sameNumber(a.viewportHeight, b.viewportHeight)
+    && sameNumber(a.smallViewportWidth, b.smallViewportWidth)
+    && sameNumber(a.smallViewportHeight, b.smallViewportHeight)
+    && sameNumber(a.dynamicViewportWidth, b.dynamicViewportWidth)
+    && sameNumber(a.dynamicViewportHeight, b.dynamicViewportHeight)
+    && sameNumber(a.parentFontSize, b.parentFontSize)
+    && sameNumber(a.parentXHeight, b.parentXHeight)
+    && sameNumber(a.parentCapHeight, b.parentCapHeight)
+    && sameNumber(a.parentZeroAdvance, b.parentZeroAdvance)
+    && sameNumber(a.parentIdeographAdvance, b.parentIdeographAdvance)
+    && sameNumber(a.parentLineHeight, b.parentLineHeight)
+    && sameNumber(a.parentFontWeight, b.parentFontWeight)
+    && sameNumber(a.parentFontStretch, b.parentFontStretch)
+    && sameNumber(a.initialFontSize, b.initialFontSize)
+    && sameNumber(a.mathFontSize, b.mathFontSize)
+}
+
+fn sameColor(a: &Color, b: &Color) -> bool {
+  let identity = match &a.identity {
+    Identity.Absolute => match &b.identity {
+      Identity.Absolute => true
+      _ => false
+    }
+    Identity.CurrentColor => match &b.identity {
+      Identity.CurrentColor => true
+      _ => false
+    }
+    Identity.System { color } => match &b.identity {
+      Identity.System { color: other } => color == other
+      _ => false
+    }
+  }
+  return identity && a.space == b.space && a.missing == b.missing
+    && sameNumber(a.channels[0], b.channels[0])
+    && sameNumber(a.channels[1], b.channels[1])
+    && sameNumber(a.channels[2], b.channels[2])
+    && sameNumber(a.alpha, b.alpha)
+}
+
+fn sameColors(a: &ColorContext, b: &ColorContext) -> bool {
+  if !sameColor(&a.currentColor, &b.currentColor) {
+    return false
+  }
+  let mut i: usize = 0
+  while i < 19 {
+    if !sameColor(&a.system[i], &b.system[i]) {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+effect fn unprepared(error: CssError | RenderError) -> Option<HostFonts> {
+  drop error
+  return Option<HostFonts>.None
+}
+
+effect fn hostFonts(
+  catalog: &mut Catalog<'_>,
+  fontFamily: &[u8],
+  systemFonts: &[&[u8]; 6],
+  limits: &Limits,
+) -> Option<HostFonts>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let family = run familyValue(&mut catalog.*, fontFamily, limits)
+  let first = run systemFont(&mut catalog.*, systemFonts[0], limits)
+  let second = run hostFont(&mut catalog.*, systemFonts, 1, &first, limits)
+  let third = run hostFont(&mut catalog.*, systemFonts, 2, &first, limits)
+  let fourth = run hostFont(&mut catalog.*, systemFonts, 3, &first, limits)
+  let fifth = run hostFont(&mut catalog.*, systemFonts, 4, &first, limits)
+  let sixth = run hostFont(&mut catalog.*, systemFonts, 5, &first, limits)
+  let mut sources = run List<Bytes>.makeWithCapacity(6)
+  let mut i: usize = 0
+  while i < 6 {
+    run sources.append(run Bytes.copy(systemFonts[i]))
+    i = i + 1
+  }
+  return Option<HostFonts>.some(
+    HostFonts {
+      familySource: run Bytes.copy(fontFamily),
+      fontSources: move sources,
+      family: family,
+      fonts: [move first, move second, move third, move fourth, move fifth, move sixth],
+      primed: Option<HostSnapshot>.None,
+    },
+  )
+}
+
+effect fn hostFont(
+  catalog: &mut Catalog<'_>,
+  systemFonts: &[&[u8]; 6],
+  index: usize,
+  first: &TextValue,
+  limits: &Limits,
+) -> TextValue
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if tokens.equal(systemFonts[index], systemFonts[0]) {
+    return run values.copyText(first)
+  }
+  return run systemFont(&mut catalog.*, systemFonts[index], limits)
+}
+
+effect fn cssFailure(error: CssError) -> never
+  ! RenderError {
+  drop error
+  fail RenderError.TooLarge
+}
+
+effect fn contextFailure(error: ComputedError) -> never
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidStyleContext
+}
+
+effect fn structureFailure(error: StructureError) -> never
+  ! RenderError {
+  match error {
+    StructureError.InvalidXml => {
+      fail RenderError.InvalidXml
+    }
+    StructureError.InvalidRoot => {
+      fail RenderError.InvalidRoot
+    }
+    StructureError.TooLarge => {
+      fail RenderError.TooLarge
+    }
+  }
+}
+
+pub effect fn styles<'a, 'h>(graph: &mut Graph, environment: &Environment<'a, 'h>) -> StyledGraph<
+  'h
+>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  return run Effect.catch<StructureError>(
+    Effect.catch<ComputedError>(
+      Effect.catch<CssError>(compute(&mut graph.*, environment), cssFailure),
+      contextFailure,
+    ),
+    structureFailure,
+  )
+}
+
+/// No host initials, for an [`Environment`] whose documents parse their own initial values.
+pub fn noHostStyles<'a>() -> Option<&'a HostStyles> {
+  return Option<&'a HostStyles>.None
+}
+
+/// Independent SVG image context: host preferences and initial font metrics are
+/// retained, while viewport-dependent CSS and processing policy are local.
+pub fn embedded<'a, 'b, 'h>(
+  host: &'a Environment<'b, 'h>,
+  base: &'a Url,
+  viewport: Size,
+) -> Environment<'a, 'h> {
+  let mut media = host.media
+  media.initial.viewportWidth = viewport.width
+  media.initial.viewportHeight = viewport.height
+  media.initial.smallViewportWidth = viewport.width
+  media.initial.smallViewportHeight = viewport.height
+  media.initial.dynamicViewportWidth = viewport.width
+  media.initial.dynamicViewportHeight = viewport.height
+  let mode = if host.structure.policy.mode == ProcessingMode.Animated
+    || host.structure.policy.mode == ProcessingMode.SecureAnimated {
+    ProcessingMode.SecureAnimated
+  } else {
+    ProcessingMode.SecureStatic
+  }
+  return Environment<'a, 'h> {
+    base: base,
+    media: media,
+    colors: host.colors,
+    fontFamily: host.fontFamily,
+    systemFonts: host.systemFonts,
+    cssLimits: host.cssLimits,
+    fonts: host.fonts,
+    styles: host.styles,
+    structure: StructureOptions {
+      policy: Policy { mode: mode, limits: host.structure.policy.limits },
+      languages: host.structure.languages,
+      supportedExtensions: host.structure.supportedExtensions,
+      fragment: Option<&'a [u8]>.None,
+      limits: host.structure.limits,
+    },
+  }
+}

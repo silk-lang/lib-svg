@@ -1,0 +1,267 @@
+import svg_css.computed { Initials }
+import silk.core.option { Option }
+import svg_core.structure { Options as StructureOptions }
+import svg_fonts.database { FontDatabase }
+import lib { RenderOptions, RenderError, Pixmap as Image }
+import lib as renderer
+import environment { Environment, noHostStyles }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+// Fragments enter exclusively through the existing public host URL contract.
+effect fn renderAt(data: &[u8], url: &[u8]) -> Image
+  ! UrlError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(url)
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let fonts = FontDatabase.make()
+  let environment = Environment {
+    base: &base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: &fonts,
+    styles: noHostStyles(),
+  }
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let options = RenderOptions.make()
+  return run renderer.render(data, &options, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+}
+
+fn samePixels(left: &Image, right: &Image) -> bool {
+  if Image.width(left) != Image.width(right) || Image.height(left) != Image.height(right) {
+    return false
+  }
+  let a = Image.data(left)
+  let b = Image.data(right)
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+// Locked svg11-linking: ordinary IDs display the enclosing document, not a subtree.
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html#SVGFragmentIdentifiers
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html#ViewHighlight
+test effect fn ordinaryFragmentTargetsBeforeStylingWithoutPruningSiblings() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='12' height='4'><style>rect { fill: blue } :target { fill: red }</style><rect id='chosen' width='4' height='4'/><rect x='8' width='4' height='4'/></svg>",
+    b"https://example.test/input.svg#ch%6Fsen",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='12' height='4'><rect width='4' height='4' fill='red'/><rect x='8' width='4' height='4' fill='blue'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "decoded ID sets :target before CSS and leaves siblings rendered",
+  )
+}
+
+// Locked svg2-linking: a selected view overrides the root, retaining omitted values.
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+test effect fn selectedViewOverridesRootAndRetainsUnspecifiedAspectRatio() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8' preserveAspectRatio='none'><defs><view id='detail' viewBox='4 0 4 4'/></defs><rect x='4' width='2' height='4' fill='red'/><rect x='6' width='2' height='4' fill='blue'/></svg>",
+    b"https://example.test/input.svg#detail",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect width='8' height='8' fill='red'/><rect x='8' width='8' height='8' fill='blue'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "viewBox override retains root none alignment and renders root content",
+  )
+}
+
+// Locked svg2-linking: only explicitly supplied view parameters override root values.
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#PreserveAspectRatioAttribute
+test effect fn selectedViewCanOverrideOnlyAspectRatio() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 4 4'><view id='stretch' preserveAspectRatio='none'/><rect width='4' height='4'/></svg>",
+    b"https://example.test/input.svg#stretch",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect width='16' height='8'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "explicit none overrides meet without resetting omitted root viewBox",
+  )
+}
+
+// Locked svg2-linking: viewBox then transform; components in any order; escaped separators.
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+test effect fn svgViewTransformFollowsViewBoxRegardlessOfComponentOrder() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'><rect x='1' y='1' width='2' height='2'/></svg>"
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect x='4' y='2' width='4' height='4'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let urls: [&[u8]; 2] = [
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);transform(translate(2,0)))",
+    b"https://example.test/input.svg#svgView(transform(translate(2%200))%3BviewBox(0%200%208%204))",
+  ]
+  let mut index: usize = 0
+  while index < urls.length {
+    let actual = run renderAt(source, urls[index]) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      samePixels(&actual, &expected),
+      "view transform acts after viewBox scaling, independent of component order",
+    )
+    index = index + 1
+  }
+}
+
+// Locked svg2-linking: unspecified svgView parameters do not reset root parameters.
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+test effect fn svgViewOmittedAspectRatioDiffersFromExplicitMeet() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8' preserveAspectRatio='none'><rect width='4' height='4'/></svg>"
+  let omitted = run renderAt(source, b"https://example.test/input.svg#svgView(viewBox(0,0,4,4))")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let explicit = run renderAt(
+    source,
+    b"https://example.test/input.svg#svgView(preserveAspectRatio(xMidYMid%20meet);viewBox(0,0,4,4))",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let stretched = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect width='16' height='8'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let centered = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect x='4' width='8' height='8'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&omitted, &stretched),
+    "omitted preserveAspectRatio retains explicit root none",
+  )
+  run Testing.expect(
+    samePixels(&explicit, &centered),
+    "explicit default alignment is an override, not an absent value",
+  )
+}
+
+// Locked svg2-linking grammar disallows duplicates and malformed components.
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// Atomic normal-root fallback is the project's explicit error policy, not a claim
+// that the selection prose specifies recovery from every malformed fragment.
+test effect fn invalidSvgViewFallsBackAtomicallyWithoutKeepingValidPrefix() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'><rect x='2' y='1' width='2' height='2'/></svg>"
+  let normal = run renderAt(source, b"https://example.test/input.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let invalid: [&[u8]; 6] = [
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);viewBox(0,0,16,8))",
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);preserveAspectRatio(bogus))",
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);transform(translate(2,)))",
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);unknown(1))",
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4))trailing",
+    b"https://example.test/input.svg#svgView(viewBox(0,0,8,4);)",
+  ]
+  let mut index: usize = 0
+  while index < invalid.length {
+    let actual = run renderAt(source, invalid[index])
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      samePixels(&actual, &normal),
+      "invalid fragment discards every override, including valid prefixes",
+    )
+    index = index + 1
+  }
+
+  // The positive control makes this regression fail if all fragments are ignored.
+  let valid = run renderAt(source, b"https://example.test/input.svg#svgView(viewBox(0,0,8,4))")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !samePixels(&valid, &normal),
+    "valid viewBox changes the view; fallback cannot mean ignoring all fragments",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#MediaFragments
+// Percentages use physical size, not the source viewBox; pixels override directly.
+test effect fn mediaPercentagesUseResolvedSizeNotOriginalViewBox() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 160 80' preserveAspectRatio='none'><rect x='4' width='4' height='8' fill='red'/><rect x='8' width='4' height='8' fill='blue'/></svg>"
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='8'><rect width='8' height='8' fill='red'/><rect x='8' width='8' height='8' fill='blue'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let fragments: [&[u8]; 2] = [
+    b"https://example.test/input.svg#xywh=percent:25,0,50,100",
+    b"https://example.test/input.svg#xywh=pixel:4,0,8,8&t=10,20",
+  ]
+  let mut i: usize = 0
+  while i < fragments.length {
+    let actual = run renderAt(source, fragments[i]) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      samePixels(&actual, &expected),
+      "spatial view replaces viewBox using physical dimensions and preserves independent temporal selection",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// Relative units use the root's computed metrics; the view does not erase CSS.
+test effect fn viewTransformUsesRootMetricsAndRetainsCssTransform() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='64' height='8' style='font-size:4px;transform:translateX(2px)'><rect x='1' width='4' height='8'/></svg>",
+    b"https://example.test/input.svg#svgView(transform(translate(2em,0px)))",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderAt(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='64' height='8'><rect x='11' width='4' height='8'/></svg>",
+    b"https://example.test/input.svg",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "root CSS and metric-normalized view transform both contribute",
+  )
+}

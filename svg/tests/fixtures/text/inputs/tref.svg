@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">
+<defs><text id="source"> A<tspan fill="blue">VA</tspan>  </text></defs>
+<text x="10" y="50" font-family="Noto Sans" font-size="40">Hi <tref xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#source" fill="red"/></text>
+</svg>

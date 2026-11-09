@@ -1,0 +1,209 @@
+//! Planar maps after full CSS 4x4 composition. Projective maps retain the sign of w.
+import svg_geometry.geometry { Transform, Rect }
+import svg_geometry.transforms { Matrix }
+import svg_geometry.transforms
+import vector.geometry { Affine }
+import vector.projective { Homography, HalfPlane }
+import vector.geometry_error { GeometryError, INVALID_INPUT, NUMERIC_LIMIT }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+
+pub union Mapping {
+  Affine { pub value: Transform },
+  Projective { pub value: Homography },
+}
+
+impl Copy for Mapping {}
+
+/// A retained device-space halfplane and its parent. Chains represent physical
+/// viewport boundaries and each flattening boundary's positive-w domain.
+pub struct ProjectionClip {
+  pub parent: Option<usize>,
+  pub plane: HalfPlane,
+}
+
+impl Copy for ProjectionClip {}
+
+impl Mapping {
+  pub fn identity() -> Mapping {
+    return Mapping.Affine { value: Transform.identity() }
+  }
+
+  pub fn isFinite(self: &Self) -> bool {
+    return match &self.* {
+      Mapping.Affine { value } => value.isFinite()
+      Mapping.Projective { value } => value.isFinite()
+    }
+  }
+
+  pub effect fn fromHomography(value: Homography) -> Mapping
+    ! GeometryError {
+    if !value.isFinite() {
+      fail GeometryError { code: INVALID_INPUT }
+    }
+    if value.wx == 0.0 && value.wy == 0.0 && value.ww > 0.0 {
+      let result = Transform.new(
+        value.xx / value.ww,
+        value.yx / value.ww,
+        value.xy / value.ww,
+        value.yy / value.ww,
+        value.xw / value.ww,
+        value.yw / value.ww,
+      )
+      if result.isFinite() {
+        return Mapping.Affine { value: result }
+      }
+    }
+    return Mapping.Projective { value: value }
+  }
+
+  pub effect fn fromMatrix(matrix: &Matrix) -> Mapping
+    ! GeometryError {
+    if !transforms.finite(matrix) {
+      fail GeometryError { code: INVALID_INPUT }
+    }
+    let v = transforms.coefficients(matrix)
+    return run Mapping.fromHomography(
+      Homography {
+        xx: v[0],
+        xy: v[1],
+        xw: v[3],
+        yx: v[4],
+        yy: v[5],
+        yw: v[7],
+        wx: v[12],
+        wy: v[13],
+        ww: v[15],
+      },
+    )
+  }
+
+  /// Parent * child. Visibility halfplanes are retained separately; multiplying
+  /// homographies alone must not make a previously behind-eye region visible.
+  pub effect fn compose(self: &Self, child: &Mapping) -> Mapping
+    ! GeometryError {
+    match &self.* {
+      Mapping.Affine { value: parent } => {
+        match &child.* {
+          Mapping.Affine { value: local } => {
+            let result = parent * local
+            if result.isFinite() {
+              return Mapping.Affine { value: result }
+            }
+            let a = Homography.fromAffine(&parent)
+            let b = Homography.fromAffine(&local)
+            return run Mapping.fromHomography((run a.compose(&b)))
+          }
+          Mapping.Projective { value: local } => {
+            let a = Homography.fromAffine(&parent)
+            return run Mapping.fromHomography((run a.compose(&local)))
+          }
+        }
+      }
+      Mapping.Projective { value: parent } => {
+        match &child.* {
+          Mapping.Affine { value: local } => {
+            let b = Homography.fromAffine(&local)
+            return run Mapping.fromHomography((run parent.compose(&b)))
+          }
+          Mapping.Projective { value: local } => {
+            return run Mapping.fromHomography((run parent.compose(&local)))
+          }
+        }
+      }
+    }
+  }
+
+  /// The parent's inverse denominator restricts a child's pre-parent w to the
+  /// positive halfspace. Affine parents preserve w and require no extra clip.
+  pub effect fn flatteningClip(self: &Self) -> Option<HalfPlane>
+    ! GeometryError {
+    match &self.* {
+      Mapping.Affine { value } => {
+        return Option<HalfPlane>.None
+      }
+      Mapping.Projective { value } => {
+        match &value.inverse() {
+          Option<Homography>.Some { value: inverse } => {
+            return Option<HalfPlane>.some(HalfPlane { x: inverse.wx, y: inverse.wy, w: inverse.ww })
+          }
+          _ => {
+            fail GeometryError { code: NUMERIC_LIMIT }
+          }
+        }
+      }
+    }
+  }
+
+  /// Clip a physical SVG viewport in its own coordinate system, never the AABB
+  /// of its transformed corners. The inverse denominator preserves orientation
+  /// across the projective horizon.
+  pub effect fn clipRectangle(
+    self: &Self,
+    rectangle: Rect,
+    clipX: bool,
+    clipY: bool,
+    parent: Option<usize>,
+    clips: &mut List<ProjectionClip>,
+  ) -> Option<usize>
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    let homography = match &self.* {
+      Mapping.Affine { value } => Homography.fromAffine(&value)
+      Mapping.Projective { value } => value
+    }
+    let inverse = match &homography.inverse() {
+      Option<Homography>.Some { value } => value
+      _ => {
+        fail GeometryError { code: NUMERIC_LIMIT }
+      }
+    }
+    let planes = [
+      HalfPlane { x: inverse.wx, y: inverse.wy, w: inverse.ww },
+      HalfPlane {
+        x: inverse.xx - rectangle.xMin * inverse.wx,
+        y: inverse.xy - rectangle.xMin * inverse.wy,
+        w: inverse.xw - rectangle.xMin * inverse.ww,
+      },
+      HalfPlane {
+        x: rectangle.xMax * inverse.wx - inverse.xx,
+        y: rectangle.xMax * inverse.wy - inverse.xy,
+        w: rectangle.xMax * inverse.ww - inverse.xw,
+      },
+      HalfPlane {
+        x: inverse.yx - rectangle.yMin * inverse.wx,
+        y: inverse.yy - rectangle.yMin * inverse.wy,
+        w: inverse.yw - rectangle.yMin * inverse.ww,
+      },
+      HalfPlane {
+        x: rectangle.yMax * inverse.wx - inverse.yx,
+        y: rectangle.yMax * inverse.wy - inverse.yy,
+        w: rectangle.yMax * inverse.ww - inverse.yw,
+      },
+    ]
+    let mut result = parent
+    let mut i: usize = if inverse.wx == 0.0 && inverse.wy == 0.0 && inverse.ww > 0.0 {
+      1
+    } else {
+      0
+    }
+    while i < planes.length {
+      if (i > 0 && i < 3 && !clipX) || (i >= 3 && !clipY) {
+        i = i + 1
+        continue
+      }
+      let plane = planes[i]
+      if !f64.isFinite(plane.x) || !f64.isFinite(plane.y) || !f64.isFinite(plane.w) {
+        fail GeometryError { code: NUMERIC_LIMIT }
+      }
+      let index = clips.length()
+      run clips.append(ProjectionClip { parent: result, plane: plane })
+      result = Option<usize>.some(index)
+      i = i + 1
+    }
+    return result
+  }
+}

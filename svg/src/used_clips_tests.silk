@@ -1,0 +1,43 @@
+import used_clips
+import silk.xml.document { XmlDocument, XmlError }
+import svg_geometry.geometry { Rect, Point }
+import scene { RenderError }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/css-masking-1/#element-attrdef-clippath-clippathunits
+test effect fn clippingCoordinatesUseSpecifiedUnitsAndDefaultToUserSpace() -> ()
+  ! AssertionError<'static> | XmlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let document = run XmlDocument.parse(b"<clipPath clipPathUnits='objectBoundingBox'/>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let viewport = Rect { xMin: 0.0, yMin: 0.0, xMax: 200.0, yMax: 100.0 }
+  let bounds = Rect { xMin: 10.0, yMin: 20.0, xMax: 50.0, yMax: 40.0 }
+  let object = run used_clips.coordinates(&document, document.root(), viewport, bounds)
+  run Testing.expect(
+    match &object {
+      Option<used_clips.Coordinates>.Some { value } => {
+        let point = (value.mapping * Point.new(0.5, 0.5)).coordinates()
+        point[0] == 30.0 && point[1] == 30.0 && value.user.width() == 200.0
+          && value.user.height() == 100.0
+      }
+      _ => false
+    },
+    "normalized clip coordinates include the referring object's origin and dimensions; content percentages keep the viewport (coords.html#ObjectBoundingBoxUnits)",
+  )
+  let invalid = run XmlDocument.parse(b"<clipPath clipPathUnits='OBJECTBOUNDINGBOX'/>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let user = run used_clips.coordinates(&invalid, invalid.root(), viewport, bounds)
+  run Testing.expect(
+    match &user {
+      Option<used_clips.Coordinates>.Some { value } => {
+        let point = (value.mapping * Point.new(0.5, 0.5)).coordinates()
+        point[0] == 0.5 && point[1] == 0.5 && value.user.width() == 200.0
+      }
+      _ => false
+    },
+    "invalid case-sensitive units use the userSpaceOnUse default",
+  )
+}

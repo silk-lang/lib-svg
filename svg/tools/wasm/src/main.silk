@@ -1,0 +1,259 @@
+//! WebAssembly exports for the SVG renderer: SVG bytes and font files in, an RGBA image out.
+//!
+//! The module keeps no state between calls. `svg_render` takes the byte lengths of its inputs,
+//! allocates them, and asks the host to copy each in with `host.input(slot, pointer, length)`.
+//! The image goes back through `host.output(kind, pointer, byteLength)` while it is alive, so
+//! the host must copy it out before returning.
+import host { hostInput, hostOutput }
+import libm
+import svg_render.lib { RenderOptions, RenderError }
+import svg_render.lib as renderer
+import svg_render.native_environment { NativeHost, NativeHostError }
+import svg_fonts.database { Generic, FontDatabase }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits }
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.mem.pointer { Pointer }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+/// Input slots the host fills.
+const SVG: u32 = 0
+
+const FONTS: u32 = 1
+
+/// Output kinds the host receives.
+const PIXELS: u32 = 0
+
+const SIZE: u32 = 1
+
+/// Status codes.
+const OK: i32 = 0
+
+const INVALID_DOCUMENT: i32 = 1
+
+const INVALID_FONT: i32 = 2
+
+const TOO_LARGE: i32 = 3
+
+const OUT_OF_MEMORY: i32 = 4
+
+pub fn main() -> i32 {
+  return 0
+}
+
+effect fn input(slot: u32, length: u32) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut bytes = run Bytes.zeroed(u32.toUsize(length))
+  if length != 0 {
+    unsafe {
+      hostInput(slot, Pointer.fromMutSlice<u8>(Bytes.asMutSlice(&mut bytes)), length)
+    }
+  }
+  return move bytes
+}
+
+fn output(kind: u32, bytes: &[u8]) -> () {
+  unsafe {
+    hostOutput(kind, Pointer.fromSlice<u8>(bytes), usize.toU32(bytes.length))
+  }
+}
+
+fn readU32(bytes: &[u8], at: usize) -> u32 {
+  return u8.toU32(bytes[at]) | u8.toU32(bytes[at + 1]) * 0x100 | u8.toU32(bytes[at + 2]) * 0x10000
+    | u8.toU32(bytes[at + 3]) * 0x1000000
+}
+
+fn writeU32(bytes: &mut [u8], at: usize, value: u32) -> () {
+  bytes[at] = u32.toU8(value % 0x100)
+  bytes[at + 1] = u32.toU8(value / 0x100 % 0x100)
+  bytes[at + 2] = u32.toU8(value / 0x10000 % 0x100)
+  bytes[at + 3] = u32.toU8(value / 0x1000000)
+}
+
+effect fn invalidBase(error: UrlError) -> i32 {
+  drop error
+  return INVALID_DOCUMENT
+}
+
+effect fn hostFailure(error: NativeHostError) -> i32 {
+  drop error
+  return INVALID_FONT
+}
+
+effect fn renderFailure(error: RenderError) -> i32 {
+  return if error == RenderError.TooLarge {
+    TOO_LARGE
+  } else {
+    INVALID_DOCUMENT
+  }
+}
+
+effect fn outOfMemory(error: OutOfMemoryError) -> i32 {
+  drop error
+  return OUT_OF_MEMORY
+}
+
+// Generic families resolve to the first supplied family of these lists (CSS Fonts 4
+// #generic-font-families leaves the choice to the user agent), as the CLI does.
+effect fn addGenerics(host: &mut NativeHost) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let serif: &[string] = &["DejaVu Serif", "Liberation Serif", "Noto Serif", "Times New Roman"]
+  let sans: &[string] = &["DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial", "Helvetica"]
+  let mono: &[string] = &["DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Noto Mono"]
+  let mut index: usize = 0
+  while index < serif.length {
+    run host.fonts.addGeneric(Generic.Serif, Intrinsic.stringUtf8Bytes(serif[index]))
+    run host.fonts.addGeneric(Generic.UiSerif, Intrinsic.stringUtf8Bytes(serif[index]))
+    index = index + 1
+  }
+  index = 0
+  while index < sans.length {
+    run host.fonts.addGeneric(Generic.SansSerif, Intrinsic.stringUtf8Bytes(sans[index]))
+    run host.fonts.addGeneric(Generic.UiSansSerif, Intrinsic.stringUtf8Bytes(sans[index]))
+    run host.fonts.addGeneric(Generic.SystemUi, Intrinsic.stringUtf8Bytes(sans[index]))
+    index = index + 1
+  }
+  index = 0
+  while index < mono.length {
+    run host.fonts.addGeneric(Generic.Monospace, Intrinsic.stringUtf8Bytes(mono[index]))
+    run host.fonts.addGeneric(Generic.UiMonospace, Intrinsic.stringUtf8Bytes(mono[index]))
+    index = index + 1
+  }
+}
+
+/// Fonts arrive as little-endian `(length: u32, bytes)` records. The first face is the
+/// initial font (its family is the default `font-family` and its metrics size `em`/`ex`);
+/// every face serves `font-family` matching.
+effect fn renderRequest(
+  svgLength: u32,
+  fontsLength: u32,
+  width: u32,
+  height: u32,
+  viewportWidth: u32,
+  viewportHeight: u32,
+) -> i32
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let svg = run input(SVG, svgLength)
+  let fonts = run input(FONTS, fontsLength)
+  let records = Bytes.asSlice(&fonts)
+  if records.length < 4 {
+    return INVALID_FONT
+  }
+  let first = u32.toUsize(readU32(records, 0))
+  if first > records.length - 4 {
+    return INVALID_FONT
+  }
+  let initial = Slice.view<u8>(records, 4, first)
+
+  // The initial face's own family name, from a database that reads its name table.
+  let mut probe = FontDatabase.make()
+  let added = run probe.add(run Bytes.copy(initial))
+  if added == 0 {
+    return INVALID_FONT
+  }
+  let families = &probe.face(0).families
+  if families.length() == 0 {
+    return INVALID_FONT
+  }
+  let family = Bytes.asSlice(&families.asSlice()[0])
+  let viewWidth = if viewportWidth == 0 {
+    300.0
+  } else {
+    u32.toF64(viewportWidth)
+  }
+  let viewHeight = if viewportHeight == 0 {
+    150.0
+  } else {
+    u32.toF64(viewportHeight)
+  }
+  let hosted = run Effect.result(NativeHost.fromFontBytes(initial, family, viewWidth, viewHeight))
+  let mut host = match move hosted {
+    Result<NativeHost, NativeHostError | OutOfMemoryError>.Success { value } => move value
+    Result<NativeHost, NativeHostError | OutOfMemoryError>.Failure { error } => match &error {
+      OutOfMemoryError problem => {
+        fail OutOfMemoryError {}
+      }
+      NativeHostError problem => {
+        return INVALID_FONT
+      }
+    }
+  }
+  let mut at: usize = 0
+  while at + 4 <= records.length {
+    let length = u32.toUsize(readU32(records, at))
+    if length > records.length - at - 4 {
+      return INVALID_FONT
+    }
+    drop run host.fonts.add(run Bytes.copy(Slice.view<u8>(records, at + 4, length)))
+    at = at + 4 + length
+  }
+  run addGenerics(&mut host)
+  let base = match move run Effect.result(Url.fromFilePath(b"/input.svg")) {
+    Result<Url, UrlError | OutOfMemoryError>.Success { value } => move value
+    _ => {
+      return INVALID_DOCUMENT
+    }
+  }
+  let environment = host.environment(&base)
+  let mut settings = RenderOptions.make()
+  settings.width = width
+  settings.height = height
+
+  // Only `data:` resources load: the module has no file system or network.
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let rendered = run Effect.result(renderer.render(Bytes.asSlice(&svg), &settings, &environment))
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  let image = match move rendered {
+    Result<renderer.Pixmap, RenderError | OutOfMemoryError>.Success { value } => move value
+    Result<renderer.Pixmap, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+      OutOfMemoryError problem => {
+        fail OutOfMemoryError {}
+      }
+      RenderError problem => {
+        return if problem == RenderError.TooLarge {
+          TOO_LARGE
+        } else {
+          INVALID_DOCUMENT
+        }
+      }
+    }
+  }
+  let mut size: [u8; 8] = [0; 8]
+  writeU32(&mut size, 0, image.width())
+  writeU32(&mut size, 4, image.height())
+  output(SIZE, &size)
+  output(PIXELS, image.data())
+  return OK
+}
+
+/// Renders the SVG document in the host's SVG slot with the fonts in its font slot at
+/// `width` by `height` output pixels (0 sizes it from the document) in a `viewportWidth`
+/// by `viewportHeight` CSS-pixel embedding viewport (0 means 300 by 150). On success it
+/// outputs the size (two little-endian u32) and then premultiplied sRGB RGBA8 pixels, and
+/// returns 0; otherwise 1 invalid document, 2 invalid font, 3 too large, 4 out of memory.
+export "C" fn render(
+  svgLength: u32,
+  fontsLength: u32,
+  width: u32,
+  height: u32,
+  viewportWidth: u32,
+  viewportHeight: u32,
+) -> i32 as "svg_render" {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  return run Effect.catchAll(
+    renderRequest(svgLength, fontsLength, width, height, viewportWidth, viewportHeight),
+    outOfMemory,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

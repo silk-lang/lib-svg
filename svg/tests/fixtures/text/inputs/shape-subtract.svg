@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="160">
+<defs><rect id="area" x="10" y="10" width="180" height="140"/><rect id="hole" x="95" y="40" width="20" height="50"/></defs>
+<text font-family="Noto Sans" font-size="14" style="text-align: center; shape-inside: url(#area); shape-subtract: url(#hole); line-height: 20px">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore</text>
+</svg>

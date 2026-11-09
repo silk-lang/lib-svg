@@ -1,0 +1,984 @@
+//! Runs a resolved filter program over `vector.filter` on premultiplied RGBA8 surfaces.
+//! Every intermediate result has the surface's size and is transparent outside its
+//! primitive subregion, which never exceeds the filter region.
+import program {
+  Program,
+  Primitive,
+  Operation,
+  Input,
+  Function,
+  CompositeOperator,
+  ColorMatrixKind,
+  MorphologyOperator,
+  EdgeMode,
+  Channel,
+  LightSource,
+  Rgba
+}
+import svg_geometry.geometry { Rect, isEmptyRect, isValidRect }
+import vector.geometry { Affine }
+import vector.pixmap { Pixmap, Rgba8 }
+import vector.filter {
+  Region,
+  BlurPlan,
+  ComponentTransfer,
+  Convolution,
+  Turbulence,
+  TurbulenceSettings,
+  Light,
+  Lighting
+}
+import vector.filter as filters
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.core.option { Option }
+import silk.num.f32
+import silk.num.u32
+import silk.num.i32
+import silk.num.i64
+import silk.num.u8
+
+/// Maps user space to surface pixels: `x' = sx x + tx`, `y' = sy y + ty`, with positive scales.
+pub struct Space {
+  pub sx: f64,
+  pub sy: f64,
+  pub tx: f64,
+  pub ty: f64,
+}
+
+impl Copy for Space {}
+
+// Edges within this distance of a pixel boundary are snapped to it, so that
+// transforms that land on whole pixels up to rounding do not grow a region.
+const SNAP: f64 = 0.000001
+
+/// `floor`, except that values within rounding noise of a whole number snap to it.
+pub fn floorSnapped(value: f64) -> f64 {
+  let nearest = f64.round(value)
+  if f64.abs(value - nearest) < SNAP {
+    return nearest
+  }
+  return f64.floor(value)
+}
+
+/// `ceil`, except that values within rounding noise of a whole number snap to it.
+pub fn ceilSnapped(value: f64) -> f64 {
+  let nearest = f64.round(value)
+  if f64.abs(value - nearest) < SNAP {
+    return nearest
+  }
+  return f64.ceil(value)
+}
+
+fn clampPixel(value: f64, limit: u32) -> u32 {
+  if !(value > 0.0) {
+    return 0
+  }
+  if value >= u32.toF64(limit) {
+    return limit
+  }
+  return f64.toU32(value)
+}
+
+impl Space {
+  /// The pixels `rect` touches, limited to a `width` x `height` surface.
+  pub fn pixels(self: &Self, rect: Rect, width: u32, height: u32) -> Region {
+    let x0 = clampPixel(floorSnapped(rect.xMin * self.sx + self.tx), width)
+    let y0 = clampPixel(floorSnapped(rect.yMin * self.sy + self.ty), height)
+    let x1 = clampPixel(ceilSnapped(rect.xMax * self.sx + self.tx), width)
+    let y1 = clampPixel(ceilSnapped(rect.yMax * self.sy + self.ty), height)
+    return Region.make(x0, y0, maxU32(x0, x1), maxU32(y0, y1))
+  }
+}
+
+fn maxU32(a: u32, b: u32) -> u32 {
+  return if a > b {
+    a
+  } else {
+    b
+  }
+}
+
+fn minU32(a: u32, b: u32) -> u32 {
+  return if a < b {
+    a
+  } else {
+    b
+  }
+}
+
+fn intersect(a: Region, b: Region) -> Region {
+  let x0 = maxU32(a.x0, b.x0)
+  let y0 = maxU32(a.y0, b.y0)
+  let x1 = maxU32(x0, minU32(a.x1, b.x1))
+  let y1 = maxU32(y0, minU32(a.y1, b.y1))
+  return Region.make(x0, y0, x1, y1)
+}
+
+struct Output {
+  pixels: Pixmap,
+  region: Region,
+  linear: bool,
+}
+
+fn byte(value: f64) -> u8 {
+  return f64.toU8(f64.floor(f64.min(1.0, f64.max(0.0, value)) * 255.0 + 0.5))
+}
+
+fn straight(color: Rgba) -> Rgba8 {
+  return Rgba8.make(byte(color.r), byte(color.g), byte(color.b), byte(color.a))
+}
+
+fn pixels(value: f64) -> i32 {
+  return f64.toI32(f64.round(value))
+}
+
+fn radius(value: f64) -> u32 {
+  if !(value > 0.0) {
+    return 0
+  }
+  return f64.toU32(f64.round(value))
+}
+
+fn compositeCode(operator: CompositeOperator) -> u8 {
+  return match operator {
+    CompositeOperator.Over => filters.COMPOSITE_OVER
+    CompositeOperator.In => filters.COMPOSITE_IN
+    CompositeOperator.Out => filters.COMPOSITE_OUT
+    CompositeOperator.Atop => filters.COMPOSITE_ATOP
+    CompositeOperator.Xor => filters.COMPOSITE_XOR
+    CompositeOperator.Lighter => filters.COMPOSITE_LIGHTER
+    CompositeOperator.Arithmetic => filters.COMPOSITE_ARITHMETIC
+  }
+}
+
+fn matrixCode(kind: ColorMatrixKind) -> u8 {
+  return match kind {
+    ColorMatrixKind.Matrix => filters.MATRIX
+    ColorMatrixKind.Saturate => filters.SATURATE
+    ColorMatrixKind.HueRotate => filters.HUE_ROTATE
+    ColorMatrixKind.LuminanceToAlpha => filters.LUMINANCE_TO_ALPHA
+  }
+}
+
+effect fn floats(numbers: &[f64], first: usize, count: usize) -> List<f32>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut values = List<f32>.make()
+  let mut i: usize = 0
+  while i < count {
+    run values.append(f64.toF32(numbers[first + i]))
+    i = i + 1
+  }
+  return move values
+}
+
+effect fn table(function: Function, numbers: &[f64]) -> [u8; 256]
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match function {
+    Function.Identity => filters.transferIdentity()
+    Function.Table { first, count } => {
+      let values = run floats(numbers, first, count)
+      filters.transferTable(values.asSlice())
+    }
+    Function.Discrete { first, count } => {
+      let values = run floats(numbers, first, count)
+      filters.transferDiscrete(values.asSlice())
+    }
+    Function.Linear { slope, intercept } => filters.transferLinear(
+      f64.toF32(slope),
+      f64.toF32(intercept),
+    )
+    Function.Gamma { amplitude, exponent, offset } => filters.transferGamma(
+      f64.toF32(amplitude),
+      f64.toF32(exponent),
+      f64.toF32(offset),
+    )
+  }
+}
+
+/// A copy of `from` in the requested color space.
+effect fn converted(from: &Output, linear: bool) -> Output
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut pixels = run Pixmap.make(from.pixels.width(), from.pixels.height())
+  filters.copy(&mut pixels, &from.pixels, Region.of(&from.pixels))
+  if linear && !from.linear {
+    filters.toLinear(&mut pixels)
+  } else if !linear && from.linear {
+    filters.toSrgb(&mut pixels)
+  }
+  return Output { pixels: move pixels, region: from.region, linear: linear }
+}
+
+effect fn fetch(
+  results: &List<Output>,
+  source: &Output,
+  alpha: &Output,
+  images: &[Pixmap],
+  backdrop: &List<Output>,
+  input: Input,
+  linear: bool,
+) -> Output
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match input {
+    Input.Image { index } => {
+      let mut pixels = run Pixmap.make(source.pixels.width(), source.pixels.height())
+      if index < images.length {
+        filters.copy(&mut pixels, &images[index], source.region)
+      }
+      if linear {
+        filters.toLinear(&mut pixels)
+      }
+      Output { pixels: move pixels, region: source.region, linear: linear }
+    }
+    Input.Background { alpha: only } => {
+      let at: usize = if only {
+        1
+      } else {
+        0
+      }
+      if at < backdrop.length() {
+        let from = &backdrop.asSlice()[at]
+        run converted(
+          from,
+          if only {
+            from.linear
+          } else {
+            linear
+          },
+        )
+      } else {
+        Output {
+          pixels: run Pixmap.make(source.pixels.width(), source.pixels.height()),
+          region: Region.make(0, 0, 0, 0),
+          linear: linear,
+        }
+      }
+    }
+    Input.SourceGraphic => run converted(source, linear)
+
+    // Alpha alone is the same in either color space.
+    Input.SourceAlpha => run converted(alpha, alpha.linear)
+    Input.Result { index } => run converted(&results.asSlice()[index], linear)
+    Input.Transparent => Output {
+      pixels: run Pixmap.make(source.pixels.width(), source.pixels.height()),
+      region: Region.make(0, 0, 0, 0),
+      linear: linear,
+    }
+  }
+}
+
+/// `input`'s alpha with black color: SourceAlpha, and the shadow of `feDropShadow`.
+effect fn alphaOf(input: &Pixmap) -> Pixmap
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut pixels = run Pixmap.make(input.width(), input.height())
+  let from = input.data()
+  let to = pixels.dataMut()
+  let mut i: usize = 0
+  while i < from.length {
+    to[i + 3] = from[i + 3]
+    i = i + 4
+  }
+  return move pixels
+}
+
+/// Floods `region` with `color`, converted to the primitive's color space.
+effect fn flood(out: &mut Pixmap, color: Rgba, linear: bool, region: Region) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  filters.flood(&mut out, straight(color), 255, region)
+  if linear {
+    filters.toLinear(&mut out)
+  }
+}
+
+/// Gaussian blur of `input` read across the whole filter region, kept within `region`.
+effect fn blur(
+  out: &mut Pixmap,
+  input: &Pixmap,
+  x: f64,
+  y: f64,
+  space: &Space,
+  whole: Region,
+  region: Region,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let horizontal = run BlurPlan.make(x * space.sx)
+  let vertical = run BlurPlan.make(y * space.sy)
+  let mut blurred = run Pixmap.make(input.width(), input.height())
+  run filters.gaussianBlur(&mut blurred, input, &horizontal, &vertical, whole)
+  filters.copy(&mut out, &blurred, region)
+}
+
+fn edgeCode(mode: EdgeMode) -> u8 {
+  return match mode {
+    EdgeMode.Duplicate => filters.EDGE_DUPLICATE
+    EdgeMode.Wrap => filters.EDGE_WRAP
+    EdgeMode.None => filters.EDGE_NONE
+  }
+}
+
+fn channelCode(channel: Channel) -> u8 {
+  return match channel {
+    Channel.R => filters.CHANNEL_R
+    Channel.G => filters.CHANNEL_G
+    Channel.B => filters.CHANNEL_B
+    Channel.A => filters.CHANNEL_A
+  }
+}
+
+/// The color space `input` already has: `feDisplacementMap` keeps its `in` image there.
+fn spaceOf(results: &List<Output>, input: Input, linear: bool) -> bool {
+  return match input {
+    Input.SourceGraphic => false
+    Input.SourceAlpha => false
+    Input.Result { index } => results.asSlice()[index].linear
+    Input.Image { index } => false
+    Input.Background { alpha } => false
+    Input.Transparent => linear
+  }
+}
+
+/// A map channel's unpremultiplied value, the displacement table's index.
+fn channelByte(pixel: &[u8], at: usize, channel: u8) -> u8 {
+  let alpha = pixel[at + 3]
+  if channel == filters.CHANNEL_A {
+    return alpha
+  }
+  return filters.unpremultiplyByte(pixel[at + u8.toUsize(channel)], alpha)
+}
+
+/// #feDisplacementMapElement with nearest sampling and a table per axis, since the scale
+/// maps to pixels differently along each; samples past the surface are transparent.
+fn displace(
+  out: &mut Pixmap,
+  input: &Pixmap,
+  map: &Pixmap,
+  tables: &[[i32; 256]; 2],
+  channels: [u8; 2],
+  region: Region,
+) -> () {
+  let width = u32.toI64(input.width())
+  let height = u32.toI64(input.height())
+  let stride = u32.toUsize(input.width()) * 4
+  let s = input.data()
+  let m = map.data()
+  let d = out.dataMut()
+  let mut y = region.y0
+  while y < region.y1 {
+    let mut x = region.x0
+    while x < region.x1 {
+      let at = u32.toUsize(y) * stride + u32.toUsize(x) * 4
+      let sx = u32.toI64(x) + i32.toI64(tables[0][u8.toUsize(channelByte(m, at, channels[0]))])
+      let sy = u32.toI64(y) + i32.toI64(tables[1][u8.toUsize(channelByte(m, at, channels[1]))])
+      if sx >= 0 && sy >= 0 && sx < width && sy < height {
+        let from = i64.toUsize(sy) * stride + i64.toUsize(sx) * 4
+        d[at] = s[from]
+        d[at + 1] = s[from + 1]
+        d[at + 2] = s[from + 2]
+        d[at + 3] = s[from + 3]
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+}
+
+/// The light in surface pixels; z scales by the root mean square of the axis scales.
+fn deviceLight(source: LightSource, space: &Space) -> Light {
+  let depth = f64.sqrt((space.sx * space.sx + space.sy * space.sy) / 2.0)
+  let mut light = Light {
+    kind: filters.LIGHT_DISTANT,
+    azimuth: 0.0,
+    elevation: 0.0,
+    x: 0.0,
+    y: 0.0,
+    z: 0.0,
+    pointsAtX: 0.0,
+    pointsAtY: 0.0,
+    pointsAtZ: 0.0,
+    specularExponent: 1.0,
+    limitingConeAngle: -1.0,
+  }
+  match source {
+    LightSource.Distant { azimuth, elevation } => {
+      light.azimuth = azimuth
+      light.elevation = elevation
+    }
+    LightSource.Point { position } => {
+      light.kind = filters.LIGHT_POINT
+      light.x = position[0] * space.sx + space.tx
+      light.y = position[1] * space.sy + space.ty
+      light.z = position[2] * depth
+    }
+    LightSource.Spot { position, pointsAt, exponent, cone } => {
+      light.kind = filters.LIGHT_SPOT
+      light.x = position[0] * space.sx + space.tx
+      light.y = position[1] * space.sy + space.ty
+      light.z = position[2] * depth
+      light.pointsAtX = pointsAt[0] * space.sx + space.tx
+      light.pointsAtY = pointsAt[1] * space.sy + space.ty
+      light.pointsAtZ = pointsAt[2] * depth
+      light.specularExponent = exponent
+      light.limitingConeAngle = cone
+    }
+  }
+  return light
+}
+
+/// `lighting-color` as straight bytes in the primitive's color space.
+fn lightColor(color: Rgba, linear: bool) -> Rgba8 {
+  let c = straight(color)
+  if !linear {
+    return c
+  }
+  return Rgba8.make(
+    filters.convertByte(c.r, 255, true),
+    filters.convertByte(c.g, 255, true),
+    filters.convertByte(c.b, 255, true),
+    c.a,
+  )
+}
+
+fn validInput(input: Input, before: usize, program: &Program) -> bool {
+  return match input {
+    Input.Result { index } => index < before
+    Input.Image { index } => index < program.images
+    Input.Background { alpha } => program.background
+    _ => true
+  }
+}
+
+fn validUnit(unit: [f64; 2]) -> bool {
+  return finite(&unit) && unit[0] >= 0.0 && unit[1] >= 0.0
+}
+
+/// Smallest kernel unit, in surface pixels, that a resampled kernel steps by.
+const MIN_KERNEL_PIXELS: f64 = 0.5
+
+/// Surface pixels per kernel unit along each axis, or None when `unit` is unset or is one
+/// pixel already.
+fn kernelScale(unit: [f64; 2], space: &Space) -> Option<[f64; 2]> {
+  if !(unit[0] > 0.0) || !(unit[1] > 0.0) {
+    return Option<[f64; 2]>.None
+  }
+  let kx = f64.max(unit[0] * f64.abs(space.sx), MIN_KERNEL_PIXELS)
+  let ky = f64.max(unit[1] * f64.abs(space.sy), MIN_KERNEL_PIXELS)
+  if !f64.isFinite(kx) || !f64.isFinite(ky)
+    || (f64.abs(kx - 1.0) < SNAP && f64.abs(ky - 1.0) < SNAP) {
+    return Option<[f64; 2]>.None
+  }
+  return Option<[f64; 2]>.some([kx, ky])
+}
+
+/// The grid of kernel units over a `width`×`height` surface.
+fn unitSize(length: u32, scale: f64) -> u32 {
+  return maxU32(f64.toU32(f64.ceil(u32.toF64(length) / scale)), 1)
+}
+
+fn unitRegion(region: Region, scale: [f64; 2], width: u32, height: u32) -> Region {
+  let x0 = minU32(f64.toU32(f64.floor(u32.toF64(region.x0) / scale[0])), width)
+  let y0 = minU32(f64.toU32(f64.floor(u32.toF64(region.y0) / scale[1])), height)
+  let x1 = minU32(f64.toU32(f64.ceil(u32.toF64(region.x1) / scale[0])), width)
+  let y1 = minU32(f64.toU32(f64.ceil(u32.toF64(region.y1) / scale[1])), height)
+  return Region.make(x0, y0, maxU32(x0, x1), maxU32(y0, y1))
+}
+
+/// A `width`×`height` image whose pixel (i, j) samples `from` bilinearly at
+/// ((i + 0.5) fx, (j + 0.5) fy), clamped to its edges.
+effect fn resample(from: &Pixmap, width: u32, height: u32, fx: f64, fy: f64) -> Pixmap
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Pixmap.make(width, height)
+  let w = from.width()
+  let h = from.height()
+  if w == 0 || h == 0 {
+    return move out
+  }
+  let source = from.data()
+  let to = out.dataMut()
+  let maxX = u32.toF64(w - 1)
+  let maxY = u32.toF64(h - 1)
+  let mut j: u32 = 0
+  while j < height {
+    let y = f64.min(f64.max((u32.toF64(j) + 0.5) * fy - 0.5, 0.0), maxY)
+    let y0 = f64.toU32(f64.floor(y))
+    let y1 = minU32(y0 + 1, h - 1)
+    let ty = y - u32.toF64(y0)
+    let mut i: u32 = 0
+    while i < width {
+      let x = f64.min(f64.max((u32.toF64(i) + 0.5) * fx - 0.5, 0.0), maxX)
+      let x0 = f64.toU32(f64.floor(x))
+      let x1 = minU32(x0 + 1, w - 1)
+      let tx = x - u32.toF64(x0)
+      let a = (u32.toUsize(y0) * u32.toUsize(w) + u32.toUsize(x0)) * 4
+      let b = (u32.toUsize(y0) * u32.toUsize(w) + u32.toUsize(x1)) * 4
+      let c = (u32.toUsize(y1) * u32.toUsize(w) + u32.toUsize(x0)) * 4
+      let d = (u32.toUsize(y1) * u32.toUsize(w) + u32.toUsize(x1)) * 4
+      let at = (u32.toUsize(j) * u32.toUsize(width) + u32.toUsize(i)) * 4
+      let mut k: usize = 0
+      while k < 4 {
+        let top = u8.toF64(source[a + k]) * (1.0 - tx) + u8.toF64(source[b + k]) * tx
+        let bottom = u8.toF64(source[c + k]) * (1.0 - tx) + u8.toF64(source[d + k]) * tx
+        to[at + k] = f64.toU8(f64.min(f64.max(top * (1.0 - ty) + bottom * ty + 0.5, 0.0), 255.0))
+        k = k + 1
+      }
+      i = i + 1
+    }
+    j = j + 1
+  }
+  return move out
+}
+
+fn validRange(first: usize, count: usize, length: usize) -> bool {
+  return first <= length && count <= length - first
+}
+
+fn finite(values: &[f64]) -> bool {
+  let mut i: usize = 0
+  while i < values.length {
+    if !f64.isFinite(values[i]) {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn validFunction(function: Function, numbers: usize) -> bool {
+  return match function {
+    Function.Table { first, count } => validRange(first, count, numbers)
+    Function.Discrete { first, count } => validRange(first, count, numbers)
+    Function.Linear { slope, intercept } => f64.isFinite(slope) && f64.isFinite(intercept)
+    Function.Gamma { amplitude, exponent, offset } => f64.isFinite(amplitude)
+      && f64.isFinite(exponent)
+      && f64.isFinite(offset)
+    Function.Identity => true
+  }
+}
+
+fn validLight(light: LightSource) -> bool {
+  return match light {
+    LightSource.Distant { azimuth, elevation } => f64.isFinite(azimuth) && f64.isFinite(elevation)
+    LightSource.Point { position } => finite(&position)
+    LightSource.Spot { position, pointsAt, exponent, cone } => finite(&position)
+      && finite(&pointsAt)
+      && f64.isFinite(exponent)
+      && f64.isFinite(cone)
+  }
+}
+
+/// Octaves past this add less than 2^-32 of the first one's amplitude; Filter Effects 1
+/// lets user agents clamp `numOctaves`.
+pub const MAX_OCTAVES: u32 = 32
+
+/// Whether every index of `program` stays inside it and every number is finite, so that an
+/// exported display list cannot make `apply` read out of bounds.
+pub fn valid(program: &Program) -> bool {
+  if !isValidRect(program.region) || !finite(program.numbers.asSlice())
+    || !finite(&program.resolution)
+    || program.resolution[0] < 0.0
+    || program.resolution[1] < 0.0
+    || program.resolution[0] > 65536.0
+    || program.resolution[1] > 65536.0 {
+    return false
+  }
+  let numbers = program.numbers.length()
+  let inputs = program.inputs.asSlice()
+  let primitives = program.primitives.asSlice()
+  let mut p: usize = 0
+  while p < primitives.length {
+    let primitive = primitives[p]
+    if !isValidRect(primitive.subregion) || !validInput(primitive.input, p, program)
+      || !validInput(primitive.input2, p, program) {
+      return false
+    }
+    let ok = match primitive.operation {
+      Operation.Merge { first, count } => {
+        let mut fine = validRange(first, count, inputs.length)
+        let mut i: usize = 0
+        while fine && i < count {
+          fine = validInput(inputs[first + i], p, program)
+          i = i + 1
+        }
+        fine
+      }
+      Operation.ColorMatrix { kind, first, count } => validRange(first, count, numbers)
+      Operation.ComponentTransfer { functions } => validFunction(functions[0], numbers)
+        && validFunction(functions[1], numbers)
+        && validFunction(functions[2], numbers)
+        && validFunction(functions[3], numbers)
+      Operation.Offset { dx, dy } => f64.isFinite(dx) && f64.isFinite(dy)
+      Operation.Blur { x, y } => f64.isFinite(x) && f64.isFinite(y)
+      Operation.Morphology { operator, x, y } => f64.isFinite(x) && f64.isFinite(y)
+      Operation.Composite { operator, k } => finite(&k)
+      Operation.DropShadow { dx, dy, x, y, color } => f64.isFinite(dx) && f64.isFinite(dy)
+        && f64.isFinite(x)
+        && f64.isFinite(y)
+      Operation.Turbulence { frequency, octaves, seed, fractal, stitch, origin, unit } => finite(
+        &frequency,
+      )
+        && frequency[0] >= 0.0
+        && frequency[1] >= 0.0
+        && octaves <= MAX_OCTAVES
+        && f64.isFinite(seed)
+        && finite(&origin)
+        && finite(&unit)
+        && unit[0] > 0.0
+        && unit[1] > 0.0
+      Operation.ConvolveMatrix {
+        orderX,
+        orderY,
+        first,
+        divisor,
+        bias,
+        targetX,
+        targetY,
+        edgeMode,
+        preserveAlpha,
+        unit,
+      } => orderX > 0 && orderY > 0 && targetX < orderX && targetY < orderY && validUnit(unit)
+        && validRange(first, u32.toUsize(orderX) * u32.toUsize(orderY), numbers)
+        && f64.isFinite(divisor)
+        && divisor != 0.0
+        && f64.isFinite(bias)
+      Operation.DisplacementMap { scale, x, y } => finite(&scale)
+      Operation.Image { index } => index < program.images
+      Operation.Lighting {
+        specular,
+        surfaceScale,
+        constant,
+        exponent,
+        color,
+        light,
+        unit
+      } => f64.isFinite(surfaceScale) && f64.isFinite(constant) && f64.isFinite(exponent)
+        && validLight(light)
+        && validUnit(unit)
+      _ => true
+    }
+    if !ok {
+      return false
+    }
+    p = p + 1
+  }
+  return true
+}
+
+/// Runs `program` on `source`, the filtered element's rendering on a surface whose
+/// pixels relate to user space through `space`; `images` are the program's image layers
+/// rendered on the same surface, sRGB, followed by the backdrop when `program.background`
+/// is set. The result has the source's size and is sRGB, transparent outside the filter
+/// region.
+pub effect fn apply(program: &Program, source: &Pixmap, images: &[Pixmap], space: Space) -> Pixmap
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let width = source.width()
+  let height = source.height()
+  let whole = space.pixels(program.region, width, height)
+
+  // #FilterEffectsRegion: the filter region clips the primitives' input images.
+  let mut clipped = run Pixmap.make(width, height)
+  filters.copy(&mut clipped, source, whole)
+  let alpha = Output { pixels: run alphaOf(&clipped), region: whole, linear: false }
+  let graphic = Output { pixels: move clipped, region: whole, linear: false }
+
+  // #attr-valuedef-in-backgroundimage, clipped to the filter region like the source.
+  let mut backdrop = List<Output>.make()
+  if program.background && program.images < images.length {
+    let mut seen = run Pixmap.make(width, height)
+    filters.copy(&mut seen, &images[program.images], whole)
+    let shade = Output { pixels: run alphaOf(&seen), region: whole, linear: false }
+    run backdrop.append(Output { pixels: move seen, region: whole, linear: false })
+    run backdrop.append(move shade)
+  }
+  let mut results = List<Output>.make()
+  let numbers = program.numbers.asSlice()
+  let primitives = program.primitives.asSlice()
+  let mut p: usize = 0
+  while p < primitives.length {
+    let primitive = primitives[p]
+    let linear = primitive.linearRgb
+    let mut own = linear
+    let mut out = run Pixmap.make(width, height)
+    let region = if isEmptyRect(primitive.subregion) {
+      Region.make(0, 0, 0, 0)
+    } else {
+      intersect(space.pixels(primitive.subregion, width, height), whole)
+    }
+    if region.x1 > region.x0 && region.y1 > region.y0 {
+      match primitive.operation {
+        Operation.Copy => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          filters.copy(&mut out, &a.pixels, region)
+        }
+        Operation.Flood { color } => {
+          run flood(&mut out, color, linear, region)
+        }
+        Operation.Offset { dx, dy } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          filters.offset(&mut out, &a.pixels, pixels(dx * space.sx), pixels(dy * space.sy), region)
+        }
+        Operation.Blur { x, y } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          run blur(&mut out, &a.pixels, x, y, &space, whole, region)
+        }
+        Operation.Merge { first, count } => {
+          let inputs = program.inputs.asSlice()
+          let mut i: usize = 0
+          while i < count {
+            let a = run fetch(
+              &results,
+              &graphic,
+              &alpha,
+              images,
+              &backdrop,
+              inputs[first + i],
+              linear,
+            )
+            filters.mergeOver(&mut out, &a.pixels, region)
+            i = i + 1
+          }
+        }
+        Operation.Blend { mode, composite } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let b = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input2, linear)
+          if composite {
+            filters.blend(&mut out, &a.pixels, &b.pixels, mode, region)
+          } else {
+            filters.blendWithoutCompositing(&mut out, &a.pixels, &b.pixels, mode, region)
+          }
+        }
+        Operation.Composite { operator, k } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let b = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input2, linear)
+          filters.composite(
+            &mut out,
+            &a.pixels,
+            &b.pixels,
+            compositeCode(operator),
+            [f64.toF32(k[0]), f64.toF32(k[1]), f64.toF32(k[2]), f64.toF32(k[3])],
+            region,
+          )
+        }
+        Operation.ColorMatrix { kind, first, count } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let values = run floats(numbers, first, count)
+          let matrix = filters.colorMatrixOf(matrixCode(kind), values.asSlice())
+          filters.colorMatrix(&mut out, &a.pixels, matrix, region)
+        }
+        Operation.ComponentTransfer { functions } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let transfer = ComponentTransfer {
+            r: run table(functions[0], numbers),
+            g: run table(functions[1], numbers),
+            b: run table(functions[2], numbers),
+            a: run table(functions[3], numbers),
+          }
+          filters.componentTransfer(&mut out, &a.pixels, &transfer, region)
+        }
+        Operation.Morphology { operator, x, y } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let mut shaped = run Pixmap.make(width, height)
+          run filters.morphology(
+            &mut shaped,
+            &a.pixels,
+            if operator == MorphologyOperator.Dilate {
+              filters.MORPHOLOGY_DILATE
+            } else {
+              filters.MORPHOLOGY_ERODE
+            },
+            radius(x * space.sx),
+            radius(y * space.sy),
+            whole,
+          )
+          filters.copy(&mut out, &shaped, region)
+        }
+        Operation.Tile => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          filters.tile(&mut out, &a.pixels, a.region, region)
+        }
+        Operation.DropShadow { dx, dy, x, y, color } => {
+          // #feDropShadowElement: blur the input's alpha, offset it, color it with the
+          // flood, and merge the input over it.
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let shape = run alphaOf(&a.pixels)
+          let mut blurred = run Pixmap.make(width, height)
+          run blur(&mut blurred, &shape, x, y, &space, whole, whole)
+          let mut moved = run Pixmap.make(width, height)
+          filters.offset(&mut moved, &blurred, pixels(dx * space.sx), pixels(dy * space.sy), region)
+          let mut paint = run Pixmap.make(width, height)
+          run flood(&mut paint, color, linear, region)
+          filters.composite(
+            &mut out,
+            &paint,
+            &moved,
+            filters.COMPOSITE_IN,
+            [0.0, 0.0, 0.0, 0.0],
+            region,
+          )
+          filters.mergeOver(&mut out, &a.pixels, region)
+        }
+        Operation.Turbulence { frequency, octaves, seed, fractal, stitch, origin, unit } => {
+          // #feTurbulenceElement: the primitive subregion is the stitching tile.
+          let noise = run Turbulence.make(seed)
+          let tile = primitive.subregion
+          let settings = TurbulenceSettings {
+            baseFrequencyX: frequency[0],
+            baseFrequencyY: frequency[1],
+            octaves: octaves,
+            fractalNoise: fractal,
+            stitchTiles: stitch,
+            tileX: (tile.xMin - origin[0]) / unit[0],
+            tileY: (tile.yMin - origin[1]) / unit[1],
+            tileWidth: tile.width() / unit[0],
+            tileHeight: tile.height() / unit[1],
+          }
+          let toNoise = Affine {
+            xx: 1.0 / (space.sx * unit[0]),
+            yx: 0.0,
+            xy: 0.0,
+            yy: 1.0 / (space.sy * unit[1]),
+            dx: 0.0 - (space.tx / space.sx + origin[0]) / unit[0],
+            dy: 0.0 - (space.ty / space.sy + origin[1]) / unit[1],
+          }
+          filters.turbulence(&mut out, &noise, &settings, &toNoise, region)
+        }
+        Operation.ConvolveMatrix {
+          orderX,
+          orderY,
+          first,
+          divisor,
+          bias,
+          targetX,
+          targetY,
+          edgeMode,
+          preserveAlpha,
+          unit,
+        } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let kernel = run floats(numbers, first, u32.toUsize(orderX) * u32.toUsize(orderY))
+          let convolution = Convolution {
+            kernel: kernel.asSlice(),
+            orderX: orderX,
+            orderY: orderY,
+            divisor: f64.toF32(divisor),
+            bias: f64.toF32(bias),
+            targetX: targetX,
+            targetY: targetY,
+            edgeMode: edgeCode(edgeMode),
+            preserveAlpha: preserveAlpha,
+          }
+
+          // #element-attrdef-feconvolvematrix-kernelunitlength: the kernel steps by
+          // kernel units, so it runs on the image resampled to one pixel per unit.
+          match &kernelScale(unit, &space) {
+            Option<[f64; 2]>.Some { value: scale } => {
+              let sw = unitSize(width, scale[0])
+              let sh = unitSize(height, scale[1])
+              let small = run resample(&a.pixels, sw, sh, scale[0], scale[1])
+              let mut done = run Pixmap.make(sw, sh)
+              run filters.convolveMatrix(
+                &mut done,
+                &small,
+                &convolution,
+                unitRegion(region, scale, sw, sh),
+              )
+              let grown = run resample(&done, width, height, 1.0 / scale[0], 1.0 / scale[1])
+              filters.copy(&mut out, &grown, region)
+            }
+            _ => {
+              run filters.convolveMatrix(&mut out, &a.pixels, &convolution, region)
+            }
+          }
+        }
+        Operation.DisplacementMap { scale, x, y } => {
+          // `in` stays in its own color space; only the map is converted.
+          own = spaceOf(&results, primitive.input, linear)
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, own)
+          let map = run fetch(
+            &results,
+            &graphic,
+            &alpha,
+            images,
+            &backdrop,
+            primitive.input2,
+            linear,
+          )
+          let tables = [
+            filters.displacementTable(f64.toF32(scale[0] * space.sx)),
+            filters.displacementTable(f64.toF32(scale[1] * space.sy)),
+          ]
+          displace(
+            &mut out,
+            &a.pixels,
+            &map.pixels,
+            &tables,
+            [channelCode(x), channelCode(y)],
+            region,
+          )
+        }
+        Operation.Image { index } => {
+          // #feImageElement: the rendered image is sRGB, like SourceGraphic.
+          own = false
+          if index < images.length {
+            filters.copy(&mut out, &images[index], region)
+          }
+        }
+        Operation.Lighting { specular, surfaceScale, constant, exponent, color, light, unit } => {
+          let a = run fetch(&results, &graphic, &alpha, images, &backdrop, primitive.input, linear)
+          let scale = match &kernelScale(unit, &space) {
+            Option<[f64; 2]>.Some { value } => value
+            _ => [1.0, 1.0]
+          }
+
+          // #element-attrdef-fediffuselighting-kernelunitlength: normals step by kernel
+          // units, so lighting runs on the image resampled to one pixel per unit.
+          let grid = Space {
+            sx: space.sx / scale[0],
+            sy: space.sy / scale[1],
+            tx: space.tx / scale[0],
+            ty: space.ty / scale[1],
+          }
+          let lighting = Lighting {
+            specular: specular,
+            surfaceScale: f64.toF32(surfaceScale),
+            constant: f64.toF32(constant),
+            exponent: f64.toF32(exponent),
+            color: lightColor(color, linear),
+            light: deviceLight(light, &grid),
+          }
+          if scale[0] == 1.0 && scale[1] == 1.0 {
+            filters.lighting(&mut out, &a.pixels, &lighting, region)
+          } else {
+            let sw = unitSize(width, scale[0])
+            let sh = unitSize(height, scale[1])
+            let small = run resample(&a.pixels, sw, sh, scale[0], scale[1])
+            let mut done = run Pixmap.make(sw, sh)
+            filters.lighting(&mut done, &small, &lighting, unitRegion(region, scale, sw, sh))
+            let grown = run resample(&done, width, height, 1.0 / scale[0], 1.0 / scale[1])
+            filters.copy(&mut out, &grown, region)
+          }
+        }
+      }
+    }
+    run results.append(Output { pixels: move out, region: region, linear: own })
+    p = p + 1
+  }
+  if results.length() == 0 {
+    return run Pixmap.make(width, height)
+  }
+  let last = results.length() - 1
+  let mut result = results.remove(last)
+  if result.linear {
+    filters.toSrgb(&mut result.pixels)
+  }
+  return move result.pixels
+}

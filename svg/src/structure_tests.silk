@@ -1,0 +1,787 @@
+//! Behavioral source/occurrence contracts, authored before structure.silk.
+import silk.text.string { String }
+import structure { Graph, Options, StructureError, DocumentId, SourceId, OccurrenceId, build }
+import resources { Resolver, Response, ResourceKind, ResourceError, ProcessingMode }
+import url { Url, UrlError }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.tokens { equal }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+struct Host {
+  calls: usize,
+  source: &'static [u8],
+  redirect: bool
+}
+
+impl Host {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    let mut bytes = Bytes.make()
+    run Bytes.append(&mut bytes, self.source)
+    let mut response = Response.fromBytes(move bytes)
+    if self.redirect {
+      let parsed = run Effect.result(Url.parseAbsolute(b"https://example.test/final/template.svg"))
+      match move parsed {
+        Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+          response.finalUrl = Option<Url>.Some { value: move value }
+        }
+        Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+          UrlError value => {
+            fail ResourceError.InvalidData
+          }
+          OutOfMemoryError value => {
+            fail OutOfMemoryError {}
+          }
+        }
+      }
+    }
+    return move response
+  }
+}
+
+impl Resolver for Host {
+  fetch: Host.fetch
+}
+
+fn occurrence(graph: &Graph, id: &[u8]) -> OccurrenceId {
+  let mut i: usize = 0
+  while i < graph.occurrences.length() {
+    let item = &graph.occurrences.asSlice()[i]
+    if item.scope == 0 {
+      let doc = &graph.documents.asSlice()[item.source.document.index].document
+      match (XmlDocument.attribute(doc, item.source.node, "", "id")
+        |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+        Option<&[u8]>.Some { value } => {
+          if equal(value, id) {
+            return OccurrenceId { index: i }
+          }
+        }
+        _ => {}
+      }
+    }
+    i = i + 1
+  }
+  return graph.root
+}
+
+fn shadow(graph: &Graph, id: &[u8]) -> bool {
+  return match &graph.occurrences.asSlice()[occurrence(graph, id).index].shadow {
+    Option<OccurrenceId>.Some { value } => true
+    _ => false
+  }
+}
+
+effect fn load(source: &[u8], options: &Options<'_>, host: &mut Host) -> Graph
+  ! UrlError | StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://example.test/main.svg")
+  return run build(source, &base, options) |> Effect.provideMut<Resolver>(&mut host.*)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseShadowTree
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#XLinkRefAttrs
+// Instances share source nodes, but never occurrence IDs, parents or sibling links.
+test effect fn independentInstancesAndLightChildren() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><defs><g id='t'>text<rect/><circle/></g></defs><use id='a' href='#t'><title>light</title></use><use id='b' href='#t'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    graph.documents.length() == 1 && host.calls == 0,
+    "same-document reuse neither clones nor fetches documents",
+  )
+  let a = occurrence(&graph, b"a")
+  let b = occurrence(&graph, b"b")
+  match &graph.occurrences.asSlice()[a.index].shadow {
+    Option<OccurrenceId>.Some { value: ar } => match &graph.occurrences.asSlice()[b.index].shadow {
+      Option<OccurrenceId>.Some { value: br } => {
+        let ai = &graph.occurrences.asSlice()[ar.index]
+        let bi = &graph.occurrences.asSlice()[br.index]
+        run Testing.expect(
+          ar.index != br.index && ai.source.node.index == bi.source.node.index
+            && ai.scope != bi.scope,
+          "independent instances retain one source and distinct scopes",
+        )
+        run Testing.expect(
+          match &ai.parent {
+            Option<OccurrenceId>.Some { value } => value.index == a.index
+            _ => false
+          },
+          "shadow inheritance parent is its use",
+        )
+        run Testing.expect(
+          match &graph.occurrences.asSlice()[a.index].firstChild {
+            Option<OccurrenceId>.Some { value } => value.index != ar.index
+            _ => false
+          },
+          "shadow root never replaces light children",
+        )
+        match &ai.firstChild {
+          Option<OccurrenceId>.Some {
+            value: first
+          } => match &graph.occurrences.asSlice()[first.index].nextSibling {
+            Option<OccurrenceId>.Some { value: second } => {
+              run Testing.expect(
+                match &graph.occurrences.asSlice()[second.index].previousSibling {
+                  Option<OccurrenceId>.Some { value } => value.index == first.index
+                  _ => false
+                },
+                "element siblings omit source text and are bidirectional",
+              )
+            }
+            _ => {
+              run Testing.expect(false, "both source element children instantiate")
+            }
+          }
+          _ => {
+            run Testing.expect(false, "instance retains source children")
+          }
+        }
+      }
+      _ => {
+        run Testing.expect(false, "second reference instantiates")
+      }
+    }
+    _ => {
+      run Testing.expect(false, "both references instantiate")
+    }
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#XLinkRefAttrs
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElement
+test effect fn hrefPresenceAndActivePathCycles() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' xmlns:x='http://www.w3.org/1999/xlink' id='root'><g id='t'><use href='#t'/></g><use id='empty' href='' x:href='#t'/><use id='missing' href='#absent' x:href='#t'/><use id='legacy' x:href='#t'/><use id='ancestor' href='#root'/><g id='p'><use href='#q'/></g><g id='q'><use href='#p'/></g><use id='indirect' href='#p'/><use id='again' href='#t'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !shadow(&graph, b"empty") && !shadow(&graph, b"missing") && !shadow(&graph, b"ancestor"),
+    "empty or invalid href does not fall back; active ancestor cannot instantiate",
+  )
+  run Testing.expect(
+    shadow(&graph, b"legacy") && shadow(&graph, b"indirect") && shadow(&graph, b"again"),
+    "cycles close only the offending edge, never unrelated references",
+  )
+  run Testing.expect(
+    graph.occurrences.length() < 60,
+    "nested and indirect cycles terminate locally",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#referencing-modes
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElement
+test effect fn instancesUseIncludingModeAndRedirectAliasesAreCached() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host {
+    calls: 0,
+    source: b"<svg xmlns='http://www.w3.org/2000/svg' xml:base='assets/'><g id='t'/><use href='https://example.test/main.svg#main'/></svg>",
+    redirect: true,
+  }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='main'/><use id='a' href='request.svg'/><use id='b' href='final/template.svg'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && graph.documents.length() == 2,
+    "request/final aliases share one parsed document",
+  )
+  run Testing.expect(
+    shadow(&graph, b"a") && shadow(&graph, b"b"),
+    "external no-fragment references instantiate SVG root",
+  )
+  let external = &graph.documents.asSlice()[1]
+  run Testing.expect(
+    equal(
+      Url.withoutFragment(&graph.urls.asSlice()[external.base]),
+      b"https://example.test/final/template.svg",
+    ),
+    "response final URL is source-document base",
+  )
+  run Testing.expect(
+    equal(
+      Url.withoutFragment(
+        &graph.urls.asSlice()[external.nodeBases.asSlice()[XmlDocument.root(
+          &external.document,
+        ).index]],
+      ),
+      b"https://example.test/final/assets/",
+    ),
+    "XML Base resolves once against final response base",
+  )
+  let mut i: usize = 0
+  while i < graph.occurrences.length() {
+    let item = &graph.occurrences.asSlice()[i]
+    if item.source.document.index == 1
+      && equal(
+        String.utf8Bytes(XmlDocument.localName(&external.document, item.source.node)),
+        b"use",
+      ) {
+      run Testing.expect(
+        item.shadow.isSome() == graph.scopes.asSlice()[item.scope].host.isSome(),
+        "cloned instances retain including mode while ordinary source references stay secure",
+      )
+    }
+    i = i + 1
+  }
+  run Testing.expect(
+    match graph.findId(DocumentId { index: 0 }, b"t") {
+      Option<SourceId>.None => true
+      _ => false
+    },
+    "ID lookup is document qualified",
+  )
+  run Testing.expect(
+    match graph.findId(DocumentId { index: 1 }, b"t") {
+      Option<SourceId>.Some { value } => true
+      _ => false
+    },
+    "external IDs remain indexed in their own document",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-static-mode
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-2
+test effect fn secureDataIsLocalAndMalformedExternalIsIgnored() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"not xml", redirect: false }
+  let mut options = Options.defaults()
+  options.policy.mode = ProcessingMode.SecureAnimated
+  let secure = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='t'/><use id='local' href='#t'/><use id='blocked' href='other.svg'/><use id='data' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/><use id='wrongMime' href='data:text/plain,%3Csvg/%3E'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 0 && shadow(&secure, b"local") && shadow(&secure, b"data")
+      && !shadow(&secure, b"blocked")
+      && !shadow(&secure, b"wrongMime"),
+    "secure same-document/data references work without arbitrary host dispatch",
+  )
+  options.policy.mode = ProcessingMode.Static
+  let broken = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='bad' href='broken.svg'/><use href='broken.svg'/><rect/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !shadow(&broken, b"bad") && host.calls == 1,
+    "invalid external XML is ignored and failure cached",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SwitchElement
+// https://www.w3.org/TR/REC-smil/smil-content.html#adef-allowReorder
+test effect fn switchSelectionRetainsHiddenAndForeignSources() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><switch><foreign xmlns='urn:x' id='foreign'/><rect id='fallback'/></switch><switch><rect id='hidden' display='none'/><rect id='second'/></switch></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    graph.occurrences.asSlice()[occurrence(&graph, b"foreign").index].eligible
+      && !graph.occurrences.asSlice()[occurrence(&graph, b"fallback").index].eligible,
+    "foreign first child wins without deleting siblings",
+  )
+  run Testing.expect(
+    graph.occurrences.asSlice()[occurrence(&graph, b"hidden").index].eligible
+      && !graph.occurrences.asSlice()[occurrence(&graph, b"second").index].eligible,
+    "display is not conditional eligibility",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+test effect fn expansionBudgetsFailHard() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let mut options = Options.defaults()
+  options.limits.maxOccurrences = 4
+  let result = run Effect.result(
+    load(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><g id='t'><rect/></g><use href='#t'/><use href='#t'/></svg>",
+      &options,
+      &mut host,
+    ),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &result {
+      Result<Graph, UrlError | StructureError | OutOfMemoryError>.Failure {
+        error
+      } => match &error {
+        StructureError value => value == StructureError.TooLarge
+        UrlError value => false
+        OutOfMemoryError value => {
+          fail OutOfMemoryError {}
+        }
+      }
+      _ => false
+    },
+    "bounded expansion is a hard error rather than partial graph success",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElementHrefAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#HTMLElements
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseShadowTree
+test effect fn validHtmlTargetsAndUnconditionalShadowConstruction() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host {
+    calls: 0,
+    source: b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+    redirect: false,
+  }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' xmlns:h='http://www.w3.org/1999/xhtml'><h:canvas id='canvas'/><h:div id='div'/><use id='html' href='#canvas'/><use id='foreign' href='#div'/><use id='conditional' systemLanguage='' href='#canvas'/><use id='emptyBase' xml:base='other.svg' href=''/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    shadow(&graph, b"html") && !shadow(&graph, b"foreign"),
+    "allowed HTML embedded targets instantiate; arbitrary foreign targets do not",
+  )
+  run Testing.expect(
+    shadow(&graph, b"conditional")
+      && !graph.occurrences.asSlice()[occurrence(&graph, b"conditional").index].eligible,
+    "failed conditions do not suppress shadow construction",
+  )
+  run Testing.expect(
+    shadow(&graph, b"emptyBase") && host.calls == 1,
+    "empty present href resolves against XML Base rather than falling back or being special-cased",
+  )
+}
+
+struct MetadataHost {
+  charset: &'static [u8],
+  mime: &'static [u8],
+  utf16: bool
+}
+
+impl MetadataHost {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    let source = b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+    let mut bytes = Bytes.make()
+    if self.utf16 {
+      run Bytes.append(&mut bytes, b"\xFF\xFE")
+      let mut i: usize = 0
+      while i < source.length {
+        let pair: [u8; 2] = [source[i], 0]
+        run Bytes.append(&mut bytes, &pair)
+        i = i + 1
+      }
+    } else {
+      run Bytes.append(&mut bytes, source)
+    }
+    let mut charset = Bytes.make()
+    run Bytes.append(&mut charset, self.charset)
+    let mut mime = Bytes.make()
+    run Bytes.append(&mut mime, self.mime)
+    return Response {
+      bytes: move bytes,
+      finalUrl: Option<Url>.None,
+      mediaType: Option<Bytes>.Some { value: move mime },
+      charset: Option<Bytes>.Some { value: move charset },
+    }
+  }
+}
+
+impl Resolver for MetadataHost {
+  fetch: MetadataHost.fetch
+}
+
+// https://www.w3.org/TR/2008/REC-xml-20081126/#charencoding
+// https://www.rfc-editor.org/rfc/rfc7303.html#section-3
+test effect fn externalMimeAndMandatoryXmlEncodings() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let base = run Url.parseAbsolute(b"https://example.test/main.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let options = Options.defaults()
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg'><use id='a' href='other.svg'/></svg>"
+  let mut host = MetadataHost { charset: b"UTF-16", mime: b"IMAGE/SVG+XML", utf16: true }
+  let good = run build(source, &base, &options)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(shadow(&good, b"a"), "UTF16 XML and case-insensitive SVG MIME are accepted")
+  host.charset = b"UTF-8"
+  let contradiction = run build(source, &base, &options)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !shadow(&contradiction, b"a"),
+    "contradictory transport encoding is not silently ignored",
+  )
+  host.utf16 = false
+  host.mime = b"text/plain"
+  let wrongMime = run build(source, &base, &options)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(!shadow(&wrongMime, b"a"), "explicit non-SVG MIME cannot become a use source")
+}
+
+effect fn limited(source: &[u8], options: &Options<'_>, host: &mut Host) -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let result = run Effect.result(load(source, options, &mut host.*))
+  run Testing.expect(
+    match &result {
+      Result<Graph, UrlError | StructureError | OutOfMemoryError>.Failure {
+        error
+      } => match &error {
+        StructureError value => value == StructureError.TooLarge
+        UrlError value => false
+        OutOfMemoryError value => {
+          fail OutOfMemoryError {}
+        }
+      }
+      _ => false
+    },
+    "document, byte, request and reference-depth exhaustion are hard failures",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+test effect fn independentAggregateAndReferenceLimits() -> ()
+  ! UrlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host {
+    calls: 0,
+    source: b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+    redirect: false,
+  }
+  let external = b"<svg xmlns='http://www.w3.org/2000/svg'><use href='other.svg'/></svg>"
+  let mut options = Options.defaults()
+  options.limits.maxRequests = 0
+  run limited(external, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(host.calls == 0, "request bound is checked before host dispatch")
+  options = Options.defaults()
+  options.limits.maxDocuments = 1
+  run limited(external, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  options = Options.defaults()
+  options.limits.maxTotalBytes = external.length
+  run limited(external, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  options = Options.defaults()
+  options.limits.maxReferenceDepth = 1
+  run limited(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='a'><use href='#b'/></g><rect id='b'/><use href='#a'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+// https://www.w3.org/TR/2009/REC-xmlbase-20090128/#resolution
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+test effect fn derivedUrlStorageIsAggregateAndSourceOwned() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let mut options = Options.defaults()
+  options.limits.maxUrlBytes = 95
+  run limited(
+    b"<svg xmlns='http://www.w3.org/2000/svg' xml:base='longsegment/'><g xml:base='longsegment/'><g xml:base='longsegment/'/></g></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='t'><rect/><rect/><rect/></g><use href='#t'/><use href='#t'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    graph.urls.length() == 3 && graph.occurrences.length() > 10,
+    "source URL budget does not grow with inherited node bases or use occurrences",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElementHrefAttribute
+// https://url.spec.whatwg.org/#origin
+test effect fn useRequestsStayOnIncludingHttpOrigin() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host {
+    calls: 0,
+    source: b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+    redirect: false,
+  }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><rect id='target'/><use id='local' href='#target'/><use id='same' href='https://EXAMPLE.test:443/one.svg'/><use id='credentials' href='https://user:password@example.test/two.svg'/><use id='host' href='https://evil.test/one.svg'/><use id='port' href='https://example.test:444/one.svg'/><use id='scheme' href='http://example.test/one.svg'/><use id='base' xml:base='https://evil.test/' href='one.svg'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 2,
+    "cross-origin URLs and XML Base never reach the host; normalized default ports and credentials do not alter origin",
+  )
+  run Testing.expect(
+    shadow(&graph, b"local") && shadow(&graph, b"same") && shadow(&graph, b"credentials"),
+    "same-document and same-origin references instantiate",
+  )
+  run Testing.expect(
+    !shadow(&graph, b"host") && !shadow(&graph, b"port") && !shadow(&graph, b"scheme")
+      && !shadow(&graph, b"base"),
+    "host, port, scheme and XML Base cannot authorize cross-origin use",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElementHrefAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#referencing-modes
+test effect fn cloneXmlBaseCannotChangeIncludingOrigin() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host {
+    calls: 0,
+    source: b"<svg xmlns='http://www.w3.org/2000/svg' xml:base='https://evil.test/'><use href='nested.svg'/></svg>",
+    redirect: false,
+  }
+  let options = Options.defaults()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='outer' href='template.svg'/></svg>",
+    &options,
+    &mut host,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && shadow(&graph, b"outer"),
+    "including origin permits initial template but not its cross-origin clone reference",
+  )
+  let mut nested: usize = 0
+  let mut i: usize = 0
+  while i < graph.occurrences.length() {
+    let item = &graph.occurrences.asSlice()[i]
+    if item.source.document.index == 1
+      && equal(
+        String.utf8Bytes(
+          XmlDocument.localName(graph.sourceDocument(item.source), item.source.node),
+        ),
+        b"use",
+      ) {
+      nested = nested + 1
+      run Testing.expect(
+        match &item.shadow {
+          Option<OccurrenceId>.None => true
+          _ => false
+        },
+        "clone uses including origin rather than its source XML Base",
+      )
+    }
+    i = i + 1
+  }
+  run Testing.expect(nested == 2, "ordinary source and cloned use both remain represented")
+}
+
+struct OriginRedirectHost {
+  calls: usize,
+  finalUrl: &'static [u8]
+}
+
+impl OriginRedirectHost {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    let mut bytes = Bytes.make()
+    run Bytes.append(&mut bytes, b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    let mut response = Response.fromBytes(move bytes)
+    let parsed = run Effect.result(Url.parseAbsolute(self.finalUrl))
+    match move parsed {
+      Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+        response.finalUrl = Option<Url>.Some { value: move value }
+      }
+      Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
+        UrlError value => {
+          fail ResourceError.InvalidData
+        }
+        OutOfMemoryError value => {
+          fail OutOfMemoryError {}
+        }
+      }
+    }
+    return move response
+  }
+}
+
+impl Resolver for OriginRedirectHost {
+  fetch: OriginRedirectHost.fetch
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseElementHrefAttribute
+// https://url.spec.whatwg.org/#origin
+test effect fn redirectAliasesCannotBypassUseOrigin() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let base = run Url.parseAbsolute(b"https://example.test/main.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let options = Options.defaults()
+  let mut host = OriginRedirectHost { calls: 0, finalUrl: b"https://evil.test/final.svg" }
+  let blocked = run build(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='first' href='redirect.svg'/><use id='repeat' href='redirect.svg'/><use id='alias' href='https://evil.test/final.svg'/><use id='baseAlias' xml:base='https://evil.test/' href='final.svg'/></svg>",
+    &base,
+    &options,
+  )
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && blocked.documents.length() == 1,
+    "cross-origin redirect is rejected before parsing and its request failure is cached",
+  )
+  run Testing.expect(
+    !shadow(&blocked, b"first") && !shadow(&blocked, b"repeat") && !shadow(&blocked, b"alias")
+      && !shadow(&blocked, b"baseAlias"),
+    "neither request nor final/XMLBase aliases bypass redirect origin rejection",
+  )
+  host.calls = 0
+  host.finalUrl = b"https://EXAMPLE.test:443/final.svg"
+  let accepted = run build(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='first' href='redirect.svg'/><use id='alias' href='final.svg'/></svg>",
+    &base,
+    &options,
+  )
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && shadow(&accepted, b"first") && shadow(&accepted, b"alias"),
+    "normalized same-origin redirect and final alias share one parsed document",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseShadowTree
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+test effect fn acyclicUseDepthIsBoundedAcrossSourceAndShadowEdges() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let source = b"<svg xmlns='http://www.w3.org/2000/svg'><defs><g id='a'><g><use href='#b'/></g></g><g id='b'><g><use href='#c'/></g></g><g id='c'><rect/></g></defs><use id='outer' href='#a'/></svg>"
+  let mut options = Options.defaults()
+  options.limits.maxReferenceDepth = 3
+  options.limits.maxOccurrenceDepth = 8
+  run limited(source, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  options.limits.maxOccurrenceDepth = 9
+  let graph = run load(source, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    shadow(&graph, b"outer") && host.calls == 0,
+    "acyclic source/reference budgets pass exactly at composed depth nine",
+  )
+  let mut deepest: usize = 0
+  let mut i: usize = 0
+  while i < graph.occurrences.length() {
+    let item = &graph.occurrences.asSlice()[i]
+    if graph.scopes.asSlice()[item.scope].depth == 3
+      && equal(
+        String.utf8Bytes(
+          XmlDocument.localName(graph.sourceDocument(item.source), item.source.node),
+        ),
+        b"rect",
+      ) {
+      deepest = deepest + 1
+    }
+    i = i + 1
+  }
+  run Testing.expect(
+    deepest == 1,
+    "exact-depth success contains the deepest third-generation instance rather than truncating it",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+test effect fn occurrenceDepthCountsOrdinaryChildrenAndStartsAtZero() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let mut options = Options.defaults()
+  options.limits.maxOccurrenceDepth = 0
+  let rootOnly = run load(b"<svg xmlns='http://www.w3.org/2000/svg'/>", &options, &mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(rootOnly.occurrences.length() == 1, "root depth zero is valid at a zero bound")
+  run limited(b"<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>", &options, &mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let nested = b"<svg xmlns='http://www.w3.org/2000/svg'><g><g><rect/></g></g></svg>"
+  options.limits.maxOccurrenceDepth = 2
+  run limited(nested, &options, &mut host) |> Effect.provideMut<Allocator>(&mut allocator)
+  options.limits.maxOccurrenceDepth = 3
+  let accepted = run load(nested, &options, &mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    accepted.occurrences.length() == 4,
+    "ordinary light children share the same inclusive depth bound",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ConformingSVGViewers
+// Host limits may lower, but cannot remove, the renderer's recursion ceiling.
+test effect fn enlargedHostLimitCannotRemoveComposedDepthCeiling() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, source: b"", redirect: false }
+  let mut source = Bytes.make()
+  run Bytes.append(&mut source, b"<svg xmlns='http://www.w3.org/2000/svg'><defs>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let starts: [&[u8]; 3] = [b"<g id='a'>", b"<g id='b'>", b"<g id='c'>"]
+  let ends: [&[u8]; 3] = [b"<use href='#b'/>", b"<use href='#c'/>", b"<rect/>"]
+  let mut part: usize = 0
+  while part < starts.length {
+    run Bytes.append(&mut source, starts[part]) |> Effect.provideMut<Allocator>(&mut allocator)
+    let mut i: usize = 0
+    while i < 90 {
+      run Bytes.append(&mut source, b"<g>") |> Effect.provideMut<Allocator>(&mut allocator)
+      i = i + 1
+    }
+    run Bytes.append(&mut source, ends[part]) |> Effect.provideMut<Allocator>(&mut allocator)
+    i = 0
+    while i < 91 {
+      run Bytes.append(&mut source, b"</g>") |> Effect.provideMut<Allocator>(&mut allocator)
+      i = i + 1
+    }
+    part = part + 1
+  }
+  run Bytes.append(&mut source, b"</defs><use href='#a'/></svg>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut options = Options.defaults()
+  options.limits.maxOccurrenceDepth = 1000000
+  run limited(Bytes.asSlice(&source), &options, &mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

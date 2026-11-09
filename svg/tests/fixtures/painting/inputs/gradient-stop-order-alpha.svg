@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#StopNotes; Offsets clamp to [0,1], the descending .2 stop moves to .5 and wins at pixel center x=6.5; stop color alpha multiplies stop-opacity. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="4">
+<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1=".5" x2="12.5"><stop offset="-10%" stop-color="red"/><stop offset=".5" stop-color="red"/><stop offset=".2" stop-color="rgba(0,0,255,.5)" stop-opacity=".5"/><stop offset="120%" stop-color="rgba(0,0,255,.5)" stop-opacity=".5"/></linearGradient></defs><rect x="0" y="0" width="16" height="4" fill="white"/><rect x="0" y="0" width="16" height="4" fill="url(#g)"/>
+</svg>

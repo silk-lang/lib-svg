@@ -1,0 +1,2196 @@
+//! CPU execution of retained SVG commands through the pinned vector backend.
+//! Solids retain one alpha quantization; referenced paints share cached backend ramps.
+//! Group opacity is applied exactly once to an isolated premultiplied surface.
+import svg_core.scene {
+  BlendMode,
+  MaskComposite,
+  DisplayList,
+  Command,
+  RenderError,
+  FillRule,
+  LineCap,
+  LineJoin,
+  Brush,
+  PaintInstance,
+  Stroke
+}
+import svg_geometry.geometry { Path, isValidRect }
+import svg_core.mapping { Mapping, ProjectionClip }
+import svg_core.mapping
+import svg_core.vector_path
+import vector.path { Path as VectorPath }
+import vector.geometry { Rect as VectorRect, Point as VectorPoint, rectAt }
+import vector.projective { Homography, HalfPlane }
+import vector.projective
+import vector.geometry_error { GeometryError }
+import vector.pixmap { Pixmap, Rgba8 }
+import vector.strips { Rasterizer, Coverage, NONZERO, EVENODD, BAND }
+import vector.stroke as strokes
+import vector.stroke { Stroker, Stroke as VectorStroke }
+import vector.flatten { Line, TOLERANCE }
+import vector.flatten as flattening
+import vector.layer { Mask }
+import vector.filter as filters
+import vector.layer as layers
+import vector.paint { ImagePattern, SAMPLE_BILINEAR, SAMPLE_NEAREST, EXTEND_CLAMP }
+import vector.paint as painting
+import svg_filters.execute { Space, floorSnapped, ceilSnapped }
+import svg_filters.execute as filterGraph
+import silk.core.ownership { Copy }
+import svg_geometry.geometry { Rect, Transform }
+import silk.collections.slice { Slice }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+import silk.num.u32
+import silk.num.usize
+import clip_mask
+import silk.num.u8
+import vector.pixmap { div255, scalePacked }
+import checked
+import paints
+import patterns
+
+/// The `vector.layer` blend code of `mode`.
+pub fn blendCode(mode: BlendMode) -> u8 {
+  return match &mode {
+    BlendMode.Normal => layers.BLEND_NORMAL
+    BlendMode.Multiply => layers.BLEND_MULTIPLY
+    BlendMode.Screen => layers.BLEND_SCREEN
+    BlendMode.Overlay => layers.BLEND_OVERLAY
+    BlendMode.Darken => layers.BLEND_DARKEN
+    BlendMode.Lighten => layers.BLEND_LIGHTEN
+    BlendMode.ColorDodge => layers.BLEND_COLOR_DODGE
+    BlendMode.ColorBurn => layers.BLEND_COLOR_BURN
+    BlendMode.HardLight => layers.BLEND_HARD_LIGHT
+    BlendMode.SoftLight => layers.BLEND_SOFT_LIGHT
+    BlendMode.Difference => layers.BLEND_DIFFERENCE
+    BlendMode.Exclusion => layers.BLEND_EXCLUSION
+    BlendMode.Hue => layers.BLEND_HUE
+    BlendMode.Saturation => layers.BLEND_SATURATION
+    BlendMode.Color => layers.BLEND_COLOR
+    BlendMode.Luminosity => layers.BLEND_LUMINOSITY
+  }
+}
+
+/// A display-list path converted to a vector path on first use.
+pub struct Prepared {
+  ready: bool,
+  path: VectorPath,
+}
+
+/// One unconverted entry per path of `list`.
+pub effect fn preparedPaths(list: &DisplayList) -> List<Prepared>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut cache = List<Prepared>.make()
+  let mut p: usize = 0
+  while p < list.paths.length() {
+    run cache.append(Prepared { ready: false, path: VectorPath.make() })
+    p = p + 1
+  }
+  return move cache
+}
+
+impl Prepared {
+  /// The converted path; [`prepare`] must have run.
+  pub fn converted(self: &Self) -> &VectorPath {
+    return &self.path
+  }
+}
+
+/// Reusable stroking state: the stroker, its style and the outline it appends to.
+pub struct Strokes {
+  stroker: Stroker,
+  style: VectorStroke,
+  dashIndex: usize,
+  pub outline: VectorPath,
+}
+
+impl Strokes {
+  pub fn make(list: &DisplayList) -> Strokes {
+    return Strokes {
+      stroker: Stroker.make(),
+      style: VectorStroke.make(1.0),
+      dashIndex: list.dashes.length(),
+      outline: VectorPath.make(),
+    }
+  }
+
+  /// Reserves room for a typical small stroke, so a picture's first strokes do not regrow the
+  /// stroker's lists and the outline one doubling at a time.
+  pub effect fn reserve(self: &mut Self) -> ()
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    run self.stroker.reserve(256, 16)
+    run self.outline.reserve(64, 512)
+  }
+
+  /// Replaces [`outline`] with the stroke of `prepared` (a `Command.StrokePath`) and returns
+  /// the mapping that takes the outline to the device.
+  pub effect fn stroke(
+    self: &mut Self,
+    list: &DisplayList,
+    prepared: &VectorPath,
+    stroke: Stroke,
+    strokeSpace: Option<usize>,
+    placed: Mapping,
+    placement: Option<Mapping>,
+    viewport: VectorRect,
+  ) -> Mapping
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    let dashes = list.dashes.asSlice()[stroke.dashIndex].asSlice()
+    run checked.stroke(stroke, dashes)
+    self.style.width = stroke.width
+    self.style.miterLimit = stroke.miterLimit
+    self.style.dashOffset = stroke.dashOffset
+    self.style.cap = match stroke.cap {
+      LineCap.Butt => strokes.CAP_BUTT
+      LineCap.Round => strokes.CAP_ROUND
+      LineCap.Square => strokes.CAP_SQUARE
+    }
+    self.style.join = match stroke.join {
+      LineJoin.Miter => strokes.JOIN_MITER
+      LineJoin.Round => strokes.JOIN_ROUND
+      LineJoin.Bevel => strokes.JOIN_BEVEL
+      LineJoin.MiterClip => strokes.JOIN_MITER_CLIP
+      LineJoin.Arcs => strokes.JOIN_ARCS
+    }
+    if self.dashIndex != stroke.dashIndex {
+      run self.style.setDashes(dashes)
+      self.dashIndex = stroke.dashIndex
+    }
+    self.outline.clear()
+    let mut outlinePlacement = placed
+    match &strokeSpace {
+      Option<usize>.Some { value: index } => {
+        let space = &list.strokeSpaces.asSlice()[index]
+        let centerline = match &space.pathToHost {
+          Mapping.Affine { value } => Homography.fromAffine(&value)
+          Mapping.Projective { value } => value
+        }
+        let host = run placedMapping(&space.hostToDevice, placement)
+        let hostPlacement = match &host {
+          Mapping.Affine { value } => Homography.fromAffine(&value)
+          Mapping.Projective { value } => value
+        }
+        run self.stroker.strokeInSpace(
+          prepared,
+          &self.style,
+          &centerline,
+          &hostPlacement,
+          viewport,
+          TOLERANCE * 0.5,
+          &mut self.outline,
+        )
+        outlinePlacement = host
+      }
+      _ => {
+        match &placed {
+          Mapping.Affine { value } => {
+            run self.stroker.stroke(
+              prepared,
+              &self.style,
+              &value,
+              TOLERANCE * 0.5,
+              &mut self.outline,
+            )
+          }
+          Mapping.Projective { value } => {
+            run self.stroker.strokeProjective(
+              prepared,
+              &self.style,
+              &value,
+              viewport,
+              TOLERANCE * 0.5,
+              &mut self.outline,
+            )
+          }
+        }
+      }
+    }
+    return outlinePlacement
+  }
+}
+
+/// The projective clip planes of the selected `ProjectionClip` chain, kept until it changes.
+pub struct ClipPlanes {
+  selected: Option<usize>,
+  ready: bool,
+  pub planes: List<HalfPlane>,
+}
+
+impl ClipPlanes {
+  pub fn make() -> ClipPlanes {
+    return ClipPlanes { selected: Option<usize>.None, ready: false, planes: List<HalfPlane>.make() }
+  }
+
+  pub effect fn select(
+    self: &mut ClipPlanes,
+    index: Option<usize>,
+    clips: &[ProjectionClip],
+    placement: Option<Mapping>,
+    inherited: &[HalfPlane],
+  ) -> ()
+    ! RenderError | GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    let same = match &index {
+      Option<usize>.Some { value } => match &self.selected {
+        Option<usize>.Some { value: previous } => value == previous
+        _ => false
+      }
+      _ => match &self.selected {
+        Option<usize>.None => true
+        _ => false
+      }
+    }
+    let root = match &placement {
+      Option<Mapping>.None => true
+      _ => false
+    }
+    if self.ready && same && root {
+      return
+    }
+    self.planes.clear()
+    let mut cursor = index
+    while true {
+      let next = match &cursor {
+        Option<usize>.Some { value } => value
+        _ => {
+          break
+        }
+      }
+      let mut plane = clips[next].plane
+      match &placement {
+        Option<Mapping>.Some { value: placed } => {
+          let matrix = match &placed {
+            Mapping.Affine { value } => Homography.fromAffine(&value)
+            Mapping.Projective { value } => value
+          }
+          let inverse = match &matrix.inverse() {
+            Option<Homography>.Some { value } => value
+            _ => {
+              fail RenderError.InvalidGeometry
+            }
+          }
+          plane = HalfPlane {
+            x: plane.x * inverse.xx + plane.y * inverse.yx + plane.w * inverse.wx,
+            y: plane.x * inverse.xy + plane.y * inverse.yy + plane.w * inverse.wy,
+            w: plane.x * inverse.xw + plane.y * inverse.yw + plane.w * inverse.ww,
+          }
+          if !f64.isFinite(plane.x) || !f64.isFinite(plane.y) || !f64.isFinite(plane.w) {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        _ => {}
+      }
+      run self.planes.append(plane)
+      cursor = clips[next].parent
+    }
+    if let Option<Mapping>.Some { value } = &placement {
+      if let Option<HalfPlane>.Some { value: plane } = &(run value.flatteningClip()) {
+        run self.planes.append(plane)
+      }
+    }
+    let mut i: usize = 0
+    while i < inherited.length {
+      run self.planes.append(inherited[i])
+      i = i + 1
+    }
+    self.ready = true
+    self.selected = index
+  }
+}
+
+struct Layer {
+  pixels: Pixmap,
+  opacity: u8,
+  blendMode: u8,
+  linearRgb: bool,
+  // Every pixel outside is transparent.
+  dirty: Dirty,
+}
+
+// A half-open pixel box; empty when x0 >= x1 or y0 >= y1.
+struct Dirty {
+  x0: u32,
+  y0: u32,
+  x1: u32,
+  y1: u32,
+}
+
+impl Copy for Dirty {}
+
+impl Dirty {
+  fn none() -> Dirty {
+    return Dirty { x0: 0, y0: 0, x1: 0, y1: 0 }
+  }
+
+  fn all(width: u32, height: u32) -> Dirty {
+    return Dirty { x0: 0, y0: 0, x1: width, y1: height }
+  }
+
+  fn isEmpty(self: &Self) -> bool {
+    return self.x0 >= self.x1 || self.y0 >= self.y1
+  }
+
+  fn merge(self: &Self, other: Dirty) -> Dirty {
+    if self.isEmpty() {
+      return other
+    }
+    if other.isEmpty() {
+      return self.*
+    }
+    return Dirty {
+      x0: if other.x0 < self.x0 {
+        other.x0
+      } else {
+        self.x0
+      },
+      y0: if other.y0 < self.y0 {
+        other.y0
+      } else {
+        self.y0
+      },
+      x1: if other.x1 > self.x1 {
+        other.x1
+      } else {
+        self.x1
+      },
+      y1: if other.y1 > self.y1 {
+        other.y1
+      } else {
+        self.y1
+      },
+    }
+  }
+}
+
+// The pixels coverage touches, clipped to the canvas.
+fn coverageBounds(coverage: &Coverage, width: u32, height: u32) -> Dirty {
+  let mut out = Dirty.none()
+  let strips = coverage.strips()
+  let mut i: usize = 0
+  while i < strips.length {
+    let strip = strips[i]
+    out = out.merge(
+      Dirty { x0: strip.x, y0: strip.y, x1: strip.x + strip.width, y1: strip.y + BAND },
+    )
+    i = i + 1
+  }
+  let fills = coverage.fills()
+  i = 0
+  while i < fills.length {
+    let span = fills[i]
+    out = out.merge(Dirty { x0: span.x, y0: span.y, x1: span.x + span.width, y1: span.y + BAND })
+    i = i + 1
+  }
+  if out.x1 > width {
+    out.x1 = width
+  }
+  if out.y1 > height {
+    out.y1 = height
+  }
+  return out
+}
+
+// Clears a layer's dirty box, leaving its pixmap all transparent for reuse.
+fn recycled(layer: Layer) -> Pixmap {
+  let dirty = layer.dirty
+  let mut pixels = move layer.pixels
+  if !dirty.isEmpty() {
+    let stride = u32.toUsize(pixels.width()) * 4
+    let d = pixels.dataMut()
+    let mut y = dirty.y0
+    while y < dirty.y1 {
+      let row = u32.toUsize(y) * stride
+      let mut at = row + u32.toUsize(dirty.x0) * 4
+      let end = row + u32.toUsize(dirty.x1) * 4
+      while at < end {
+        d[at] = 0
+        at = at + 1
+      }
+      y = y + 1
+    }
+  }
+  return move pixels
+}
+
+/// Executes a display list without copying the returned vector-owned pixel buffer.
+/// Invalid dimensions, command stacks, path/dash indices and unrepresentable vector
+/// arithmetic fail before the relevant backend operation. Scratch and isolated
+/// surfaces are reused across commands and overflow copies. Pattern dependencies
+/// are cycle-checked iteratively, then rendered once per device-resolution key.
+///
+/// `crispEdges` and `optimizeSpeed` select binary coverage before paint application.
+/// Exact source ellipses and curvature-aware joins are delegated to vector.
+pub effect fn execute(list: &DisplayList) -> Pixmap
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return run Effect.catch<GeometryError>(executeChecked(list), geometryFailure)
+}
+
+effect fn geometryFailure(error: GeometryError) -> Pixmap
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidGeometry
+}
+
+effect fn executeChecked(list: &DisplayList) -> Pixmap
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  return run executePlaced(
+    list,
+    list.width,
+    list.height,
+    Option<Mapping>.None,
+    &[],
+    checked.MAX_SURFACE_PIXELS,
+    0,
+  )
+}
+
+/// Checks `list` before execution on a `width` by `height` target: dimensions, paints,
+/// clips, command nesting and indices, pattern tiles and pattern cycles.
+pub effect fn validate(list: &DisplayList, width: u32, height: u32) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  run checked.dimensions(width, height)
+  run checked.dimensions(list.width, list.height)
+  run paints.validate(list)
+  run validateClips(list.projectionClips.asSlice())
+  run validateCommands(list, list.commands.asSlice(), width, height)
+  let mut resource: usize = 0
+  while resource < list.patterns.length() {
+    let picture = &list.patterns.asSlice()[resource]
+    if !isValidRect(picture.tile) || picture.tile.xMin != 0.0 || picture.tile.yMin != 0.0
+      || picture.tile.xMax <= 0.0
+      || picture.tile.yMax <= 0.0
+      || !isValidRect(picture.contentBounds) {
+      fail RenderError.InvalidGeometry
+    }
+    run validateCommands(list, picture.commands.asSlice(), 1, 1)
+    resource = resource + 1
+  }
+  run validateCycles(list)
+}
+
+/// Executes `commands`, a balanced run of `list`'s root commands, onto a transparent
+/// canvas of the list's size, sharing the caller's caches. `list` must be validated.
+pub effect fn executeSlice(
+  list: &DisplayList,
+  commands: &[Command],
+  cache: &mut List<Prepared>,
+  paintCache: &mut paints.Cache,
+  textures: &mut patterns.Cache,
+) -> Pixmap
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  return run picture(
+    list,
+    commands,
+    list.width,
+    list.height,
+    &patterns.root(),
+    true,
+    Option<Mapping>.None,
+    &[],
+    0,
+    &mut cache.*,
+    &mut paintCache.*,
+    &mut textures.*,
+  )
+}
+
+effect fn executePlaced(
+  list: &DisplayList,
+  width: u32,
+  height: u32,
+  placement: Option<Mapping>,
+  inherited: &[HalfPlane],
+  surfaceLimit: usize,
+  depth: usize,
+) -> Pixmap
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  if depth >= 64 {
+    fail RenderError.TooLarge
+  }
+  run validate(list, width, height)
+  let mut paintCache = run paints.make(list)
+  let mut cache = run preparedPaths(list)
+  let mut textures = run patterns.make(list.patterns.length())
+  textures.surfaceLimit = surfaceLimit
+  run patterns.surface(&mut textures, u32.toUsize(width) * u32.toUsize(height))
+  return run picture(
+    list,
+    list.commands.asSlice(),
+    width,
+    height,
+    &patterns.root(),
+    true,
+    placement,
+    inherited,
+    depth,
+    &mut cache,
+    &mut paintCache,
+    &mut textures,
+  )
+}
+
+effect fn picture(
+  list: &DisplayList,
+  commands: &[Command],
+  width: u32,
+  height: u32,
+  copies: &patterns.Copies,
+  root: bool,
+  rootPlacement: Option<Mapping>,
+  inherited: &[HalfPlane],
+  depth: usize,
+  cache: &mut List<Prepared>,
+  paintCache: &mut paints.Cache,
+  textures: &mut patterns.Cache,
+) -> Pixmap
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let sourcePaths = list.paths.asSlice()
+  let mut stack = List<Layer>.make()
+  let mut spare = List<Pixmap>.make()
+  let pixels = run Pixmap.make(width, height)
+  run stack.append(
+    Layer {
+      pixels: move pixels,
+      opacity: 255,
+      linearRgb: false,
+      blendMode: layers.BLEND_NORMAL,
+      dirty: Dirty.none(),
+    },
+  )
+  let mut rasterizer = Rasterizer.make()
+  let mut coverage = Coverage.make(width, height)
+  let mut stroking = Strokes.make(list)
+  run stroking.reserve()
+  let mut lines = List<Line>.make()
+  run lines.reserve(256)
+  let mut planes = ClipPlanes.make()
+  let viewport = rectAt(0.0, 0.0, u32.toF64(width), u32.toF64(height))
+  let mut row: usize = 0
+  while row < copies.rows {
+    let mut column: usize = 0
+    while column < copies.columns {
+      let placement = if root {
+        rootPlacement
+      } else {
+        Option<Mapping>.some(run patterns.placement(copies, column, row))
+      }
+      let mut i: usize = 0
+      while i < commands.length {
+        match &commands[i] {
+          Command.Embedded { image, transform, clip } => {
+            if let Option<DisplayList>.Some { value } = &list.embedded.asSlice()[image] {
+              run planes.select(clip, list.projectionClips.asSlice(), placement, inherited)
+              let placed = run placedMapping(&transform, placement)
+              let pixels = run executePlaced(
+                &value,
+                width,
+                height,
+                Option<Mapping>.some(placed),
+                planes.planes.asSlice(),
+                textures.surfaceLimit - textures.surfaces,
+                depth + 1,
+              )
+              let target = stack.length() - 1
+              layers.composite(
+                &mut stack.asMutSlice()[target].pixels,
+                &pixels,
+                layers.BLEND_NORMAL,
+                255,
+              )
+              let written = &mut stack.asMutSlice()[target]
+              written.dirty = Dirty.all(width, height)
+            }
+          }
+          Command.FillPath {
+            path,
+            transform,
+            clip,
+            bounds,
+            brush,
+            opacity,
+            linearRgb,
+            rule,
+            crispEdges
+          } => {
+            let texture = run prepareBrush(
+              &brush,
+              placement,
+              width,
+              height,
+              list,
+              &mut cache.*,
+              &mut paintCache.*,
+              &mut textures.*,
+              depth,
+            )
+            run planes.select(clip, list.projectionClips.asSlice(), placement, inherited)
+            let placed = run placedMapping(&transform, placement)
+            run prepare(&sourcePaths[path], &mut cache.asMutSlice()[path])
+            let prepared = &cache.asSlice()[path].path
+            let fillRule = if rule == FillRule.EvenOdd {
+              EVENODD
+            } else {
+              NONZERO
+            }
+            run fill(
+              prepared,
+              &placed,
+              viewport,
+              planes.planes.asSlice(),
+              fillRule,
+              TOLERANCE,
+              &mut rasterizer,
+              &mut coverage,
+              &mut lines,
+            )
+            if crispEdges {
+              coverage.binarize()
+            }
+            let target = stack.length() - 1
+            run paints.fill(
+              &mut paintCache.*,
+              &mut stack.asMutSlice()[target].pixels,
+              &coverage,
+              &brush,
+              opacity,
+              linearRgb,
+              list,
+              placement,
+              &textures.*,
+              texture,
+            )
+            let touched = coverageBounds(&coverage, width, height)
+            let layer = &mut stack.asMutSlice()[target]
+            layer.dirty = layer.dirty.merge(touched)
+          }
+          Command.StrokePath {
+            path,
+            transform,
+            strokeSpace,
+            clip,
+            bounds,
+            brush,
+            opacity,
+            linearRgb,
+            stroke,
+            crispEdges
+          } => {
+            let texture = run prepareBrush(
+              &brush,
+              placement,
+              width,
+              height,
+              list,
+              &mut cache.*,
+              &mut paintCache.*,
+              &mut textures.*,
+              depth,
+            )
+            run planes.select(clip, list.projectionClips.asSlice(), placement, inherited)
+            let placed = run placedMapping(&transform, placement)
+            run prepare(&sourcePaths[path], &mut cache.asMutSlice()[path])
+            let prepared = &cache.asSlice()[path].path
+            let outlinePlacement = run stroking.stroke(
+              list,
+              prepared,
+              stroke,
+              strokeSpace,
+              placed,
+              placement,
+              viewport,
+            )
+            run fill(
+              &stroking.outline,
+              &outlinePlacement,
+              viewport,
+              planes.planes.asSlice(),
+              NONZERO,
+              TOLERANCE * 0.5,
+              &mut rasterizer,
+              &mut coverage,
+              &mut lines,
+            )
+            if crispEdges {
+              coverage.binarize()
+            }
+            let target = stack.length() - 1
+            run paints.fill(
+              &mut paintCache.*,
+              &mut stack.asMutSlice()[target].pixels,
+              &coverage,
+              &brush,
+              opacity,
+              linearRgb,
+              list,
+              placement,
+              &textures.*,
+              texture,
+            )
+            let touched = coverageBounds(&coverage, width, height)
+            let layer = &mut stack.asMutSlice()[target]
+            layer.dirty = layer.dirty.merge(touched)
+          }
+
+          // A layer of opacity 0 leaves its target as it is (Compositing 1 #groupcompositing);
+          // it is recorded only so that hit testing sees its content.
+          Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+            if opacity == 0.0 {
+              i = layerEnd(commands, i)
+            } else {
+              let available = spare.length()
+
+              // Spare pixmaps come back cleared (recycled).
+              let pixels = if available > 0 {
+                spare.remove(available - 1)
+              } else {
+                run patterns.surface(&mut textures.*, u32.toUsize(width) * u32.toUsize(height))
+                run Pixmap.make(width, height)
+              }
+              run stack.append(
+                Layer {
+                  pixels: move pixels,
+                  opacity: run checked.unit(opacity),
+                  linearRgb: linearRgb,
+                  blendMode: blendCode(blendMode),
+                  dirty: Dirty.none(),
+                },
+              )
+            }
+          }
+          Command.ConvertMask { luminance, linearRgb } => {
+            let maskPixels = u32.toUsize(width) * u32.toUsize(height)
+            if maskPixels > textures.surfaceLimit - textures.surfaces {
+              fail RenderError.TooLarge
+            }
+            let top = stack.length() - 1
+            let layer = &mut stack.asMutSlice()[top]
+            if luminance && linearRgb {
+              filters.toLinear(&mut layer.pixels)
+            }
+
+            // Transparent pixels outside the box convert to transparent.
+            let box = layer.dirty
+            let pixels = layer.pixels.dataMut()
+            let mut y = box.y0
+            while y < box.y1 {
+              let mut at = (u32.toUsize(y) * u32.toUsize(width) + u32.toUsize(box.x0)) * 4
+              let end = at + u32.toUsize(box.x1 - box.x0) * 4
+              while at < end {
+                let value = maskValue(
+                  pixels[at],
+                  pixels[at + 1],
+                  pixels[at + 2],
+                  pixels[at + 3],
+                  luminance,
+                )
+                pixels[at] = value
+                pixels[at + 1] = value
+                pixels[at + 2] = value
+                pixels[at + 3] = value
+                at = at + 4
+              }
+              y = y + 1
+            }
+          }
+          Command.CompositeMask { operation } => {
+            let top = stack.length() - 1
+            let layer = stack.remove(top)
+            let target = stack.length() - 1
+            let source = layer.pixels.data()
+            let merged = stack.asSlice()[target].dirty.merge(layer.dirty)
+            let written = &mut stack.asMutSlice()[target]
+            written.dirty = merged
+            let pixels = stack.asMutSlice()[target].pixels.dataMut()
+            let mut at: usize = 0
+            while at < pixels.length {
+              let a = u8.toU32(source[at + 3])
+              let b = u8.toU32(pixels[at + 3])
+              let coverage = match operation {
+                MaskComposite.Add => a + div255(b * (255 - a))
+                MaskComposite.Subtract => div255(a * (255 - b))
+                MaskComposite.Intersect => div255(a * b)
+                MaskComposite.Exclude => div255(a * (255 - b) + b * (255 - a))
+              }
+              let mut channel: usize = 0
+              while channel < 4 {
+                pixels[at + channel] = u32.toU8(coverage)
+                channel = channel + 1
+              }
+              at = at + 4
+            }
+            run spare.append(recycled(move layer))
+          }
+          Command.ApplyMask { luminance, linearRgb } => {
+            let maskPixels = u32.toUsize(width) * u32.toUsize(height)
+            if maskPixels > textures.surfaceLimit - textures.surfaces {
+              fail RenderError.TooLarge
+            }
+            let top = stack.length() - 1
+            let mut layer = stack.remove(top)
+            if luminance && linearRgb {
+              filters.toLinear(&mut layer.pixels)
+            }
+            let target = stack.length() - 1
+            let targetDirty = stack.asSlice()[target].dirty
+            let pixels = stack.asMutSlice()[target].pixels.dataMut()
+            applyMaskLayer(
+              &mut pixels,
+              layer.pixels.data(),
+              luminance,
+              targetDirty,
+              layer.dirty,
+              width,
+            )
+            run spare.append(recycled(move layer))
+          }
+          Command.ApplyClip { index } => {
+            let placed = match &placement {
+              Option<Mapping>.Some { value } => value
+              _ => Mapping.identity()
+            }
+            let target = stack.length() - 1
+            let targetDirty = stack.asSlice()[target].dirty
+
+            // Only the target's dirty box reads the mask, so only that box is built.
+            let mask = run clip_mask.renderWithin(
+              list.clipNodes.asSlice(),
+              sourcePaths,
+              index,
+              width,
+              height,
+              &placed,
+              textures.surfaceLimit - textures.surfaces,
+              targetDirty.x0,
+              targetDirty.y0,
+              targetDirty.x1,
+              targetDirty.y1,
+            )
+            let pixels = stack.asMutSlice()[target].pixels.dataMut()
+            applyBoxCoverage(&mut pixels, mask.data(), targetDirty, width)
+          }
+          Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+            let end = filterEnd(commands, i)
+            run planes.select(clip, list.projectionClips.asSlice(), placement, inherited)
+            let placed = run placedMapping(&transform, placement)
+            let program = &list.filters.asSlice()[filter]
+            let found = run filterSurface(
+              program.region,
+              program.resolution,
+              &placed,
+              placement,
+              width,
+              height,
+            )
+            if let Option<FilterSurface>.Some { value: surface } = &found {
+              let area = u32.toUsize(surface.width) * u32.toUsize(surface.height)
+              let buffers = program.primitives.length() + program.images + 11
+              if buffers > (textures.surfaceLimit - textures.surfaces) / area {
+                fail RenderError.TooLarge
+              }
+              run patterns.surface(&mut textures.*, area * buffers)
+
+              // Image layers come first, each up to its EndFilterImage; the rest is the source.
+              let mut images = List<Pixmap>.make()
+              let mut start = i + 1
+              while start < end && opensFilterImage(&commands[start]) {
+                let close = filterImageEnd(commands, start)
+                let image = run picture(
+                  list,
+                  Slice.view<Command>(commands, start + 1, close - start - 1),
+                  surface.width,
+                  surface.height,
+                  &patterns.root(),
+                  true,
+                  Option<Mapping>.some(surface.content),
+                  &[],
+                  depth,
+                  &mut cache.*,
+                  &mut paintCache.*,
+                  &mut textures.*,
+                )
+                run images.append(move image)
+                start = close + 1
+              }
+              if program.background {
+                let mut top = stack.length() - 1
+                if beneath && top > 0 {
+                  top = top - 1
+                }
+                run planes.select(backdrop, list.projectionClips.asSlice(), placement, inherited)
+                run images.append(
+                  run backdropImage(
+                    &stack.asSlice()[top],
+                    &surface,
+                    if backdrop.isSome() {
+                      planes.planes.asSlice()
+                    } else {
+                      &[]
+                    },
+                  ),
+                )
+                run planes.select(clip, list.projectionClips.asSlice(), placement, inherited)
+              }
+              let source = run picture(
+                list,
+                Slice.view<Command>(commands, start, end - start),
+                surface.width,
+                surface.height,
+                &patterns.root(),
+                true,
+                Option<Mapping>.some(surface.content),
+                &[],
+                depth,
+                &mut cache.*,
+                &mut paintCache.*,
+                &mut textures.*,
+              )
+              let result = run filterGraph.apply(program, &source, images.asSlice(), surface.space)
+              textures.surfaces = textures.surfaces - area * buffers
+              let mut rectangle = VectorPath.make()
+              run rectangle.rect(
+                rectAt(0.0, 0.0, u32.toF64(surface.width), u32.toF64(surface.height)),
+              )
+              run fill(
+                &rectangle,
+                &surface.output,
+                viewport,
+                planes.planes.asSlice(),
+                NONZERO,
+                TOLERANCE,
+                &mut rasterizer,
+                &mut coverage,
+                &mut lines,
+              )
+              let output = match &surface.output {
+                Mapping.Affine { value } => Homography.fromAffine(&value)
+                Mapping.Projective { value } => value
+              }
+              let shader = run ImagePattern.makeProjective(
+                &result,
+                &output,
+                if surface.axis {
+                  SAMPLE_NEAREST
+                } else {
+                  SAMPLE_BILINEAR
+                },
+                EXTEND_CLAMP,
+              )
+              let target = stack.length() - 1
+              painting.fill(&mut stack.asMutSlice()[target].pixels, &coverage, &shader, 255)
+              let touched = coverageBounds(&coverage, width, height)
+              let layer = &mut stack.asMutSlice()[target]
+              layer.dirty = layer.dirty.merge(touched)
+            }
+            i = end
+          }
+          Command.EndFilter => {}
+          Command.BeginFilterImage => {}
+          Command.EndFilterImage => {}
+          Command.Hit { path, transform, strokeSpace, clip, rule, stroke, target } => {}
+          Command.PopLayer => {
+            let top = stack.length() - 1
+            let layer = stack.remove(top)
+            let target = stack.length() - 1
+            if layer.linearRgb {
+              // Linear blending converts every target pixel, transparent sources included.
+              layers.compositeLinearRgb(
+                &mut stack.asMutSlice()[target].pixels,
+                &layer.pixels,
+                layer.blendMode,
+                layer.opacity,
+              )
+              let written = &mut stack.asMutSlice()[target]
+              written.dirty = Dirty.all(width, height)
+            } else if !layer.dirty.isEmpty() {
+              // Transparent source pixels leave the target as it is.
+              let d = layer.dirty
+              layers.compositeWithin(
+                &mut stack.asMutSlice()[target].pixels,
+                &layer.pixels,
+                layer.blendMode,
+                layer.opacity,
+                d.x0,
+                d.y0,
+                d.x1,
+                d.y1,
+              )
+              let below = &mut stack.asMutSlice()[target]
+              below.dirty = below.dirty.merge(d)
+            }
+            run spare.append(recycled(move layer))
+          }
+        }
+        i = i + 1
+      }
+      column = column + 1
+    }
+    row = row + 1
+  }
+  textures.surfaces = textures.surfaces - spare.length() * u32.toUsize(width) * u32.toUsize(height)
+  let output = stack.remove(0)
+  return move output.pixels
+}
+
+/// #attr-valuedef-in-backgroundimage: the current isolation group's pixels behind the
+/// filter, sampled at each surface pixel's center, in sRGB, kept where the center lies
+/// inside every plane of `region`.
+effect fn backdropImage(layer: &Layer, surface: &FilterSurface, region: &[HalfPlane]) -> Pixmap
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Pixmap.make(surface.width, surface.height)
+  let output = match &surface.output {
+    Mapping.Affine { value } => Homography.fromAffine(&value)
+    Mapping.Projective { value } => value
+  }
+  let width = layer.pixels.width()
+  let height = layer.pixels.height()
+  let from = layer.pixels.data()
+  let to = out.dataMut()
+  let mut y: u32 = 0
+  while y < surface.height {
+    let mut x: u32 = 0
+    while x < surface.width {
+      let center = VectorPoint { x: u32.toF64(x) + 0.5, y: u32.toF64(y) + 0.5 }
+      if let Option<VectorPoint>.Some { value: p } = &output.project(center) {
+        if p.x >= 0.0 && p.y >= 0.0 && p.x < u32.toF64(width) && p.y < u32.toF64(height)
+          && inside(region, p) {
+          let at = (f64.toUsize(p.y) * u32.toUsize(width) + f64.toUsize(p.x)) * 4
+          let into = (u32.toUsize(y) * u32.toUsize(surface.width) + u32.toUsize(x)) * 4
+          to[into] = from[at]
+          to[into + 1] = from[at + 1]
+          to[into + 2] = from[at + 2]
+          to[into + 3] = from[at + 3]
+        }
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+  if layer.linearRgb {
+    filters.toSrgb(&mut out)
+  }
+  return move out
+}
+
+fn inside(planes: &[HalfPlane], p: VectorPoint) -> bool {
+  let mut i: usize = 0
+  while i < planes.length {
+    let plane = planes[i]
+    if plane.x * p.x + plane.y * p.y + plane.w < 0.0 {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// The PopLayer matching the PushLayer at `begin`; validation guarantees one. A mask
+// layer closes with CompositeMask or ApplyMask.
+pub fn layerEnd(commands: &[Command], begin: usize) -> usize {
+  let mut nested: usize = 0
+  let mut i = begin + 1
+  while i < commands.length {
+    match &commands[i] {
+      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+        nested = nested + 1
+      }
+      Command.PopLayer => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      Command.CompositeMask { operation } => {
+        nested = nested - 1
+      }
+      Command.ApplyMask { luminance, linearRgb } => {
+        nested = nested - 1
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return commands.length
+}
+
+fn opensFilterImage(command: &Command) -> bool {
+  return match &command.* {
+    Command.BeginFilterImage => true
+    _ => false
+  }
+}
+
+// The EndFilterImage matching the BeginFilterImage at `begin`; validation guarantees one.
+fn filterImageEnd(commands: &[Command], begin: usize) -> usize {
+  let mut nested: usize = 0
+  let mut i = begin + 1
+  while i < commands.length {
+    match &commands[i] {
+      Command.BeginFilterImage => {
+        nested = nested + 1
+      }
+      Command.EndFilterImage => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return commands.length
+}
+
+// The EndFilter matching the BeginFilter at `begin`; validation guarantees one.
+pub fn filterEnd(commands: &[Command], begin: usize) -> usize {
+  let mut nested: usize = 0
+  let mut i = begin + 1
+  while i < commands.length {
+    match &commands[i] {
+      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+        nested = nested + 1
+      }
+      Command.EndFilter => {
+        if nested == 0 {
+          return i
+        }
+        nested = nested - 1
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return commands.length
+}
+
+/// Where a filter runs: a pixel surface in filter space, a scaled copy of the filtered
+/// element's user space (Filter Effects 1 #filter-region: the region's axes stay parallel to
+/// user space). When user space maps to the device by a positive scale and translation, the
+/// surface's pixels are the device's pixels.
+struct FilterSurface {
+  width: u32,
+  height: u32,
+  space: Space,
+  /// Display-list root to surface pixels.
+  content: Mapping,
+  /// Surface pixels to device pixels.
+  output: Mapping,
+  axis: bool,
+}
+
+impl Copy for FilterSurface {}
+
+effect fn homography(value: &Mapping) -> Homography {
+  return match &value.* {
+    Mapping.Affine { value: affine } => Homography.fromAffine(&affine)
+    Mapping.Projective { value: projective } => projective
+  }
+}
+
+effect fn filterSurface(
+  region: Rect,
+  resolution: [f64; 2],
+  placed: &Mapping,
+  placement: Option<Mapping>,
+  width: u32,
+  height: u32,
+) -> Option<FilterSurface>
+  ! RenderError | GeometryError {
+  let mut axis = false
+  let mut sx = 1.0
+  let mut sy = 1.0
+  let mut tx = 0.0
+  let mut ty = 0.0
+  match &placed.* {
+    Mapping.Affine { value } => {
+      if value.yx == 0.0 && value.xy == 0.0 && value.xx > 0.0 && value.yy > 0.0 {
+        axis = true
+        sx = value.xx
+        sy = value.yy
+        tx = value.dx
+        ty = value.dy
+      } else {
+        sx = f64.sqrt(value.xx * value.xx + value.yx * value.yx)
+        sy = f64.sqrt(value.xy * value.xy + value.yy * value.yy)
+      }
+    }
+    _ => {}
+  }
+
+  // SVG 1.1 filterRes fixes the surface: the region spans exactly that many pixels.
+  let fixed = resolution[0] > 0.0 && resolution[1] > 0.0
+  if fixed {
+    if !(region.width() > 0.0) || !(region.height() > 0.0) {
+      return Option<FilterSurface>.None
+    }
+    axis = false
+    sx = resolution[0] / region.width()
+    sy = resolution[1] / region.height()
+    tx = 0.0 - region.xMin * sx
+    ty = 0.0 - region.yMin * sy
+  }
+  if !(sx > 0.0) || !(sy > 0.0) || !f64.isFinite(sx) || !f64.isFinite(sy) {
+    return Option<FilterSurface>.None
+  }
+  let mut x0 = floorSnapped(region.xMin * sx + tx)
+  let mut y0 = floorSnapped(region.yMin * sy + ty)
+  let mut x1 = ceilSnapped(region.xMax * sx + tx)
+  let mut y1 = ceilSnapped(region.yMax * sy + ty)
+
+  // Keep what can reach the canvas: the canvas grown by its own size on every side.
+  let w = u32.toF64(width)
+  let h = u32.toF64(height)
+  let corners = [
+    VectorPoint.new(0.0 - w, 0.0 - h),
+    VectorPoint.new(2.0 * w, 0.0 - h),
+    VectorPoint.new(0.0 - w, 2.0 * h),
+    VectorPoint.new(2.0 * w, 2.0 * h),
+  ]
+  let device = run homography(placed)
+  let mut limited = axis
+  if fixed {
+    x0 = 0.0
+    y0 = 0.0
+    x1 = resolution[0]
+    y1 = resolution[1]
+  }
+  let mut lx0 = 0.0 - w
+  let mut ly0 = 0.0 - h
+  let mut lx1 = 2.0 * w
+  let mut ly1 = 2.0 * h
+  if !axis && !fixed {
+    if let Option<Homography>.Some { value: inverse } = &device.inverse() {
+      limited = true
+      lx0 = f64.INFINITY
+      ly0 = f64.INFINITY
+      lx1 = -f64.INFINITY
+      ly1 = -f64.INFINITY
+      let mut c: usize = 0
+      while c < 4 {
+        match &inverse.project(corners[c]) {
+          Option<VectorPoint>.Some { value } => {
+            lx0 = f64.min(lx0, value.x * sx)
+            ly0 = f64.min(ly0, value.y * sy)
+            lx1 = f64.max(lx1, value.x * sx)
+            ly1 = f64.max(ly1, value.y * sy)
+          }
+          _ => {
+            limited = false
+          }
+        }
+        c = c + 1
+      }
+    }
+  }
+  if limited {
+    x0 = f64.max(x0, f64.floor(lx0))
+    y0 = f64.max(y0, f64.floor(ly0))
+    x1 = f64.min(x1, f64.ceil(lx1))
+    y1 = f64.min(y1, f64.ceil(ly1))
+  }
+  if !(x1 > x0) || !(y1 > y0) {
+    return Option<FilterSurface>.None
+  }
+  if x1 - x0 > usize.toF64(checked.MAX_SURFACE_PIXELS)
+    || y1 - y0 > usize.toF64(checked.MAX_SURFACE_PIXELS)
+    || (x1 - x0) * (y1 - y0) > usize.toF64(checked.MAX_SURFACE_PIXELS) {
+    fail RenderError.TooLarge
+  }
+  let local = Transform.new(sx, 0.0, 0.0, sy, tx - x0, ty - y0)
+  let mut content = Mapping.Affine { value: Transform.new(1.0, 0.0, 0.0, 1.0, 0.0 - x0, 0.0 - y0) }
+  let mut output = Mapping.Affine { value: Transform.new(1.0, 0.0, 0.0, 1.0, x0, y0) }
+  if axis {
+    if let Option<Mapping>.Some { value } = &placement {
+      content = run content.compose(&value)
+    }
+  } else {
+    let inverse = match &device.inverse() {
+      Option<Homography>.Some { value } => value
+      _ => {
+        return Option<FilterSurface>.None
+      }
+    }
+    let scaled = Homography.fromAffine(&local)
+    let mut toSurface = run scaled.compose(&inverse)
+    if let Option<Mapping>.Some { value } = &placement {
+      toSurface = run toSurface.compose(&(run homography(&value)))
+    }
+    content = run Mapping.fromHomography(toSurface)
+    let unscaled = match &scaled.inverse() {
+      Option<Homography>.Some { value } => value
+      _ => {
+        return Option<FilterSurface>.None
+      }
+    }
+    output = run Mapping.fromHomography(run device.compose(&unscaled))
+  }
+  return Option<FilterSurface>.some(
+    FilterSurface {
+      width: f64.toU32(x1 - x0),
+      height: f64.toU32(y1 - y0),
+      space: Space { sx: sx, sy: sy, tx: tx - x0, ty: ty - y0 },
+      content: content,
+      output: output,
+      axis: axis,
+    },
+  )
+}
+
+pub effect fn placedMapping(matrix: &Mapping, placement: Option<Mapping>) -> Mapping
+  ! GeometryError {
+  return match &placement {
+    Option<Mapping>.Some { value } => run value.compose(matrix)
+    _ => matrix.*
+  }
+}
+
+fn patternBrush(brush: &Brush, list: &DisplayList) -> Option<usize> {
+  match &brush.* {
+    Brush.Server { index } => match &list.paints.asSlice()[index] {
+      PaintInstance.Pattern { pattern, transform: _ } => {
+        return Option<usize>.some(pattern)
+      }
+      _ => {}
+    }
+    _ => {}
+  }
+  return Option<usize>.None
+}
+
+/// Renders the pattern tile `brush` paints with, once per device size, and returns its
+/// texture index; `None` for other brushes.
+pub effect fn prepareBrush(
+  brush: &Brush,
+  placement: Option<Mapping>,
+  width: u32,
+  height: u32,
+  list: &DisplayList,
+  paths: &mut List<Prepared>,
+  paintCache: &mut paints.Cache,
+  textures: &mut patterns.Cache,
+  depth: usize,
+) -> Option<usize>
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  match &brush.* {
+    Brush.Server { index } => match &list.paints.asSlice()[index] {
+      PaintInstance.Pattern { pattern, transform } => {
+        let mut i: usize = 0
+        while i < textures.active.length() {
+          if textures.active.asSlice()[i] == pattern {
+            fail RenderError.InvalidGeometry
+          }
+          i = i + 1
+        }
+        let placed = run placedMapping(&transform, placement)
+        let resource = &list.patterns.asSlice()[pattern]
+        let size = run patterns.size(&placed, resource, width, height)
+        let mut cursor = textures.heads.asSlice()[pattern]
+        while true {
+          let cachedIndex = match &cursor {
+            Option<usize>.Some { value } => value
+            _ => {
+              break
+            }
+          }
+          let cached = &textures.textures.asSlice()[cachedIndex]
+          if cached.pixels.width() == size.width && cached.pixels.height() == size.height {
+            return Option<usize>.some(cachedIndex)
+          }
+          cursor = cached.next
+        }
+        if textures.active.length() >= 256 {
+          fail RenderError.TooLarge
+        }
+        let copies = run patterns.copies(resource, &size, &mut textures.*, list)
+        run patterns.reserve(
+          &mut textures.*,
+          u32.toUsize(size.width) * u32.toUsize(size.height),
+          list,
+        )
+        run textures.active.append(pattern)
+        let pixels = run picture(
+          list,
+          resource.commands.asSlice(),
+          size.width,
+          size.height,
+          &copies,
+          false,
+          Option<Mapping>.None,
+          &[],
+          depth,
+          &mut paths.*,
+          &mut paintCache.*,
+          &mut textures.*,
+        )
+        let activeIndex = textures.active.length() - 1
+        drop textures.active.remove(activeIndex)
+        let result = textures.textures.length()
+        run textures.textures.append(
+          patterns.Texture { next: textures.heads.asSlice()[pattern], pixels: move pixels },
+        )
+        let mut heads = textures.heads.asMutSlice()
+        heads[pattern] = Option<usize>.some(result)
+        return Option<usize>.some(result)
+      }
+      _ => {}
+    }
+    _ => {}
+  }
+  return Option<usize>.None
+}
+
+struct ResourceVisit {
+  pattern: usize,
+  command: usize,
+}
+
+// Validate every picture, including unreachable ones. Iterative DFS prevents a
+// malicious exported DisplayList from exhausting the executor's native stack.
+effect fn validateCycles(list: &DisplayList) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut state = List<u8>.make()
+  let mut stack = List<ResourceVisit>.make()
+  let mut i: usize = 0
+  while i < list.patterns.length() {
+    run state.append(0)
+    i = i + 1
+  }
+  i = 0
+  while i < list.patterns.length() {
+    if state.asSlice()[i] != 0 {
+      i = i + 1
+      continue
+    }
+    let mut rootMarks = state.asMutSlice()
+    rootMarks[i] = 1
+    run stack.append(ResourceVisit { pattern: i, command: 0 })
+    while stack.length() != 0 {
+      let top = stack.length() - 1
+      let index = stack.asSlice()[top].pattern
+      let command = stack.asSlice()[top].command
+      let commands = list.patterns.asSlice()[index].commands.asSlice()
+      if command == commands.length {
+        let mut completedMarks = state.asMutSlice()
+        completedMarks[index] = 2
+        drop stack.remove(top)
+        continue
+      }
+      let mut visits = stack.asMutSlice()
+      visits[top].command = command + 1
+      let child = match &commands[command] {
+        Command.FillPath {
+          path: _,
+          transform: _,
+          clip: _,
+          bounds: _,
+          brush,
+          opacity: _,
+          linearRgb: _,
+          rule: _,
+          crispEdges: _
+        } => patternBrush(&brush, list)
+        Command.StrokePath {
+          path: _,
+          transform: _,
+          strokeSpace: _,
+          clip: _,
+          bounds: _,
+          brush,
+          opacity: _,
+          linearRgb: _,
+          stroke: _,
+          crispEdges: _
+        } => patternBrush(&brush, list)
+        _ => Option<usize>.None
+      }
+      match &child {
+        Option<usize>.Some { value } => {
+          if state.asSlice()[value] == 1 {
+            fail RenderError.InvalidGeometry
+          }
+          if state.asSlice()[value] == 0 {
+            let mut childMarks = state.asMutSlice()
+            childMarks[value] = 1
+            run stack.append(ResourceVisit { pattern: value, command: 0 })
+          }
+        }
+        _ => {}
+      }
+    }
+    i = i + 1
+  }
+}
+
+effect fn validateClips(clips: &[ProjectionClip]) -> ()
+  ! RenderError {
+  let mut c: usize = 0
+  while c < clips.length {
+    let plane = &clips[c].plane
+    if !f64.isFinite(plane.x) || !f64.isFinite(plane.y) || !f64.isFinite(plane.w) {
+      fail RenderError.InvalidGeometry
+    }
+
+    // Parents precede children: this also rules out cycles before traversal.
+    match &clips[c].parent {
+      Option<usize>.Some { value } => {
+        if value >= c {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      _ => {}
+    }
+    c = c + 1
+  }
+}
+
+/// An open BeginFilter or BeginFilterImage during validation.
+struct FilterFrame {
+  /// Layer depth where it opened.
+  depth: usize,
+  filter: usize,
+  image: bool,
+  /// Image layers drawn so far (filters only).
+  images: usize,
+  /// Whether content has started (filters only); image layers come before it.
+  content: bool,
+}
+
+impl Copy for FilterFrame {}
+
+/// Marks the innermost open filter's content as started.
+fn started(frames: &mut List<FilterFrame>) -> () {
+  let count = frames.length()
+  if count > 0 {
+    let mut open = frames.asMutSlice()
+    open[count - 1].content = true
+  }
+}
+
+effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32, height: u32) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  // Open filters and image layers: filtered content must close its own layers.
+  let mut filterDepths = List<FilterFrame>.make()
+  let clips = list.projectionClips.asSlice()
+
+  // dimensions() established a positive, checked pixel count before this call.
+  let surfaceLimit = checked.MAX_SURFACE_PIXELS / (u32.toUsize(width) * u32.toUsize(height))
+  let mut depth: usize = 0
+  let mut i: usize = 0
+  while i < commands.length {
+    match &commands[i] {
+      Command.Embedded { image, transform, clip } => {
+        if image >= list.embedded.length() || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+        run clipIndex(clip, clips.length)
+      }
+      Command.Hit { path, transform, strokeSpace, clip, rule, stroke, target } => {
+        if path >= list.paths.length() || target >= list.targets.length() || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+        run clipIndex(clip, clips.length)
+        if let Option<usize>.Some { value } = &strokeSpace {
+          if value >= list.strokeSpaces.length() {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        if let Option<Stroke>.Some { value } = &stroke {
+          if value.dashIndex >= list.dashes.length() {
+            fail RenderError.InvalidGeometry
+          }
+          run checked.stroke(value, list.dashes.asSlice()[value.dashIndex].asSlice())
+        }
+      }
+      Command.FillPath {
+        path,
+        transform,
+        clip,
+        bounds,
+        brush,
+        opacity,
+        linearRgb,
+        rule,
+        crispEdges
+      } => {
+        if path >= list.paths.length() {
+          fail RenderError.InvalidGeometry
+        }
+        run clipIndex(clip, clips.length)
+        if !transform.isFinite() || !isValidRect(bounds) {
+          fail RenderError.InvalidGeometry
+        }
+        run paints.validateBrush(&brush, list)
+        drop run checked.unit(opacity)
+      }
+      Command.StrokePath {
+        path,
+        transform,
+        strokeSpace,
+        clip,
+        bounds,
+        brush,
+        opacity,
+        linearRgb,
+        stroke,
+        crispEdges
+      } => {
+        if path >= list.paths.length() || stroke.dashIndex >= list.dashes.length() {
+          fail RenderError.InvalidGeometry
+        }
+        run checked.stroke(stroke, list.dashes.asSlice()[stroke.dashIndex].asSlice())
+        if let Option<usize>.Some { value } = &strokeSpace {
+          if value >= list.strokeSpaces.length() {
+            fail RenderError.InvalidGeometry
+          }
+          let space = &list.strokeSpaces.asSlice()[value]
+          if !space.pathToHost.isFinite() || !space.hostToDevice.isFinite() {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        run clipIndex(clip, clips.length)
+        if !transform.isFinite() || !isValidRect(bounds) {
+          fail RenderError.InvalidGeometry
+        }
+        run paints.validateBrush(&brush, list)
+        drop run checked.unit(opacity)
+      }
+      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+        drop run checked.unit(opacity)
+        if !isValidRect(bounds) {
+          fail RenderError.InvalidGeometry
+        }
+        depth = depth + 1
+        if depth >= surfaceLimit {
+          fail RenderError.TooLarge
+        }
+      }
+      Command.ConvertMask { luminance, linearRgb } => {
+        if depth < 2 {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      Command.CompositeMask { operation } => {
+        if depth < 3 {
+          fail RenderError.InvalidGeometry
+        }
+        depth = depth - 1
+      }
+      Command.ApplyMask { luminance, linearRgb } => {
+        if depth < 2 {
+          fail RenderError.InvalidGeometry
+        }
+        depth = depth - 1
+      }
+      Command.ApplyClip { index } => {
+        if depth == 0 || index >= list.clipNodes.length() {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      Command.PopLayer => {
+        if depth == 0 {
+          fail RenderError.InvalidGeometry
+        }
+        depth = depth - 1
+      }
+      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+        if filter >= list.filters.length() || !transform.isFinite()
+          || !filterGraph.valid(&list.filters.asSlice()[filter]) {
+          fail RenderError.InvalidGeometry
+        }
+        run clipIndex(clip, clips.length)
+        run clipIndex(backdrop, clips.length)
+        if filterDepths.length() >= 64 {
+          fail RenderError.TooLarge
+        }
+        started(&mut filterDepths)
+        run filterDepths.append(
+          FilterFrame { depth: depth, filter: filter, image: false, images: 0, content: false },
+        )
+      }
+      Command.BeginFilterImage => {
+        // Image layers open directly inside a filter, before its content.
+        let count = filterDepths.length()
+        if count == 0 || count >= 64 {
+          fail RenderError.InvalidGeometry
+        }
+        let parent = filterDepths.asSlice()[count - 1]
+        if parent.image || parent.content
+          || parent.images >= list.filters.asSlice()[parent.filter].images {
+          fail RenderError.InvalidGeometry
+        }
+        let mut open = filterDepths.asMutSlice()
+        open[count - 1].images = parent.images + 1
+        drop open
+        run filterDepths.append(
+          FilterFrame {
+            depth: depth,
+            filter: parent.filter,
+            image: true,
+            images: 0,
+            content: false,
+          },
+        )
+      }
+      Command.EndFilterImage => {
+        let count = filterDepths.length()
+        if count == 0 || !filterDepths.asSlice()[count - 1].image
+          || filterDepths.remove(count - 1).depth != depth {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      Command.EndFilter => {
+        let count = filterDepths.length()
+        if count == 0 {
+          fail RenderError.InvalidGeometry
+        }
+        let frame = filterDepths.remove(count - 1)
+
+        // Every image layer the program reads was drawn.
+        if frame.image || frame.depth != depth
+          || frame.images != list.filters.asSlice()[frame.filter].images {
+          fail RenderError.InvalidGeometry
+        }
+      }
+    }
+    match &commands[i] {
+      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {}
+      Command.BeginFilterImage => {}
+      Command.EndFilterImage => {}
+      Command.EndFilter => {}
+      _ => {
+        started(&mut filterDepths)
+      }
+    }
+    if filterDepths.length() > 0
+      && depth < filterDepths.asSlice()[filterDepths.length() - 1].depth {
+      fail RenderError.InvalidGeometry
+    }
+    i = i + 1
+  }
+  if filterDepths.length() != 0 {
+    fail RenderError.InvalidGeometry
+  }
+  if depth != 0 {
+    fail RenderError.InvalidGeometry
+  }
+}
+
+effect fn clipIndex(index: Option<usize>, count: usize) -> ()
+  ! RenderError {
+  match &index {
+    Option<usize>.Some { value } => {
+      if value >= count {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    _ => {}
+  }
+}
+
+pub effect fn prepare(source: &Path, prepared: &mut Prepared) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if !prepared.ready {
+    prepared.path = run vector_path.convert(source)
+    prepared.ready = true
+  }
+}
+
+/// Coverage of `path` mapped by `matrix`, clipped to `clip` and `planes`.
+pub effect fn fill(
+  path: &VectorPath,
+  matrix: &Mapping,
+  clip: VectorRect,
+  planes: &[HalfPlane],
+  rule: u8,
+  tolerance: f64,
+  rasterizer: &mut Rasterizer,
+  coverage: &mut Coverage,
+  lines: &mut List<Line>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  lines.clear()
+  match &matrix.* {
+    Mapping.Affine { value } => {
+      let affine = value
+      if planes.length == 0 {
+        run flattening.fillClipped(path, &affine, &clip, tolerance, &mut lines)
+      } else {
+        run projective.fillWithPlanes(
+          path,
+          &Homography.fromAffine(&affine),
+          clip,
+          planes,
+          tolerance,
+          &mut lines,
+        )
+      }
+    }
+    Mapping.Projective { value } => {
+      run projective.fillWithPlanes(path, &value, clip, planes, tolerance, &mut lines)
+    }
+  }
+  run checked.lines(lines.asSlice(), coverage.width(), coverage.height())
+
+  // Current vector has no checked fill/borrowed-line entry point: fillPolylines
+  // copies these validated lines into its reusable internal scratch. This extra
+  // List<Line> is necessary until upstream exposes checked fill without the copy.
+  run rasterizer.fillPolylines(lines.asSlice(), rule, &mut coverage)
+}
+
+// Scales each premultiplied pixel by its coverage byte. Full coverage leaves
+// a pixel as div255 would (exact rounding), and none clears it, so only
+// partial coverage takes the per-channel multiply.
+// Pixels outside `dirty` are transparent and stay so.
+fn applyCoverage(pixels: &mut [u8], alpha: &[u8], dirty: Dirty, width: u32) {
+  let mut y = dirty.y0
+  while y < dirty.y1 {
+    let row = u32.toUsize(y) * u32.toUsize(width)
+    let mut pixel = row + u32.toUsize(dirty.x0)
+    let end = row + u32.toUsize(dirty.x1)
+    while pixel < end && pixel < alpha.length {
+      let amount = u8.toU32(alpha[pixel])
+      if amount != 255 {
+        let at = pixel * 4
+        if amount == 0 {
+          pixels[at] = 0
+          pixels[at + 1] = 0
+          pixels[at + 2] = 0
+          pixels[at + 3] = 0
+        } else {
+          scalePixel(&mut pixels, at, amount)
+        }
+      }
+      pixel = pixel + 1
+    }
+    y = y + 1
+  }
+}
+
+// applyCoverage with `alpha` holding only the dirty box, row major.
+fn applyBoxCoverage(pixels: &mut [u8], alpha: &[u8], dirty: Dirty, width: u32) {
+  if dirty.x1 <= dirty.x0 {
+    return
+  }
+  let boxWidth = u32.toUsize(dirty.x1 - dirty.x0)
+  let mut y = dirty.y0
+  while y < dirty.y1 {
+    let row = u32.toUsize(y) * u32.toUsize(width) + u32.toUsize(dirty.x0)
+    let source = u32.toUsize(y - dirty.y0) * boxWidth
+    let mut column: usize = 0
+    while column < boxWidth {
+      let amount = u8.toU32(alpha[source + column])
+      if amount != 255 {
+        let at = (row + column) * 4
+        if amount == 0 {
+          pixels[at] = 0
+          pixels[at + 1] = 0
+          pixels[at + 2] = 0
+          pixels[at + 3] = 0
+        } else {
+          scalePixel(&mut pixels, at, amount)
+        }
+      }
+      column = column + 1
+    }
+    y = y + 1
+  }
+}
+
+// Every channel of the pixel at byte `at` times `amount / 255`, rounded like div255.
+@inlineAlways
+fn scalePixel(pixels: &mut [u8], at: usize, amount: u32) -> () {
+  let pixel = Slice.viewMut(&mut pixels, at, 4)
+  let word = u8.toU32(pixel[0]) | u32.shiftLeft(u8.toU32(pixel[1]), 8)
+    | u32.shiftLeft(u8.toU32(pixel[2]), 16)
+    | u32.shiftLeft(u8.toU32(pixel[3]), 24)
+  let scaled = scalePacked(word, amount)
+  pixel[0] = u32.wrappingToU8(scaled)
+  pixel[1] = u32.wrappingToU8(u32.shiftRight(scaled, 8))
+  pixel[2] = u32.wrappingToU8(u32.shiftRight(scaled, 16))
+  pixel[3] = u32.wrappingToU8(u32.shiftRight(scaled, 24))
+}
+
+// A mask layer pixel's coverage: its alpha, or the luminance of the premultiplied
+// color as Mask.fromLuminance computes it.
+fn maskValue(r: u8, g: u8, b: u8, a: u8, luminance: bool) -> u8 {
+  if !luminance {
+    return a
+  }
+
+  // Fixed point with weights summing to 65536: 13926 + 46884 + 4726.
+  let l = 13926 * u8.toU32(r) + 46884 * u8.toU32(g) + 4726 * u8.toU32(b)
+  return u32.toU8(u32.shiftRight(l + 32768, 16))
+}
+
+// ApplyMask over the target's box: mask pixels outside the mask layer's box are
+// transparent, so they clear the target there.
+fn applyMaskLayer(
+  pixels: &mut [u8],
+  mask: &[u8],
+  luminance: bool,
+  dirty: Dirty,
+  maskDirty: Dirty,
+  width: u32,
+) {
+  let mut y = dirty.y0
+  while y < dirty.y1 {
+    let row = u32.toUsize(y) * u32.toUsize(width)
+    let rowInside = y >= maskDirty.y0 && y < maskDirty.y1
+    let mut x = dirty.x0
+    while x < dirty.x1 {
+      let at = (row + u32.toUsize(x)) * 4
+      let amount = if rowInside && x >= maskDirty.x0 && x < maskDirty.x1 {
+        let value = Slice.view(mask, at, 4)
+        u8.toU32(maskValue(value[0], value[1], value[2], value[3], luminance))
+      } else {
+        0
+      }
+      if amount == 0 {
+        pixels[at] = 0
+        pixels[at + 1] = 0
+        pixels[at + 2] = 0
+        pixels[at + 3] = 0
+      } else if amount != 255 {
+        scalePixel(&mut pixels, at, amount)
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+}
+
+// One layer while hit testing: the topmost hit inside it so far, and whether its hits
+// count (a mask or a filter image layer is a resource, whose content takes no events).
+struct HitLayer {
+  found: Option<usize>,
+  counts: bool,
+}
+
+impl Copy for HitLayer {}
+
+/// The topmost element whose pointer-events region holds the device point (`x`, `y`), as
+/// an index into `list.targets` (SVG 2 §15.5.1, #PointerEventsProperty). Regions come from
+/// `Command.Hit` in painting order; a later one is on top. Clip paths cut regions
+/// geometrically, while masks, filters and opacity do not affect them. Lines and clips are
+/// flattened in device space exactly as for rendering.
+pub effect fn hitTest(list: &DisplayList, x: f64, y: f64) -> Option<usize>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return run Effect.catch<GeometryError>(hitChecked(list, x, y), hitFailure)
+}
+
+effect fn hitFailure(error: GeometryError) -> Option<usize>
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidGeometry
+}
+
+effect fn hitChecked(list: &DisplayList, x: f64, y: f64) -> Option<usize>
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  run validateCommands(list, list.commands.asSlice(), list.width, list.height)
+  if !f64.isFinite(x) || !f64.isFinite(y) || x < 0.0 || y < 0.0 || x >= u32.toF64(list.width)
+    || y >= u32.toF64(list.height) {
+    return Option<usize>.None
+  }
+  let commands = list.commands.asSlice()
+  let sourcePaths = list.paths.asSlice()
+  let mut stack = List<HitLayer>.make()
+  run stack.append(HitLayer { found: Option<usize>.None, counts: true })
+  let mut stroker = Stroker.make()
+  let mut strokeStyle = VectorStroke.make(1.0)
+  let mut outline = VectorPath.make()
+  let mut lines = List<Line>.make()
+  let mut planes = ClipPlanes.make()
+  let viewport = rectAt(0.0, 0.0, u32.toF64(list.width), u32.toF64(list.height))
+  let mut i: usize = 0
+  while i < commands.length {
+    match &commands[i] {
+      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+        run stack.append(HitLayer { found: Option<usize>.None, counts: true })
+      }
+      Command.BeginFilterImage => {
+        run stack.append(HitLayer { found: Option<usize>.None, counts: false })
+      }
+      Command.PopLayer => {
+        let last = stack.length() - 1
+        let layer = stack.remove(last)
+        if layer.counts && layer.found.isSome() {
+          let top = stack.length() - 1
+          let mut entries = stack.asMutSlice()
+          entries[top].found = layer.found
+        }
+      }
+      Command.EndFilterImage => {
+        let last = stack.length() - 1
+        drop stack.remove(last)
+      }
+
+      // A mask layer is content of the mask, not of the element (SVG 2 §15.6: pointer
+      // events are captured even where a mask is transparent).
+      Command.CompositeMask { operation } => {
+        let last = stack.length() - 1
+        drop stack.remove(last)
+      }
+      Command.ApplyMask { luminance, linearRgb } => {
+        let last = stack.length() - 1
+        drop stack.remove(last)
+      }
+      Command.ApplyClip { index } => {
+        let top = stack.length() - 1
+        if stack.asSlice()[top].found.isSome() {
+          let inside = run clip_mask.contains(
+            list.clipNodes.asSlice(),
+            sourcePaths,
+            index,
+            list.width,
+            list.height,
+            &Mapping.identity(),
+            x,
+            y,
+          )
+          if !inside {
+            let mut entries = stack.asMutSlice()
+            entries[top].found = Option<usize>.None
+          }
+        }
+      }
+      Command.Hit { path, transform, strokeSpace, clip, rule, stroke, target } => {
+        run planes.select(clip, list.projectionClips.asSlice(), Option<Mapping>.None, &[])
+        let prepared = run vector_path.convert(&sourcePaths[path])
+        let mut hit = false
+        if let Option<FillRule>.Some { value: fillRule } = &rule {
+          run hitLines(&prepared, &transform, viewport, planes.planes.asSlice(), &mut lines)
+          hit = clip_mask.filled(clip_mask.winding(lines.asSlice(), x, y), fillRule)
+        }
+        if !hit {
+          if let Option<Stroke>.Some { value } = &stroke {
+            let dashes = list.dashes.asSlice()[value.dashIndex].asSlice()
+            strokeStyle.width = value.width
+            strokeStyle.miterLimit = value.miterLimit
+            strokeStyle.dashOffset = value.dashOffset
+            strokeStyle.cap = match value.cap {
+              LineCap.Butt => strokes.CAP_BUTT
+              LineCap.Round => strokes.CAP_ROUND
+              LineCap.Square => strokes.CAP_SQUARE
+            }
+            strokeStyle.join = match value.join {
+              LineJoin.Miter => strokes.JOIN_MITER
+              LineJoin.Round => strokes.JOIN_ROUND
+              LineJoin.Bevel => strokes.JOIN_BEVEL
+              LineJoin.MiterClip => strokes.JOIN_MITER_CLIP
+              LineJoin.Arcs => strokes.JOIN_ARCS
+            }
+            run strokeStyle.setDashes(dashes)
+
+            // As Command.StrokePath outlines a stroke.
+            outline.clear()
+            let mut outlinePlacement = transform
+            match &strokeSpace {
+              Option<usize>.Some { value: index } => {
+                let space = &list.strokeSpaces.asSlice()[index]
+                let centerline = run homography(&space.pathToHost)
+                let host = run homography(&space.hostToDevice)
+                run stroker.strokeInSpace(
+                  &prepared,
+                  &strokeStyle,
+                  &centerline,
+                  &host,
+                  viewport,
+                  TOLERANCE * 0.5,
+                  &mut outline,
+                )
+                outlinePlacement = space.hostToDevice
+              }
+              _ => {
+                match &transform {
+                  Mapping.Affine { value: affine } => {
+                    run stroker.stroke(
+                      &prepared,
+                      &strokeStyle,
+                      &affine,
+                      TOLERANCE * 0.5,
+                      &mut outline,
+                    )
+                  }
+                  Mapping.Projective { value: matrix } => {
+                    run stroker.strokeProjective(
+                      &prepared,
+                      &strokeStyle,
+                      &matrix,
+                      viewport,
+                      TOLERANCE * 0.5,
+                      &mut outline,
+                    )
+                  }
+                }
+              }
+            }
+            run hitLines(&outline, &outlinePlacement, viewport, planes.planes.asSlice(), &mut lines)
+            hit = clip_mask.filled(clip_mask.winding(lines.asSlice(), x, y), FillRule.Nonzero)
+          }
+        }
+        if hit {
+          let top = stack.length() - 1
+          let mut entries = stack.asMutSlice()
+          entries[top].found = Option<usize>.some(target)
+        }
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return stack.asSlice()[0].found
+}
+
+// The device-space fill boundary of `path`, flattened as `fill` flattens it.
+effect fn hitLines(
+  path: &VectorPath,
+  matrix: &Mapping,
+  clip: VectorRect,
+  planes: &[HalfPlane],
+  lines: &mut List<Line>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  lines.clear()
+  match &matrix.* {
+    Mapping.Affine { value } => {
+      let affine = value
+      if planes.length == 0 {
+        run flattening.fillClipped(path, &affine, &clip, TOLERANCE, &mut lines)
+      } else {
+        run projective.fillWithPlanes(
+          path,
+          &Homography.fromAffine(&affine),
+          clip,
+          planes,
+          TOLERANCE,
+          &mut lines,
+        )
+      }
+    }
+    Mapping.Projective { value } => {
+      run projective.fillWithPlanes(path, &value, clip, planes, TOLERANCE, &mut lines)
+    }
+  }
+}

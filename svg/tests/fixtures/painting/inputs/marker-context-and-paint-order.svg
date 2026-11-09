@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#RenderingMarkers -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16"><defs><marker id="m" markerUnits="userSpaceOnUse" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto-start-reverse"><path d="M0 0H4L2 4Z" fill="context-fill"/></marker></defs><path d="M4 8H20" fill="red" stroke="blue" stroke-width="2" marker-start="url(#m)" marker-end="url(#m)" paint-order="markers stroke fill"/></svg>

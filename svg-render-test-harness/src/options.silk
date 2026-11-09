@@ -1,0 +1,352 @@
+//! CLI policy (not SVG syntax): one input and mandatory -o output; no stdin or stdout PNG.
+//! Dimensions (output and viewport) are positive decimal u32 values; zoom is a complete positive finite decimal.
+//! Options take separate values, may appear in any order, and may not repeat. -- ends options.
+//! --help and --version stand alone. Unsupported options are errors, never ignored.
+//! Static mode is the default. --fragment accepts encoded bytes and strips one optional #.
+//! An empty fragment explicitly clears the base fragment; fragment arguments are never decoded here.
+import silk.collections.bytes { Bytes }
+import silk.core.result { Result }
+import silk.core.option { Option }
+import silk.num.u8
+import silk.num.f64
+import svg_geometry.svg
+import svg_core.resources { ProcessingMode }
+import svg_core.animation
+
+pub enum Action {
+  Render,
+  Help,
+  Version
+}
+
+pub enum ArgumentError {
+  MissingInput,
+  MissingOutput,
+  MissingValue,
+  UnknownOption,
+  ExtraInput,
+  DuplicateOption,
+  InvalidDimension,
+  InvalidZoom,
+  InvalidMode,
+  InvalidPath,
+  InformationOnly,
+  InvalidTime,
+}
+
+// Paths and fragments remain owned by the argument list; indices avoid borrowed result lifetimes.
+// An index equal to args.length means absent. fragmentStart skips at most one leading #.
+pub struct Parsed {
+  pub action: Action,
+  pub input: usize,
+  pub output: usize,
+  pub width: u32,
+  pub height: u32,
+  pub zoom: f64,
+  pub mode: ProcessingMode,
+  pub fragment: usize,
+  pub fragmentStart: usize,
+  /// The directory whose font files text may use.
+  pub fontDir: usize,
+  /// The directory file resources are confined to, instead of the input's directory.
+  pub resourcesDir: usize,
+  /// The user's language tag that systemLanguage conditions match against.
+  pub language: usize,
+  /// The document time, in seconds, at which animations are sampled.
+  pub time: f64,
+  /// The embedding viewport that percentage root sizes resolve against; zero means
+  /// the CSS default object size (300 by 150).
+  pub viewportWidth: u32,
+  pub viewportHeight: u32,
+}
+
+fn equals(bytes: &[u8], text: string) -> bool {
+  let expected = Intrinsic.stringUtf8Bytes(text)
+  if bytes.length != expected.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < bytes.length {
+    if bytes[index] != expected[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn dimension(bytes: &[u8]) -> Option<u32> {
+  if bytes.length == 0 {
+    return Option<u32>.None
+  }
+  let mut value: u32 = 0
+  let mut index: usize = 0
+  while index < bytes.length {
+    let byte = bytes[index]
+    if byte < 48 || byte > 57 {
+      return Option<u32>.None
+    }
+    let digit = u8.toU32(byte - 48)
+
+    // The precondition proves both multiply and add remain in range.
+    if value > (4294967295 - digit) / 10 {
+      return Option<u32>.None
+    }
+    value = value * 10 + digit
+    index = index + 1
+  }
+  if value == 0 {
+    return Option<u32>.None
+  }
+  return Option<u32>.Some { value: value }
+}
+
+fn zoom(bytes: &[u8]) -> Option<f64> {
+  // SVG number parsing may tolerate surrounding SVG whitespace; CLI tokens do not.
+  let mut index: usize = 0
+  while index < bytes.length {
+    let byte = bytes[index]
+    if byte == 32 || byte == 9 || byte == 10 || byte == 13 {
+      return Option<f64>.None
+    }
+    index = index + 1
+  }
+  let parsed = svg.number(bytes)
+  if let Option<f64>.Some { value } = &parsed {
+    if value > 0.0 && f64.isFinite(value) {
+      return Option<f64>.Some { value: value }
+    }
+  }
+  return Option<f64>.None
+}
+
+fn processingMode(bytes: &[u8]) -> Option<ProcessingMode> {
+  if equals(bytes, "static") {
+    return Option<ProcessingMode>.Some { value: ProcessingMode.Static }
+  }
+  if equals(bytes, "animated") {
+    return Option<ProcessingMode>.Some { value: ProcessingMode.Animated }
+  }
+  if equals(bytes, "secure-static") {
+    return Option<ProcessingMode>.Some { value: ProcessingMode.SecureStatic }
+  }
+  if equals(bytes, "secure-animated") {
+    return Option<ProcessingMode>.Some { value: ProcessingMode.SecureAnimated }
+  }
+  return Option<ProcessingMode>.None
+}
+
+fn validPath(bytes: &[u8]) -> bool {
+  if bytes.length == 0 || equals(bytes, "-") {
+    return false
+  }
+  let mut index: usize = 0
+  while index < bytes.length {
+    if bytes[index] == 0 {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+pub fn parse(args: &[Bytes]) -> Result<Parsed, ArgumentError> {
+  let mut parsed = Parsed {
+    action: Action.Render,
+    input: args.length,
+    output: args.length,
+    width: 0,
+    height: 0,
+    zoom: 1.0,
+    mode: ProcessingMode.Static,
+    fragment: args.length,
+    fragmentStart: 0,
+    fontDir: args.length,
+    resourcesDir: args.length,
+    language: args.length,
+    time: 0.0,
+    viewportWidth: 0,
+    viewportHeight: 0,
+  }
+  if args.length == 1 {
+    let first = Bytes.asSlice(&args[0])
+    if equals(first, "--help") {
+      parsed.action = Action.Help
+      return Result<Parsed, ArgumentError>.succeed(move parsed)
+    }
+    if equals(first, "--version") {
+      parsed.action = Action.Version
+      return Result<Parsed, ArgumentError>.succeed(move parsed)
+    }
+  }
+  let mut endOptions = false
+  let mut seenZoom = false
+  let mut seenMode = false
+  let mut seenTime = false
+  let mut index: usize = 0
+  while index < args.length {
+    let arg = Bytes.asSlice(&args[index])
+    if !endOptions && equals(arg, "--") {
+      endOptions = true
+      index = index + 1
+      continue
+    }
+    if !endOptions && (equals(arg, "--help") || equals(arg, "--version")) {
+      return Result<Parsed, ArgumentError>.failResult(ArgumentError.InformationOnly)
+    }
+    let output = !endOptions && equals(arg, "-o")
+    let width = !endOptions && equals(arg, "--width")
+    let height = !endOptions && equals(arg, "--height")
+    let scale = !endOptions && equals(arg, "--zoom")
+    let mode = !endOptions && equals(arg, "--mode")
+    let fragment = !endOptions && equals(arg, "--fragment")
+    let fonts = !endOptions && equals(arg, "--font-dir")
+    let resources = !endOptions && equals(arg, "--resources-dir")
+    let time = !endOptions && equals(arg, "--time")
+    let language = !endOptions && equals(arg, "--language")
+    let viewportWidth = !endOptions && equals(arg, "--viewport-width")
+    let viewportHeight = !endOptions && equals(arg, "--viewport-height")
+    if output || width || height || scale || mode || fragment || fonts || resources || time
+      || language
+      || viewportWidth
+      || viewportHeight {
+      if (output && parsed.output != args.length) || (width && parsed.width != 0)
+        || (height && parsed.height != 0)
+        || (scale && seenZoom)
+        || (mode && seenMode)
+        || (fragment && parsed.fragment != args.length)
+        || (fonts && parsed.fontDir != args.length)
+        || (resources && parsed.resourcesDir != args.length)
+        || (time && seenTime)
+        || (language && parsed.language != args.length)
+        || (viewportWidth && parsed.viewportWidth != 0)
+        || (viewportHeight && parsed.viewportHeight != 0) {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.DuplicateOption)
+      }
+
+      // index < length proves increment cannot overflow.
+      index = index + 1
+      if index == args.length {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingValue)
+      }
+      let value = Bytes.asSlice(&args[index])
+      if value.length >= 2 && value[0] == 45 && value[1] == 45 {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingValue)
+      }
+      if output {
+        if !validPath(value) {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidPath)
+        }
+        if value[0] == 45 {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingValue)
+        }
+        parsed.output = index
+      } else if width || height || viewportWidth || viewportHeight {
+        let number = dimension(value)
+        if let Option<u32>.Some { value: size } = &number {
+          if width {
+            parsed.width = size
+          } else if height {
+            parsed.height = size
+          } else if viewportWidth {
+            parsed.viewportWidth = size
+          } else {
+            parsed.viewportHeight = size
+          }
+        } else {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidDimension)
+        }
+      } else if mode {
+        let selected = processingMode(value)
+        if let Option<ProcessingMode>.Some { value: policy } = &selected {
+          parsed.mode = policy
+          seenMode = true
+        } else {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidMode)
+        }
+      } else if fonts {
+        if !validPath(value) {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidPath)
+        }
+        parsed.fontDir = index
+      } else if resources {
+        if !validPath(value) {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidPath)
+        }
+        parsed.resourcesDir = index
+      } else if language {
+        if value.length == 0 {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingValue)
+        }
+        parsed.language = index
+      } else if time {
+        let seconds = match animation.clock(value) {
+          Option<f64>.Some { value: given } => given
+          _ => {
+            return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidTime)
+          }
+        }
+        parsed.time = seconds
+        seenTime = true
+      } else if fragment {
+        parsed.fragment = index
+        if value.length > 0 && value[0] == 35 {
+          parsed.fragmentStart = 1
+        }
+      } else {
+        let number = zoom(value)
+        if let Option<f64>.Some { value: factor } = &number {
+          parsed.zoom = factor
+          seenZoom = true
+        } else {
+          return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidZoom)
+        }
+      }
+    } else {
+      if !validPath(arg) {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidPath)
+      }
+      if !endOptions && arg[0] == 45 {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.UnknownOption)
+      }
+      if parsed.input != args.length {
+        return Result<Parsed, ArgumentError>.failResult(ArgumentError.ExtraInput)
+      }
+      parsed.input = index
+    }
+    index = index + 1
+  }
+  if parsed.input == args.length {
+    return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingInput)
+  }
+  if parsed.output == args.length {
+    return Result<Parsed, ArgumentError>.failResult(ArgumentError.MissingOutput)
+  }
+
+  // A time asks for animation, which only the animated modes run.
+  if seenTime {
+    if !seenMode {
+      parsed.mode = ProcessingMode.Animated
+    } else if parsed.mode == ProcessingMode.Static || parsed.mode == ProcessingMode.SecureStatic {
+      return Result<Parsed, ArgumentError>.failResult(ArgumentError.InvalidTime)
+    }
+  }
+  return Result<Parsed, ArgumentError>.succeed(move parsed)
+}
+
+pub fn message(error: ArgumentError) -> string<'static> {
+  return match error {
+    ArgumentError.MissingInput => "svg-render-test-harness: missing input SVG path\n"
+    ArgumentError.MissingOutput => "svg-render-test-harness: output path is required (-o output.png)\n"
+    ArgumentError.MissingValue => "svg-render-test-harness: option requires a value\n"
+    ArgumentError.UnknownOption => "svg-render-test-harness: unknown or unimplemented option\n"
+    ArgumentError.ExtraInput => "svg-render-test-harness: only one input SVG is accepted\n"
+    ArgumentError.DuplicateOption => "svg-render-test-harness: option specified more than once\n"
+    ArgumentError.InvalidDimension => "svg-render-test-harness: width and height must be positive decimal u32 integers\n"
+    ArgumentError.InvalidZoom => "svg-render-test-harness: zoom must be a positive finite decimal number\n"
+    ArgumentError.InvalidMode => "svg-render-test-harness: mode must be static, animated, secure-static, or secure-animated\n"
+    ArgumentError.InvalidPath => "svg-render-test-harness: file paths must be nonempty; stdin and stdout PNG are unsupported\n"
+    ArgumentError.InformationOnly => "svg-render-test-harness: --help and --version must be used alone\n"
+    ArgumentError.InvalidTime => "svg-render-test-harness: time must be a SMIL clock value, and needs an animated mode\n"
+  }
+}

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="120">
+<!-- auto sets opsz to the font size; none leaves the default (14). -->
+<text x="10" y="50" font-family="Roboto Flex" font-size="40">Hamburg</text>
+<text x="10" y="100" font-family="Roboto Flex" font-size="40" style="font-optical-sizing: none">Hamburg</text>
+</svg>

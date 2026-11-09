@@ -1,0 +1,571 @@
+//! Selection precedence contracts authored before view_selection.silk.
+import silk.text.string { String }
+import view_selection { Selection, select }
+import structure { Graph, Options, SourceId, StructureError, build }
+import resources { Resolver, Response, ResourceKind, ResourceError }
+import url { Url, UrlError }
+import view_fragment { SpatialView, SpatialUnit, TimeSegment, ZoomAndPan }
+import svg_geometry.geometry { Rect }
+import svg_geometry.svg { AspectRatio, Alignment }
+import svg_geometry.svg
+import silk.xml.document { XmlDocument }
+import svg_css.values { Store, ValueId, Value }
+import svg_css.tokens { Limits, CssError, CssErrorKind, equal }
+import silk.collections.bytes { Bytes }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+struct NoResources {}
+
+impl NoResources {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    fail ResourceError.InvalidData
+  }
+}
+
+impl Resolver for NoResources {
+  fetch: NoResources.fetch
+}
+
+effect fn load(source: &[u8]) -> Graph
+  ! UrlError | StructureError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://example.test/main.svg")
+  let mut host = NoResources {}
+  return run build(source, &base, &Options.defaults()) |> Effect.provideMut<Resolver>(&mut host)
+}
+
+fn targetIs(graph: &Graph, selection: &Selection, id: &[u8]) -> bool {
+  return match &selection.target {
+    Option<SourceId>.Some { value } => match (XmlDocument.attribute(
+      graph.sourceDocument(value),
+      value.node,
+      "",
+      "id",
+    )
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value: name } => equal(name, id)
+      _ => false
+    }
+    _ => false
+  }
+}
+
+// Apply only the selection-presence contract; the production viewport remains
+// the parent's responsibility. Deliberately read ROOT, never the target's parent.
+fn rootBox(graph: &Graph, selection: &Selection) -> Option<Rect> {
+  match &selection.viewBox {
+    Option<Rect>.Some { value } => {
+      return Option<Rect>.some(value)
+    }
+    _ => {}
+  }
+  let root = graph.occurrences.asSlice()[graph.root.index].source
+  return match (XmlDocument.attribute(graph.sourceDocument(root), root.node, "", "viewBox")
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => svg.viewBox(value)
+    _ => Option<Rect>.None
+  }
+}
+
+fn rootAspect(graph: &Graph, selection: &Selection) -> Option<AspectRatio> {
+  match &selection.aspectRatio {
+    Option<AspectRatio>.Some { value } => {
+      return Option<AspectRatio>.some(value)
+    }
+    _ => {}
+  }
+  let root = graph.occurrences.asSlice()[graph.root.index].source
+  return match (XmlDocument.attribute(
+    graph.sourceDocument(root),
+    root.node,
+    "",
+    "preserveAspectRatio",
+  )
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => svg.aspectRatio(value)
+    _ => Option<AspectRatio>.None
+  }
+}
+
+fn empty(selection: &Selection) -> bool {
+  return match &selection.target {
+    Option<SourceId>.None => true
+    _ => false
+  }
+    && match &selection.viewBox {
+      Option<Rect>.None => true
+      _ => false
+    }
+    && match &selection.aspectRatio {
+      Option<AspectRatio>.None => true
+      _ => false
+    }
+    && match &selection.transform {
+      Option<ValueId>.None => true
+      _ => false
+    }
+    && match &selection.spatial {
+      Option<SpatialView>.None => true
+      _ => false
+    }
+    && match &selection.temporal {
+      Option<TimeSegment>.None => true
+      _ => false
+    }
+    && match &selection.zoomAndPan {
+      Option<ZoomAndPan>.None => true
+      _ => false
+    }
+    && selection.viewTargets.length() == 0
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// SVG2's root-view rule supersedes SVG1.1's closest-ancestor rule.
+test effect fn ordinaryIdsAndNestedViewsKeepTheDocumentRoot() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' id='root' viewBox='0 0 200 100' preserveAspectRatio='xMaxYMin slice'><rect id='outside'/><svg viewBox='0 0 9 9' preserveAspectRatio='none'><rect id='shape'/><view id='nested' viewBox='10 20 30 40'/><view id='explicit' preserveAspectRatio='xMinYMax meet'/><view id='omitted'/></svg></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let originalRoot = graph.root
+  let originalCount = graph.occurrences.length()
+  let ordinary = run select(&graph, b"shape", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    targetIs(&graph, &ordinary, b"shape"),
+    "ordinary ID supplies target, not a subtree root",
+  )
+  run Testing.expect(
+    match rootBox(&graph, &ordinary) {
+      Option<Rect>.Some { value } => value.xMax == 200.0
+      _ => false
+    },
+    "ordinary ID keeps root viewBox, not nested SVG viewBox",
+  )
+  let nested = run select(&graph, b"nested", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    targetIs(&graph, &nested, b"nested"),
+    "view ID is also the ordinary URL target",
+  )
+  run Testing.expect(
+    match rootBox(&graph, &nested) {
+      Option<Rect>.Some { value } => value.xMin == 10.0 && value.xMax == 40.0 && value.yMax == 60.0
+      _ => false
+    },
+    "nested view overrides the root viewBox",
+  )
+  run Testing.expect(
+    match rootAspect(&graph, &nested) {
+      Option<AspectRatio>.Some { value } => value.alignment == Alignment.XMaxYMin && value.slice
+      _ => false
+    },
+    "omitted PAR preserves root PAR, not nearest ancestor or initial PAR",
+  )
+  let explicit = run select(&graph, b"explicit", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match rootAspect(&graph, &explicit) {
+      Option<AspectRatio>.Some { value } => value.alignment == Alignment.XMinYMax && !value.slice
+      _ => false
+    },
+    "explicit view PAR overrides root",
+  )
+  run Testing.expect(
+    match rootBox(&graph, &explicit) {
+      Option<Rect>.Some { value } => value.xMax == 200.0
+      _ => false
+    },
+    "PAR-only view preserves root viewBox",
+  )
+  let omitted = run select(&graph, b"omitted", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match rootBox(&graph, &omitted) {
+      Option<Rect>.Some { value } => value.xMax == 200.0
+      _ => false
+    },
+    "empty view has no inherited ancestor overrides",
+  )
+  run Testing.expect(
+    graph.root.index == originalRoot.index && graph.occurrences.length() == originalCount,
+    "view selection does not prune or reroot source occurrences",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#ViewElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+test effect fn invalidViewAttributesRemainIndependentlyUnspecified() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 100' preserveAspectRatio='none'><view id='bad' viewBox='0 0 -1 4' preserveAspectRatio='wrong' zoomAndPan='zoom' viewTarget='ok 1bad'/><view id='partial' viewBox='1 2 3 4' preserveAspectRatio='wrong'/><view xmlns='urn:foreign' id='foreign' viewBox='0 0 1 1'/><rect id='ok' viewBox='0 0 2 2'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let bad = run select(&graph, b"bad", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    targetIs(&graph, &bad, b"bad"),
+    "invalid view attributes do not erase a valid ordinary target",
+  )
+  run Testing.expect(
+    match rootBox(&graph, &bad) {
+      Option<Rect>.Some { value } => value.xMax == 200.0
+      _ => false
+    },
+    "invalid viewBox preserves root",
+  )
+  run Testing.expect(
+    match rootAspect(&graph, &bad) {
+      Option<AspectRatio>.Some { value } => value.alignment == Alignment.None
+      _ => false
+    },
+    "invalid PAR preserves root",
+  )
+  run Testing.expect(
+    bad.viewTargets.length() == 0
+      && match &bad.zoomAndPan {
+        Option<ZoomAndPan>.None => true
+        _ => false
+      },
+    "invalid legacy attributes expose no partial list",
+  )
+  let partial = run select(&graph, b"partial", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match rootBox(&graph, &partial) {
+      Option<Rect>.Some { value } => value.xMin == 1.0
+      _ => false
+    },
+    "invalid XML PAR does not invalidate independent valid viewBox",
+  )
+  let names: [&[u8]; 2] = [b"foreign", b"ok"]
+  let mut i: usize = 0
+  while i < names.length {
+    let ordinary = run select(&graph, names[i], &mut store, &Limits.make())
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      targetIs(&graph, &ordinary, names[i])
+        && match &ordinary.viewBox {
+          Option<Rect>.None => true
+          _ => false
+        },
+      "only SVG namespace view elements contribute view overrides",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/linking.html#ViewElementViewTargetAttribute
+test effect fn decodedIdsAndLegacyTargetsResolveAgainstSourceDocument() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><g id='caf\xC3\xA9'/><rect id='second'/><view id='legacy' viewTarget='caf\xC3\xA9 missing second' zoomAndPan='disable'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let encoded = run select(&graph, b"caf%C3%A9", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    targetIs(&graph, &encoded, b"caf\xC3\xA9"),
+    "decoded UTF-8 XML ID resolves in graph",
+  )
+  let legacy = run select(&graph, b"legacy", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    legacy.viewTargets.length() == 2,
+    "unresolved viewTarget names are ignored without losing resolved neighbors",
+  )
+  run Testing.expect(
+    match &legacy.zoomAndPan {
+      Option<ZoomAndPan>.Some { value } => value == ZoomAndPan.Disable
+      _ => false
+    },
+    "legacy view zoom retained without UI behavior",
+  )
+  let fragment = run select(
+    &graph,
+    b"svgView(viewTarget(caf%C3%A9%20missing%20second)%3BzoomAndPan(magnify))",
+    &mut store,
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &fragment.target {
+      Option<SourceId>.None => true
+      _ => false
+    },
+    "viewTarget is association, not :target",
+  )
+  run Testing.expect(
+    fragment.viewTargets.length() == 2,
+    "encoded view component delimiters decode before parsing",
+  )
+  let mut i: usize = 0
+  while i < legacy.viewTargets.length() {
+    run Testing.expect(
+      legacy.viewTargets.asSlice()[i].node.index == fragment.viewTargets.asSlice()[i].node.index
+        && legacy.viewTargets.asSlice()[i].document.index
+          == fragment.viewTargets.asSlice()[i].document.index,
+      "attribute and fragment associations resolve to identical ordered source IDs",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// https://www.w3.org/TR/2012/REC-media-frags-20120925/#processing-name-value-components
+test effect fn mediaSelectionPreservesDimensionsAndDelimiterBoundaries() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='200' height='100'><rect id='chosen'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let media = run select(&graph, b"xywh=percent:10,20,30,40&t=npt:2,5", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &media.spatial {
+      Option<SpatialView>.Some { value } => value.unit == SpatialUnit.Percent && value.width == 30
+      _ => false
+    },
+    "percent media remains unresolved typed metadata",
+  )
+  run Testing.expect(
+    match &media.viewBox {
+      Option<Rect>.None => true
+      _ => false
+    },
+    "selection does not resolve percentages against intrinsic dimensions",
+  )
+  run Testing.expect(
+    match &media.temporal {
+      Option<TimeSegment>.Some { value } => value.start == 2.0
+        && match &value.end {
+          Option<f64>.Some { value: end } => end == 5.0
+          _ => false
+        }
+      _ => false
+    },
+    "space and time compose",
+  )
+  let id = run select(&graph, b"chosen&t=3&xywh=1,2,3,4", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    targetIs(&graph, &id, b"chosen")
+      && match &id.temporal {
+        Option<TimeSegment>.Some { value } => value.start == 3.0
+        _ => false
+      },
+    "ID selection can carry temporal metadata",
+  )
+  run Testing.expect(
+    match &id.spatial {
+      Option<SpatialView>.None => true
+      _ => false
+    },
+    "ID selection excludes competing spatial fragment",
+  )
+  let encoded = run select(&graph, b"t%3D3", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(empty(&encoded), "encoded equals never becomes a media delimiter")
+  let escapedAmpersand = run select(&graph, b"t=3%26xywh=1,2,3,4", &mut store, &Limits.make())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    empty(&escapedAmpersand),
+    "encoded ampersand remains in invalid time value, not a new spatial pair",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// The pinned rule applies viewBox before transform regardless of component order.
+test effect fn explicitViewsRetainRootFallbackAndIndependentTransform() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 100' preserveAspectRatio='xMaxYMin slice'/>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let cases: [&[u8]; 2] = [
+    b"svgView(transform(translate(4 5));viewBox(1 2 30 40))",
+    b"svgView(viewBox(1 2 30 40);transform(translate(4 5)))",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let selection = run select(&graph, cases[i], &mut store, &Limits.make())
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      match rootBox(&graph, &selection) {
+        Option<Rect>.Some { value } => value.xMin == 1.0 && value.yMin == 2.0
+        _ => false
+      },
+      "viewBox is not prematurely transformed in component order",
+    )
+    run Testing.expect(
+      match rootAspect(&graph, &selection) {
+        Option<AspectRatio>.Some { value } => value.alignment == Alignment.XMaxYMin && value.slice
+        _ => false
+      },
+      "explicit view preserves omitted root PAR",
+    )
+    run Testing.expect(
+      match &selection.transform {
+        Option<ValueId>.Some { value } => match &store.get(value).* {
+          Value.Transform { value: transform } => true
+          _ => false
+        }
+        _ => false
+      },
+      "geometric application retains shared typed transform",
+    )
+    i = i + 1
+  }
+  let explicit = run select(
+    &graph,
+    b"svgView(preserveAspectRatio(none))",
+    &mut store,
+    &Limits.make(),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match rootAspect(&graph, &explicit) {
+      Option<AspectRatio>.Some { value } => value.alignment == Alignment.None
+      _ => false
+    },
+    "explicit fragment PAR replaces root PAR",
+  )
+  run Testing.expect(
+    match rootBox(&graph, &explicit) {
+      Option<Rect>.Some { value } => value.xMax == 200.0
+      _ => false
+    },
+    "omitted fragment viewBox preserves root",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Atomic invalid-fragment fallback is the project recovery policy.
+test effect fn invalidFragmentsExposeNoTargetOrPartialOverrides() -> ()
+  ! UrlError | StructureError | CssError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(b"<svg xmlns='http://www.w3.org/2000/svg'><rect id='chosen'/></svg>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let cases: [&[u8]; 7] = [
+    b"",
+    b"missing",
+    b"chosen%zz",
+    b"svgView(viewBox(1 2 3 4);preserveAspectRatio(bad))&t=2",
+    b"svgView(viewTarget(chosen);transform(translate(1));unknown(2))",
+    b"svgView(viewBox(0 0 1 1);viewBox(0 0 2 2))",
+    b"1bad&t=2",
+  ]
+  let mut i: usize = 0
+  while i < cases.length {
+    let selection = run select(&graph, cases[i], &mut store, &Limits.make())
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(
+      empty(&selection),
+      "invalid atomic fragment falls back to ordinary root without partial metadata",
+    )
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Resource exhaustion is an error even where malformed syntax would fall back.
+test effect fn fragmentAndXmlTargetResourceLimitsPropagate() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><rect id='a'/><rect id='b'/><view id='v' viewTarget='a b'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let inputs: [&[u8]; 3] = [b"bad%zz", b"svgView(transform(translate(1)))", b"v"]
+  let expected = [CssErrorKind.InputLimit, CssErrorKind.NestingLimit, CssErrorKind.TokenLimit]
+  let mut i: usize = 0
+  while i < inputs.length {
+    let mut limits = Limits.make()
+    if i == 0 {
+      limits.maxInputBytes = 2
+    }
+    if i == 1 {
+      limits.maxDepth = 1
+    }
+    if i == 2 {
+      limits.maxTokens = 1
+    }
+    let result = run Effect.result(select(&graph, inputs[i], &mut store, &limits))
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    match move result {
+      Result<Selection, CssError | OutOfMemoryError>.Success { value } => {
+        run Testing.expect(false, "limits must not silently select root")
+      }
+      Result<Selection, CssError | OutOfMemoryError>.Failure { error } => match move error {
+        CssError reason => {
+          run Testing.expect(
+            reason.kind == expected[i],
+            "typed hard resource failure survives selection",
+          )
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+    i = i + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Raise the caller's bound above URL's own bound to exercise URL InputLimit,
+// rather than merely hitting the selection parser's cheaper preflight check.
+test effect fn urlDecodeInputLimitIsNotInvalidFragmentFallback() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut store = Store.make()
+  let graph = run load(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let chunk: [u8; 65536] = [97; 65536]
+  let mut encoded = Bytes.make()
+  let mut i: usize = 0
+  while i < 768 {
+    run Bytes.append(&mut encoded, &chunk) |> Effect.provideMut<Allocator>(&mut allocator)
+    i = i + 1
+  }
+  run Bytes.append(&mut encoded, b"a") |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut limits = Limits.make()
+  limits.maxInputBytes = Bytes.length(&encoded)
+  let result = run Effect.result(select(&graph, Bytes.asSlice(&encoded), &mut store, &limits))
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move result {
+    Result<Selection, CssError | OutOfMemoryError>.Success { value } => {
+      run Testing.expect(false, "URL hard bound must not silently become empty selection")
+    }
+    Result<Selection, CssError | OutOfMemoryError>.Failure { error } => match move error {
+      CssError reason => {
+        run Testing.expect(
+          reason.kind == CssErrorKind.InputLimit,
+          "URL InputLimit maps to public CSS resource error",
+        )
+      }
+      OutOfMemoryError exhausted => {
+        fail move exhausted
+      }
+    }
+  }
+}

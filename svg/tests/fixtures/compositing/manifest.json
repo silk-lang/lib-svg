@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "normal",
+      "input": "inputs/normal.svg",
+      "references": [
+        {
+          "path": "references/normal.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingnormal",
+      "tolerance": {}
+    },
+    {
+      "id": "multiply",
+      "input": "inputs/multiply.svg",
+      "references": [
+        {
+          "path": "references/multiply.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingmultiply",
+      "tolerance": {}
+    },
+    {
+      "id": "screen",
+      "input": "inputs/screen.svg",
+      "references": [
+        {
+          "path": "references/screen.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingscreen",
+      "tolerance": {}
+    },
+    {
+      "id": "overlay",
+      "input": "inputs/overlay.svg",
+      "references": [
+        {
+          "path": "references/overlay.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingoverlay",
+      "tolerance": {}
+    },
+    {
+      "id": "darken",
+      "input": "inputs/darken.svg",
+      "references": [
+        {
+          "path": "references/darken.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingdarken",
+      "tolerance": {}
+    },
+    {
+      "id": "lighten",
+      "input": "inputs/lighten.svg",
+      "references": [
+        {
+          "path": "references/lighten.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendinglighten",
+      "tolerance": {}
+    },
+    {
+      "id": "color-dodge",
+      "input": "inputs/color-dodge.svg",
+      "references": [
+        {
+          "path": "references/color-dodge.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingcolordodge",
+      "tolerance": {}
+    },
+    {
+      "id": "color-burn",
+      "input": "inputs/color-burn.svg",
+      "references": [
+        {
+          "path": "references/color-burn.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingcolorburn",
+      "tolerance": {}
+    },
+    {
+      "id": "hard-light",
+      "input": "inputs/hard-light.svg",
+      "references": [
+        {
+          "path": "references/hard-light.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendinghardlight",
+      "tolerance": {}
+    },
+    {
+      "id": "soft-light",
+      "input": "inputs/soft-light.svg",
+      "references": [
+        {
+          "path": "references/soft-light.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingsoftlight",
+      "tolerance": {}
+    },
+    {
+      "id": "difference",
+      "input": "inputs/difference.svg",
+      "references": [
+        {
+          "path": "references/difference.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingdifference",
+      "tolerance": {}
+    },
+    {
+      "id": "exclusion",
+      "input": "inputs/exclusion.svg",
+      "references": [
+        {
+          "path": "references/exclusion.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingexclusion",
+      "tolerance": {}
+    },
+    {
+      "id": "hue",
+      "input": "inputs/hue.svg",
+      "references": [
+        {
+          "path": "references/hue.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendinghue",
+      "tolerance": {}
+    },
+    {
+      "id": "saturation",
+      "input": "inputs/saturation.svg",
+      "references": [
+        {
+          "path": "references/saturation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingsaturation",
+      "tolerance": {}
+    },
+    {
+      "id": "color",
+      "input": "inputs/color.svg",
+      "references": [
+        {
+          "path": "references/color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingcolor",
+      "tolerance": {}
+    },
+    {
+      "id": "luminosity",
+      "input": "inputs/luminosity.svg",
+      "references": [
+        {
+          "path": "references/luminosity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Literal RGB from the normative blend equation for backdrop (51,102,153)/255 and source (204,76,26)/255, rounded to nearest RGBA8; no renderer supplies the reference.",
+      "spec": "https://www.w3.org/TR/compositing-1/#blendingluminosity",
+      "tolerance": {}
+    },
+    {
+      "id": "group-opacity-blend",
+      "input": "inputs/group-opacity-blend.svg",
+      "references": [
+        {
+          "path": "references/group-opacity-blend.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Group children compose on transparent black, then group opacity and multiply apply once against the red backdrop.",
+      "spec": "https://www.w3.org/TR/compositing-1/#generalformula",
+      "tolerance": {}
+    },
+    {
+      "id": "blend-not-inherited",
+      "input": "inputs/blend-not-inherited.svg",
+      "references": [
+        {
+          "path": "references/blend-not-inherited.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Mix-blend-mode is non-inherited; blue replaces red inside the isolated blending group.",
+      "spec": "https://www.w3.org/TR/compositing-1/#mix-blend-mode",
+      "tolerance": {}
+    },
+    {
+      "id": "transform-isolation",
+      "input": "inputs/transform-isolation.svg",
+      "references": [
+        {
+          "path": "references/transform-isolation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A 2D identity transform preserves the red backdrop; a specified 3D identity transform isolates blue from red, even though both flatten to the identity matrix.",
+      "spec": "https://www.w3.org/TR/compositing-1/#svgcompositing",
+      "tolerance": {}
+    }
+  ]
+}

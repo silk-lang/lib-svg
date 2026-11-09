@@ -1,0 +1,55 @@
+//! Hatch path sections: 2016 CR pservers.html #HatchpathNotes.
+import used_hatches { Section }
+import used_hatches
+import svg_geometry.geometry { Point, Segment }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+fn start(section: &Section) -> Point {
+  return match &section.path.segments()[0] {
+    Segment.MoveTo { to } => to
+    _ => Point.new(-1.0, -1.0)
+  }
+}
+
+// https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#HatchpathNotes
+test effect fn hatchSectionsRepeatByTheirLastPoint() -> ()
+  ! OutOfMemoryError | AssertionError<'static> {
+  let mut heap = Allocator.systemAllocatorProvider()
+
+  // Without a moveto the section starts at (x, 0) for the last point's x and joins.
+  let zigzag = run used_hatches.section(b"L 0,0 10,50") |> Effect.provideMut<Allocator>(&mut heap)
+  match &zigzag {
+    Option<Section>.Some { value } => {
+      run Testing.expect(value.period == 50.0 && value.joined, "period and join")
+      let first = start(&value)
+      run Testing.expect(first.x == 10.0 && first.y == 0.0, "implicit start")
+    }
+    _ => run Testing.expect(false, "zigzag section")
+  }
+
+  // With a moveto, or a closepath, sections are separate subpaths.
+  let moved = run used_hatches.section(b"M 2,0 L 8,5 L 2,10")
+    |> Effect.provideMut<Allocator>(&mut heap)
+  match &moved {
+    Option<Section>.Some { value } => run Testing.expect(
+      value.period == 10.0 && !value.joined,
+      "moveto section",
+    )
+    _ => run Testing.expect(false, "moveto section")
+  }
+  let closed = run used_hatches.section(b"L 0,0 4,4 0,8 z")
+    |> Effect.provideMut<Allocator>(&mut heap)
+  match &closed {
+    Option<Section>.Some { value } => run Testing.expect(!value.joined, "closed section")
+    _ => run Testing.expect(false, "closed section")
+  }
+
+  // A last point at or above the strip origin line renders nothing.
+  let flat = run used_hatches.section(b"L 0,0 10,0") |> Effect.provideMut<Allocator>(&mut heap)
+  run Testing.expect(flat.isNone(), "zero offset")
+  let up = run used_hatches.section(b"M 0,0 L 4,-4") |> Effect.provideMut<Allocator>(&mut heap)
+  run Testing.expect(up.isNone(), "negative offset")
+}

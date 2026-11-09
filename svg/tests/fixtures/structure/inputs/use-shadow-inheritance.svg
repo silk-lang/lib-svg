@@ -1,0 +1,7 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseStyleInheritance -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <style>.source rect { fill: green } use > rect { fill: lime }</style>
+  <defs><g class="source"><rect id="tile" width="8" height="8"/></g></defs>
+  <use href="#tile" x="2" y="2" fill="red"/>
+  <use href="#tile" x="14" y="2" fill="blue"/>
+</svg>

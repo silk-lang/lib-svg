@@ -1,0 +1,5 @@
+[package]
+name = "svg-xml-conformance"
+description = "Internal stdlib XML conformance driver"
+version = "0.1.0"
+silk-version = "0.1.0-dev.61+91f335268900"

@@ -1,0 +1,449 @@
+//! Cached backend paints. A gradient ramp is built once; instances update only its mapping.
+import svg_core.scene { DisplayList, Brush, PaintInstance, GradientGeometry, Color, RenderError }
+import svg_core.scene { SpreadMethod }
+import svg_core.mapping { Mapping }
+import svg_core.mapping
+import vector.paint { Gradient, Stop, Solid, Shader, SPREAD_PAD, SPREAD_REPEAT, SPREAD_REFLECT }
+import vector.paint { ImagePattern, SAMPLE_BILINEAR, SAMPLE_NEAREST, EXTEND_REPEAT, EXTEND_CLAMP }
+import vector.projective { Homography }
+import svg_geometry.geometry { Transform }
+import silk.core.option { Option }
+import silk.num.u32
+import patterns
+import image_sampling
+import image_sampling { Cache as ImageCache }
+import svg_core.scene { ImageSampling }
+import vector.paint
+import vector.geometry { Affine }
+import vector.geometry_error { GeometryError }
+import vector.pixmap { Pixmap, Rgba8 }
+import vector.strips { Coverage }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+import checked
+import canvas { Surface }
+
+struct Prepared {
+  ready: bool,
+  selected: usize,
+  shader: Gradient,
+}
+
+pub struct Cache {
+  images: List<Pixmap>,
+  expanded: ImageCache,
+  expansionBudget: usize,
+  gradients: List<Prepared>,
+  stops: List<Stop>,
+}
+
+pub effect fn make(list: &DisplayList) -> Cache
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut gradients = run List<Prepared>.makeWithCapacity(list.gradients.length())
+  let mut i: usize = 0
+  while i < list.gradients.length() {
+    run gradients.append(
+      Prepared {
+        ready: false,
+        selected: usize.MAX,
+        shader: Gradient.linear(0.0, 0.0, 0.0, 0.0, SPREAD_PAD, &Affine.identity()),
+      },
+    )
+    i = i + 1
+  }
+  let mut images = List<Pixmap>.make()
+  let mut remaining = list.maxPatternPixels
+  let mut n: usize = 0
+  while n < list.images.length() {
+    let source = &list.images.asSlice()[n].image
+    let count = u32.toUsize(source.width()) * u32.toUsize(source.height())
+    remaining = if count > remaining {
+      0
+    } else {
+      remaining - count
+    }
+    let mut pixels = run Pixmap.make(source.width(), source.height())
+    let destination = pixels.dataMut()
+    let bytes = source.data()
+    let mut j: usize = 0
+    while j < bytes.length {
+      destination[j] = bytes[j]
+      j = j + 1
+    }
+    run images.append(move pixels)
+    n = n + 1
+  }
+  return Cache {
+    images: move images,
+    expanded: ImageCache.make(),
+    expansionBudget: remaining,
+    gradients: move gradients,
+    stops: List<Stop>.make(),
+  }
+}
+
+effect fn rgba(color: Color) -> Rgba8
+  ! RenderError {
+  return Rgba8.make(
+    run checked.unit(color.r),
+    run checked.unit(color.g),
+    run checked.unit(color.b),
+    run checked.unit(color.a),
+  )
+}
+
+pub effect fn validate(list: &DisplayList) -> ()
+  ! RenderError {
+  // Decoded Image dimensions are already checked, including their product.
+  // Bound the aggregate backend copy before allocating any Pixmap storage.
+  let mut remaining = list.maxPatternPixels
+  let mut imageIndex: usize = 0
+  while imageIndex < list.images.length() {
+    let image = &list.images.asSlice()[imageIndex].image
+    let count = u32.toUsize(image.width()) * u32.toUsize(image.height())
+    if count > remaining {
+      fail RenderError.TooLarge
+    }
+    remaining = remaining - count
+    imageIndex = imageIndex + 1
+  }
+  let mut i: usize = 0
+  while i < list.gradientStops.length() {
+    let stops = list.gradientStops.asSlice()[i].asSlice()
+    let mut j: usize = 0
+    while j < stops.length {
+      if !f64.isFinite(stops[j].offset) {
+        fail RenderError.InvalidGeometry
+      }
+      run checked.color(stops[j].color)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < list.gradients.length() {
+    let gradient = &list.gradients.asSlice()[i]
+    if gradient.stops >= list.gradientStops.length() {
+      fail RenderError.InvalidGeometry
+    }
+    let valid = match &gradient.geometry {
+      GradientGeometry.Linear { start, end } => f64.isFinite(start.x) && f64.isFinite(start.y)
+        && f64.isFinite(end.x)
+        && f64.isFinite(end.y)
+      GradientGeometry.Radial { center, radius, focal, focalRadius } => f64.isFinite(center.x)
+        && f64.isFinite(center.y)
+        && f64.isFinite(radius)
+        && radius >= 0.0
+        && f64.isFinite(focal.x)
+        && f64.isFinite(focal.y)
+        && f64.isFinite(focalRadius)
+        && focalRadius >= 0.0
+    }
+    if !valid {
+      fail RenderError.InvalidGeometry
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < list.paints.length() {
+    match &list.paints.asSlice()[i] {
+      PaintInstance.Image { image, transform, sampling: _ } => {
+        if image >= list.images.length() || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      PaintInstance.Gradient { gradient, transform } => {
+        if gradient >= list.gradients.length() || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+      }
+      PaintInstance.Pattern { pattern, transform } => {
+        if pattern >= list.patterns.length() || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+      }
+    }
+    i = i + 1
+  }
+}
+
+pub effect fn validateBrush(brush: &Brush, list: &DisplayList) -> ()
+  ! RenderError {
+  match &brush.* {
+    Brush.Solid { color } => {
+      run checked.color(color)
+    }
+    Brush.Server { index } => {
+      if index >= list.paints.length() {
+        fail RenderError.InvalidGeometry
+      }
+    }
+  }
+}
+
+effect fn prepare(cache: &mut Cache, index: usize, list: &DisplayList) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if cache.gradients.asSlice()[index].ready {
+    return
+  }
+  let source = &list.gradients.asSlice()[index]
+  let spread = match source.spread {
+    SpreadMethod.Pad => SPREAD_PAD
+    SpreadMethod.Repeat => SPREAD_REPEAT
+    SpreadMethod.Reflect => SPREAD_REFLECT
+  }
+  let mut shader = match &source.geometry {
+    GradientGeometry.Linear { start, end } => Gradient.linear(
+      start.x,
+      start.y,
+      end.x,
+      end.y,
+      spread,
+      &Affine.identity(),
+    )
+    GradientGeometry.Radial { center, radius, focal, focalRadius } => Gradient.radial(
+      center.x,
+      center.y,
+      radius,
+      focal.x,
+      focal.y,
+      focalRadius,
+      spread,
+      &Affine.identity(),
+    )
+  }
+  shader.setLinearRgbInterpolation(source.linearRgb)
+  shader.setPremultipliedInterpolation(source.premultiplied)
+  cache.stops.clear()
+  let stops = list.gradientStops.asSlice()[source.stops].asSlice()
+  let mut i: usize = 0
+  while i < stops.length {
+    run cache.stops.append(Stop { offset: stops[i].offset, color: run rgba(stops[i].color) })
+    i = i + 1
+  }
+  run shader.setStops(cache.stops.asSlice())
+  let mut entries = cache.gradients.asMutSlice()
+  entries[index].shader = move shader
+  entries[index].ready = true
+}
+
+fn shade<S: Shader>(
+  target: &mut Pixmap,
+  coverage: &Coverage,
+  shader: &S,
+  opacity: u8,
+  linearRgb: bool,
+) -> () {
+  if linearRgb {
+    paint.fillLinearRgb(&mut target.*, coverage, shader, opacity)
+  } else {
+    paint.fill(&mut target.*, coverage, shader, opacity)
+  }
+}
+
+/// A pixmap as a [`Surface`], composited in sRGB or, when `linearRgb`, in linear light.
+pub struct PixmapSurface<'a> {
+  pub pixels: &'a mut Pixmap,
+  pub linearRgb: bool,
+}
+
+impl<'a> Surface for PixmapSurface<'a> {
+  effect fn solid(self: &mut Self, coverage: &Coverage, color: Rgba8, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    let solid = Solid.make(color)
+    shade(&mut self.pixels.*, coverage, &solid, opacity, self.linearRgb)
+  }
+
+  effect fn gradient(self: &mut Self, coverage: &Coverage, gradient: &Gradient, opacity: u8) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    shade(&mut self.pixels.*, coverage, gradient, opacity, self.linearRgb)
+  }
+
+  effect fn image(
+    self: &mut Self,
+    coverage: &Coverage,
+    pattern: &ImagePattern<'_>,
+    opacity: u8,
+  ) -> ()
+    ! GeometryError | OutOfMemoryError
+    ? &mut Allocator {
+    shade(&mut self.pixels.*, coverage, pattern, opacity, self.linearRgb)
+  }
+}
+
+pub effect fn fill(
+  cache: &mut Cache,
+  target: &mut Pixmap,
+  coverage: &Coverage,
+  brush: &Brush,
+  opacity: f64,
+  linearRgb: bool,
+  list: &DisplayList,
+  placement: Option<Mapping>,
+  textures: &patterns.Cache,
+  texture: Option<usize>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = target.width()
+  let height = target.height()
+  let mut surface = PixmapSurface { pixels: &mut target.*, linearRgb: linearRgb }
+  run draw(
+    &mut cache.*,
+    &mut surface,
+    width,
+    height,
+    coverage,
+    brush,
+    opacity,
+    list,
+    placement,
+    textures,
+    texture,
+  )
+}
+
+/// Draws `coverage` with `brush` onto `surface`, a `width` by `height` target.
+pub effect fn draw<S: Surface>(
+  cache: &mut Cache,
+  surface: &mut S,
+  width: u32,
+  height: u32,
+  coverage: &Coverage,
+  brush: &Brush,
+  opacity: f64,
+  list: &DisplayList,
+  placement: Option<Mapping>,
+  textures: &patterns.Cache,
+  texture: Option<usize>,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let alpha = run checked.unit(opacity)
+  match &brush.* {
+    Brush.Solid { color } => {
+      run surface.solid(coverage, run rgba(color), alpha)
+    }
+    Brush.Server { index } => {
+      match &list.paints.asSlice()[index] {
+        PaintInstance.Image { image, transform, sampling } => {
+          let mut placed = match &placement {
+            Option<Mapping>.Some { value } => run value.compose(&transform)
+            _ => transform
+          }
+          let mut expanded = Option<usize>.None
+          if sampling == ImageSampling.Pixelated {
+            let scale = run image_sampling.multipliers(&placed, width, height)
+            if scale.width > 1 || scale.height > 1 {
+              let selected = run image_sampling.prepare(
+                &mut cache.expanded,
+                image,
+                &cache.images.asSlice()[image],
+                scale.width,
+                scale.height,
+                cache.expansionBudget,
+              )
+              expanded = Option<usize>.Some { value: selected }
+              let reduction = Mapping.Affine {
+                value: Transform.scale(1.0 / u32.toF64(scale.width), 1.0 / u32.toF64(scale.height)),
+              }
+              placed = run placed.compose(&reduction)
+            }
+          }
+          let matrix = match &placed {
+            Mapping.Affine { value } => Homography.fromAffine(&value)
+            Mapping.Projective { value } => value
+          }
+          let pixels = match &expanded {
+            Option<usize>.Some { value } => cache.expanded.get(value)
+            _ => &cache.images.asSlice()[image]
+          }
+          let shader = run ImagePattern.makeProjective(
+            pixels,
+            &matrix,
+            if sampling == ImageSampling.Nearest {
+              SAMPLE_NEAREST
+            } else {
+              SAMPLE_BILINEAR
+            },
+            EXTEND_CLAMP,
+          )
+          run surface.image(coverage, &shader, alpha)
+        }
+        PaintInstance.Gradient { gradient, transform } => {
+          run prepare(&mut cache.*, gradient, list)
+          let prepared = &mut cache.gradients.asMutSlice()[gradient]
+          let local = match &placement {
+            Option<Mapping>.Some { value: _ } => true
+            _ => false
+          }
+          if local || prepared.selected != index {
+            let placed = match &placement {
+              Option<Mapping>.Some { value } => run value.compose(&transform)
+              _ => transform
+            }
+            match &placed {
+              Mapping.Affine { value } => {
+                prepared.shader.setTransform(&value)
+              }
+              Mapping.Projective { value } => {
+                run prepared.shader.setProjective(&value)
+              }
+            }
+            prepared.selected = if local {
+              usize.MAX
+            } else {
+              index
+            }
+          }
+          run surface.gradient(coverage, &prepared.shader, alpha)
+        }
+        PaintInstance.Pattern { pattern, transform } => {
+          let selected = match &texture {
+            Option<usize>.Some { value } => value
+            _ => {
+              fail RenderError.InvalidGeometry
+            }
+          }
+          let image = &textures.textures.asSlice()[selected].pixels
+          let tile = list.patterns.asSlice()[pattern].tile
+          let pixelToTile = Mapping.Affine {
+            value: Transform.new(
+              tile.xMax / u32.toF64(image.width()),
+              0.0,
+              0.0,
+              tile.yMax / u32.toF64(image.height()),
+              0.0,
+              0.0,
+            ),
+          }
+          let placed = match &placement {
+            Option<Mapping>.Some { value } => run value.compose(&transform)
+            _ => transform
+          }
+          let matrix = run placed.compose(&pixelToTile)
+          let homography = match &matrix {
+            Mapping.Affine { value } => Homography.fromAffine(&value)
+            Mapping.Projective { value } => value
+          }
+
+          // Native bilinear repeat wraps each of the four taps independently;
+          // the borrowed image never escapes this call or self-references a cache.
+          let shader = run ImagePattern.makeProjective(
+            image,
+            &homography,
+            SAMPLE_BILINEAR,
+            EXTEND_REPEAT,
+          )
+          run surface.image(coverage, &shader, alpha)
+        }
+      }
+    }
+  }
+}

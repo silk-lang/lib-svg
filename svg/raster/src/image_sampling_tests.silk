@@ -1,0 +1,76 @@
+//! CSS Images 3 #the-image-rendering; bounded allocation is renderer policy.
+import image_sampling { Cache }
+import image_sampling
+import svg_core.scene { RenderError }
+import svg_core.mapping { Mapping }
+import svg_geometry.geometry { Transform }
+import vector.pixmap { Pixmap, Rgba8 }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/css-images-3/#the-image-rendering
+test effect fn independentNearestPositiveMultipliers() -> ()
+  ! RenderError | AssertionError<'static> {
+  let scale = Mapping.Affine { value: Transform.scale(2.6, 3.6) }
+  let value = run image_sampling.multipliers(&scale, 12, 12)
+  run Testing.expect(
+    value.width == 3 && value.height == 4,
+    "round each device-space axis independently",
+  )
+  let down = Mapping.Affine { value: Transform.scale(0.2, 0.8) }
+  let minimum = run image_sampling.multipliers(&down, 12, 12)
+  run Testing.expect(
+    minimum.width == 1 && minimum.height == 1,
+    "downscaling retains a positive first-stage multiple",
+  )
+}
+
+effect fn cachedExpansion() -> bool
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut source = run Pixmap.make(2, 2)
+  source.clear(Rgba8.make(255, 0, 0, 128))
+  let mut cache = Cache.make()
+  let first = run image_sampling.prepare(&mut cache, 7, &source, 3, 3, 36)
+  let second = run image_sampling.prepare(&mut cache, 7, &source, 3, 3, 36)
+  let pixels = cache.get(first)
+  return first == second && pixels.width() == 6 && pixels.height() == 6
+    && pixels.pixel(5, 5).r == 128
+    && pixels.pixel(5, 5).a == 128
+}
+
+// https://www.w3.org/TR/css-images-3/#the-image-rendering
+test effect fn repeatedExpansionSharesPremultipliedSamples() -> ()
+  ! RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let good = run cachedExpansion() |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(good, "same source and integer scale share one bounded premultiplied image")
+}
+
+effect fn overBudget() -> usize
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = run Pixmap.make(2, 2)
+  let mut cache = Cache.make()
+  drop run image_sampling.prepare(&mut cache, 7, &source, 3, 3, 40)
+  return run image_sampling.prepare(&mut cache, 7, &source, 2, 2, 40)
+}
+
+// https://www.w3.org/TR/css-images-3/#the-image-rendering
+// Implementation memory limit: retained intermediates count against one aggregate budget.
+test effect fn expansionBudgetIsAggregate() -> ()
+  ! AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let result = run Effect.result<usize, RenderError | OutOfMemoryError>(overBudget())
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let rejected = match &result {
+    Result<usize, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+      RenderError problem => problem == RenderError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(rejected, "36 plus 16 pixels exceeds the 40-pixel retained budget")
+}

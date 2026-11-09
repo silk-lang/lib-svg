@@ -1,0 +1,199 @@
+//! Image resource integration: SVG2 ImageElement and secure processing modes.
+import image_assets { Store, load }
+import structure { Graph, Options, StructureError, build }
+import resources { Resolver, Response, ResourceKind, ResourceError, ProcessingMode }
+import url { Url, UrlError }
+import scene { RenderError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+struct Host {
+  calls: usize,
+  wrongKind: bool,
+  missing: bool,
+  oom: bool
+}
+
+impl Host {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    self.wrongKind = self.wrongKind || kind != ResourceKind.Image
+    if self.oom {
+      fail OutOfMemoryError {}
+    }
+    if self.missing {
+      fail ResourceError.Io
+    }
+    return Response.fromBytes(run Bytes.copy(pngBytes()))
+  }
+}
+
+impl Resolver for Host {
+  fetch: Host.fetch
+}
+
+effect fn source(data: &[u8], mode: ProcessingMode) -> Graph
+  ! UrlError | StructureError | OutOfMemoryError
+  ? &mut Allocator | &mut Resolver {
+  let base = run Url.parseAbsolute(b"https://example.test/root.svg")
+  let mut options = Options.defaults()
+  options.policy.mode = mode
+  return run build(data, &base, &options)
+}
+
+fn documentBytes() -> &'static [u8] {
+  return b"<svg xmlns='http://www.w3.org/2000/svg'><image href='tile.png'/><image href='./tile.png'/></svg>"
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#URLReference
+test effect fn repeatedUrlSharesDecodedAsset() -> ()
+  ! UrlError | StructureError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, wrongKind: false, missing: false, oom: false }
+  let graph = run source(documentBytes(), ProcessingMode.Static)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let images = run load(&graph, 16)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && !host.wrongKind && images.assets.length() == 1,
+    "URL-normalized image requests share a decode",
+  )
+  let image = &images.assets.asSlice()[0].image
+  run Testing.expect(
+    image.width() == 2 && image.height() == 1 && image.data()[0] == 255 && image.data()[6] == 255,
+    "decoded red and blue pixels retained",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-static-mode
+test effect fn secureImagesDoNotReachHost() -> ()
+  ! UrlError | StructureError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, wrongKind: false, missing: false, oom: false }
+  let graph = run source(documentBytes(), ProcessingMode.SecureStatic)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let images = run load(&graph, 16)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 0 && images.assets.length() == 0,
+    "secure image references are rejected before host dispatch",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn brokenImageIsCachedWithoutPainting() -> ()
+  ! UrlError | StructureError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, wrongKind: false, missing: true, oom: false }
+  let graph = run source(documentBytes(), ProcessingMode.Static)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let images = run load(&graph, 16)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    host.calls == 1 && images.assets.length() == 0,
+    "missing images have no asset and are fetched once",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+test effect fn pixelBudgetRejectsBeforeRetainingAsset() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, wrongKind: false, missing: false, oom: false }
+  let graph = run source(documentBytes(), ProcessingMode.Static)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run Effect.result(load(&graph, 1))
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let rejected = match &result {
+    Result<Store, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+      RenderError value => value == RenderError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(rejected, "aggregate retained image pixels respect the rendering budget")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+test effect fn allocationFailureIsNotBrokenImageFallback() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut host = Host { calls: 0, wrongKind: false, missing: false, oom: true }
+  let graph = run source(documentBytes(), ProcessingMode.Static)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run Effect.result(load(&graph, 16))
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let rejected = match &result {
+    Result<Store, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+      OutOfMemoryError value => true
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(
+    rejected,
+    "allocator failure propagates without producing an incomplete image store",
+  )
+}
+
+fn pngBytes() -> &'static [u8] {
+  return b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x02\x00\x00\x00\x01\x08\x06\x00\x00\x00\xf4\x22\x7f\x8a\x00\x00\x00\x0e\x49\x44\x41\x54\x78\x9c\x63\xf8\xcf\xc0\x00\x42\xff\x01\x0f\xf9\x03\xfd\x85\x11\x99\x76\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82"
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Resource policy bounds aggregate external bytes and URL cache storage too.
+test effect fn resourceAndUrlBudgetsAreAggregate() -> ()
+  ! UrlError | StructureError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut which: usize = 0
+  while which < 2 {
+    let mut host = Host { calls: 0, wrongKind: false, missing: false, oom: false }
+    let mut graph = run source(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><image href='one.png'/><image href='two.png'/></svg>",
+      ProcessingMode.Static,
+    )
+      |> Effect.provideMut<Resolver>(&mut host)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    if which == 0 {
+      graph.limits.maxTotalBytes = pngBytes().length + 1
+    } else {
+      graph.limits.maxUrlBytes = 40
+    }
+    let result = run Effect.result(load(&graph, 16))
+      |> Effect.provideMut<Resolver>(&mut host)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let rejected = match &result {
+      Result<Store, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+        RenderError value => value == RenderError.TooLarge
+        _ => false
+      }
+      _ => false
+    }
+    let expectedCalls: usize = if which == 0 {
+      2
+    } else {
+      1
+    }
+    run Testing.expect(
+      rejected && host.calls == expectedCalls,
+      "aggregate image byte and URL budgets do not silently fall back",
+    )
+    which = which + 1
+  }
+}

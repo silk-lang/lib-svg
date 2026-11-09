@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <!-- SVG2 CR2018 painting: premultiplied group opacity and linearRGB compositing. -->
+  <defs>
+    <pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4">
+      <g opacity=".5" color-interpolation="linearRGB">
+        <rect width="4" height="4" fill="red"/>
+        <rect width="4" height="4" fill="blue" fill-opacity=".5"/>
+      </g>
+    </pattern>
+  </defs>
+  <rect width="32" height="16" fill="url(#p)" fill-opacity=".5"/>
+</svg>

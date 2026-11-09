@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+<defs>
+<rect id="area1" x="10" y="10" width="180" height="85"/>
+<rect id="area2" x="10" y="105" width="180" height="85"/>
+<rect id="strip" x="95" y="0" width="10" height="200" style="shape-margin: 10px"/>
+</defs>
+<g font-family="Noto Sans" font-size="12" style="line-height: 17px">
+<text style="shape-inside: url(#area1); shape-subtract: url(#strip)">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</text>
+<text style="shape-inside: url(#area2); shape-subtract: polygon(95px 0, 105px 0, 105px 200px, 95px 200px); shape-margin: 10px">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</text>
+</g>
+</svg>

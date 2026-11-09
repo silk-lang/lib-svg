@@ -1,0 +1,980 @@
+//! CSS mask layer images other than mask elements: <gradient> geometry and stops
+//! (CSS Images 3), and layer sizing, positioning and tiling, which CSS Masking 1
+//! #the-mask-size, #the-mask-position and #the-mask-repeat take from CSS Backgrounds 3.
+import scene { Color, Gradient, GradientGeometry, GradientStop, RenderError, SpreadMethod }
+import used_paints { Store as PaintStore }
+import used_paints
+import used_images { NaturalSize }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.computed_queries { MaskItem }
+import svg_css.computed_queries
+import svg_css.properties { Property }
+import svg_css.effect_values {
+  Image,
+  Direction,
+  RadialSize,
+  Extent,
+  GradientStop as CssStop,
+  GeometryBox,
+  Repeat,
+  RepeatPair,
+  Size as LayerSize
+}
+import svg_css.transform_values { Position, PositionAxis, Edge }
+import svg_css.dimensions { ExprId }
+import svg_css.colors { Identity }
+import svg_css.colors
+import svg_geometry.geometry { Rect, Point, Transform }
+import svg_geometry.math
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+/// One positioned layer image and its tiling. `image` is the image rectangle
+/// whose tile grid covers the painting area; a repeated axis steps by `step`.
+pub struct Placement {
+  pub image: Rect,
+  pub stepX: f64,
+  pub stepY: f64,
+  pub repeatX: bool,
+  pub repeatY: bool,
+}
+
+impl Copy for Placement {}
+
+/// The used reference box of a mask layer on an SVG element without a CSS layout
+/// box: #the-mask-clip "content-box and padding-box compute to fill-box and
+/// border-box and margin-box compute to stroke-box".
+pub enum Reference {
+  Fill,
+  Stroke,
+  View,
+  None
+}
+
+fn item<'a>(engine: &'a Engine<'_>, style: StyleId, property: Property, layer: usize) -> Option<
+  MaskItem<'a>
+> {
+  let entry = match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      return Option<MaskItem<'a>>.None
+    }
+  }
+  let count = computed_queries.maskCount(&engine.values, entry.value)
+  if count == 0 {
+    return Option<MaskItem<'a>>.None
+  }
+  return computed_queries.maskItem(&engine.values, entry.value, property, layer % count)
+}
+
+fn reference(box: GeometryBox) -> Reference {
+  return match box {
+    GeometryBox.Content => Reference.Fill
+    GeometryBox.Padding => Reference.Fill
+    GeometryBox.Fill => Reference.Fill
+    GeometryBox.Border => Reference.Stroke
+    GeometryBox.Margin => Reference.Stroke
+    GeometryBox.Stroke => Reference.Stroke
+    GeometryBox.View => Reference.View
+    GeometryBox.NoClip => Reference.None
+  }
+}
+
+// https://www.w3.org/TR/css-masking-1/#the-mask-origin
+pub fn origin(engine: &Engine<'_>, style: StyleId, layer: usize) -> Reference {
+  return match &item(engine, style, Property.MaskOrigin, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Box { value: box } => reference(box)
+      _ => Reference.Stroke
+    }
+    _ => Reference.Stroke
+  }
+}
+
+// https://www.w3.org/TR/css-masking-1/#the-mask-clip
+pub fn clip(engine: &Engine<'_>, style: StyleId, layer: usize) -> Reference {
+  return match &item(engine, style, Property.MaskClip, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Box { value: box } => reference(box)
+      _ => Reference.Stroke
+    }
+    _ => Reference.Stroke
+  }
+}
+
+effect fn length(engine: &mut Engine<'_>, style: StyleId, expression: ExprId, basis: f64) -> f64
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return run used_paints.number(&mut engine.*, style, Option<ExprId>.some(expression), basis, 0.0)
+}
+
+effect fn offset(engine: &mut Engine<'_>, style: StyleId, axis: PositionAxis, basis: f64) -> f64
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let value = run length(&mut engine.*, style, axis.offset, basis)
+  return match axis.edge {
+    Edge.Start => value
+    Edge.Center => basis * 0.5 + value
+    Edge.End => basis - value
+  }
+}
+
+// CSS Backgrounds 3 #background-size, with the default sizing algorithm of
+// CSS Images 3 #default-sizing for auto and for images without a natural ratio.
+effect fn size(
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  value: LayerSize,
+  area: Rect,
+  natural: NaturalSize,
+) -> [f64; 2]
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = area.width()
+  let height = area.height()
+  match &value {
+    LayerSize.Explicit { x, y } => {
+      let specifiedX = match &x {
+        Option<ExprId>.Some { value: expression } => Option<f64>.some(
+          f64.max(0.0, run length(&mut engine.*, style, expression, width)),
+        )
+        _ => Option<f64>.None
+      }
+      let specifiedY = match &y {
+        Option<ExprId>.Some { value: expression } => Option<f64>.some(
+          f64.max(0.0, run length(&mut engine.*, style, expression, height)),
+        )
+        _ => Option<f64>.None
+      }
+      if let Option<f64>.Some { value: w } = &specifiedX {
+        if let Option<f64>.Some { value: h } = &specifiedY {
+          return [w, h]
+        }
+        return [w, otherAxis(w, natural.height, natural.ratio, height, false)]
+      }
+      if let Option<f64>.Some { value: h } = &specifiedY {
+        return [otherAxis(h, natural.width, natural.ratio, width, true), h]
+      }
+      if let Option<f64>.Some { value: w } = &natural.width {
+        if let Option<f64>.Some { value: h } = &natural.height {
+          return [w, h]
+        }
+        return [w, otherAxis(w, Option<f64>.None, natural.ratio, height, false)]
+      }
+      if let Option<f64>.Some { value: h } = &natural.height {
+        return [otherAxis(h, Option<f64>.None, natural.ratio, width, true), h]
+      }
+      if let Option<f64>.Some { value: ratio } = &natural.ratio {
+        return fit(ratio, width, height, false)
+      }
+      return [width, height]
+    }
+    LayerSize.Cover => {
+      return match &natural.ratio {
+        Option<f64>.Some { value: ratio } => fit(ratio, width, height, true)
+        _ => [width, height]
+      }
+    }
+    LayerSize.Contain => {
+      return match &natural.ratio {
+        Option<f64>.Some { value: ratio } => fit(ratio, width, height, false)
+        _ => [width, height]
+      }
+    }
+  }
+}
+
+/// The auto axis of a partially specified size: from the natural ratio, else the
+/// natural dimension, else the positioning area. `ratio` is width / height.
+fn otherAxis(
+  given: f64,
+  natural: Option<f64>,
+  ratio: Option<f64>,
+  area: f64,
+  givenIsHeight: bool,
+) -> f64 {
+  if let Option<f64>.Some { value } = &ratio {
+    if value > 0.0 {
+      return if givenIsHeight {
+        given * value
+      } else {
+        given / value
+      }
+    }
+  }
+  return match &natural {
+    Option<f64>.Some { value } => value
+    _ => area
+  }
+}
+
+/// The largest (contain) or smallest (cover) rectangle of `ratio` fitting the area.
+fn fit(ratio: f64, width: f64, height: f64, cover: bool) -> [f64; 2] {
+  if ratio <= 0.0 || height <= 0.0 {
+    return [width, height]
+  }
+  let byWidth = width / ratio
+  let wide = byWidth <= height
+  return if wide != cover {
+    [width, byWidth]
+  } else {
+    [height * ratio, height]
+  }
+}
+
+fn repeats(value: Repeat) -> bool {
+  return value == Repeat.Repeat || value == Repeat.Round || value == Repeat.Space
+}
+
+// https://www.w3.org/TR/css-backgrounds-3/#background-repeat: `round` rescales
+// so a whole number of images fit the positioning area.
+fn rounded(size: f64, area: f64) -> f64 {
+  if size <= 0.0 || area <= 0.0 {
+    return size
+  }
+  return area / f64.max(1.0, f64.round(area / size))
+}
+
+/// Lays out one layer image in its positioning area. Returns None when the
+/// image has a zero dimension and so is not displayed.
+pub effect fn place(
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  layer: usize,
+  area: Rect,
+  natural: NaturalSize,
+) -> Option<Placement>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let sizeValue = match &item(&engine.*, style, Property.MaskSize, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Size { value: size } => size
+      _ => LayerSize.Explicit { x: Option<ExprId>.None, y: Option<ExprId>.None }
+    }
+    _ => LayerSize.Explicit { x: Option<ExprId>.None, y: Option<ExprId>.None }
+  }
+  let repeat = match &item(&engine.*, style, Property.MaskRepeat, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Repeat { value: pair } => pair
+      _ => RepeatPair { x: Repeat.Repeat, y: Repeat.Repeat }
+    }
+    _ => RepeatPair { x: Repeat.Repeat, y: Repeat.Repeat }
+  }
+  let mut used = run size(&mut engine.*, style, sizeValue, area, natural)
+  let original = used
+  if repeat.x == Repeat.Round {
+    used[0] = rounded(used[0], area.width())
+  }
+  if repeat.y == Repeat.Round {
+    used[1] = rounded(used[1], area.height())
+  }
+
+  // A third step restores the aspect ratio when only one axis rounds and the
+  // other mask-size component is auto.
+  let autoX = match &sizeValue {
+    LayerSize.Explicit { x, y } => x.isNone()
+    _ => false
+  }
+  let autoY = match &sizeValue {
+    LayerSize.Explicit { x, y } => y.isNone()
+    _ => false
+  }
+  if repeat.x == Repeat.Round && repeat.y != Repeat.Round && autoY && original[0] > 0.0 {
+    used[1] = original[1] * used[0] / original[0]
+  } else if repeat.y == Repeat.Round && repeat.x != Repeat.Round && autoX && original[1] > 0.0 {
+    used[0] = original[0] * used[1] / original[1]
+  }
+  let width = used[0]
+  let height = used[1]
+  if !f64.isFinite(width) || !f64.isFinite(height) {
+    fail RenderError.InvalidGeometry
+  }
+  if width <= 0.0 || height <= 0.0 {
+    return Option<Placement>.None
+  }
+  let position = match &item(&engine.*, style, Property.MaskPosition, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Position { value: position } => Option<Position>.some(position)
+      _ => Option<Position>.None
+    }
+    _ => Option<Position>.None
+  }
+  let mut x = area.xMin
+  let mut y = area.yMin
+  if let Option<Position>.Some { value } = &position {
+    x = area.xMin + run offset(&mut engine.*, style, value.x, area.width() - width)
+    y = area.yMin + run offset(&mut engine.*, style, value.y, area.height() - height)
+  }
+  let mut stepX = width
+  let mut stepY = height
+  let mut repeatX = repeats(repeat.x)
+  let mut repeatY = repeats(repeat.y)
+
+  // `space` ignores mask-position when two or more copies fit; with fewer, one
+  // image is placed by mask-position.
+  if repeat.x == Repeat.Space {
+    let count = f64.floor(area.width() / width)
+    if count >= 2.0 {
+      x = area.xMin
+      stepX = width + (area.width() - count * width) / (count - 1.0)
+    } else {
+      repeatX = false
+    }
+  }
+  if repeat.y == Repeat.Space {
+    let count = f64.floor(area.height() / height)
+    if count >= 2.0 {
+      y = area.yMin
+      stepY = height + (area.height() - count * height) / (count - 1.0)
+    } else {
+      repeatY = false
+    }
+  }
+  if !f64.isFinite(x) || !f64.isFinite(y) || !f64.isFinite(stepX) || !f64.isFinite(stepY) {
+    fail RenderError.InvalidGeometry
+  }
+  return Option<Placement>.some(
+    Placement {
+      image: Rect { xMin: x, yMin: y, xMax: x + width, yMax: y + height },
+      stepX: stepX,
+      stepY: stepY,
+      repeatX: repeatX,
+      repeatY: repeatY,
+    },
+  )
+}
+
+/// A used <gradient>: a solid color, or a gradient whose geometry is in image
+/// coordinates mapped through `local`.
+pub union Painted {
+  Solid { pub color: Color },
+  Gradient { pub gradient: usize, pub local: Transform },
+}
+
+impl Copy for Painted {}
+
+struct Stop {
+  position: f64,
+  color: Color,
+}
+
+impl Copy for Stop {}
+
+effect fn stopColor(color: colors.Color, current: Color) -> Color
+  ! RenderError {
+  match &color.identity {
+    Identity.CurrentColor => {
+      return current
+    }
+    _ => {}
+  }
+  let value = colors.toSrgb(color)
+  let result = Color { r: value.r, g: value.g, b: value.b, a: value.a }
+  if !f64.isFinite(result.r) || !f64.isFinite(result.g) || !f64.isFinite(result.b)
+    || !f64.isFinite(result.a) {
+    fail RenderError.InvalidGeometry
+  }
+  return result
+}
+
+/// Premultiplied interpolation (CSS Images 3 #coloring-gradient-line), returned
+/// as a straight-alpha color.
+pub fn mix(a: Color, b: Color, weight: f64) -> Color {
+  let alpha = a.a + (b.a - a.a) * weight
+  if alpha <= 0.0 {
+    return Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+  }
+  return Color {
+    r: (a.r * a.a + (b.r * b.a - a.r * a.a) * weight) / alpha,
+    g: (a.g * a.a + (b.g * b.a - a.g * a.a) * weight) / alpha,
+    b: (a.b * a.a + (b.b * b.a - a.b * a.a) * weight) / alpha,
+    a: alpha,
+  }
+}
+
+/// The interpolation weight at fraction `t` between two stops whose transition
+/// hint lies at fraction `hint` (#coloring-gradient-line): t^(ln 0.5 / ln hint),
+/// so the hint position receives the half-way color.
+pub fn hintWeight(t: f64, hint: f64) -> f64 {
+  return f64.pow(t, f64.log(0.5) / f64.log(hint))
+}
+
+// Sub-stops per hinted segment of the whole gradient span: the backend tabulates
+// 1,024 ramp entries, so sampling the hint curve at the ramp's own resolution
+// keeps its error within ramp quantization.
+const HINT_SAMPLES: f64 = 1024.0
+
+/// Color stop fixup (CSS Images 3 #color-stop-fixup) and transition hints
+/// (#coloring-gradient-line), in absolute lengths along a gradient ray of
+/// length `basis`.
+effect fn resolveStops(
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  stops: &List<CssStop>,
+  basis: f64,
+  current: Color,
+) -> List<Stop>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = stops.asSlice()
+  let count = source.length
+  let mut positions = List<Option<f64>>.make()
+  let mut largest = -f64.INFINITY
+  let mut i: usize = 0
+  while i < count {
+    let specified = match &source[i] {
+      CssStop.ColorStop { color, position } => match &position {
+        Option<ExprId>.Some { value } => Option<f64>.some(
+          run length(&mut engine.*, style, value, basis),
+        )
+        _ => Option<f64>.None
+      }
+      CssStop.Hint { position } => Option<f64>.some(
+        run length(&mut engine.*, style, position, basis),
+      )
+    }
+    let mut value = specified
+    if i == 0 && value.isNone() {
+      value = Option<f64>.some(0.0)
+    }
+    if i + 1 == count && value.isNone() {
+      value = Option<f64>.some(basis)
+    }
+    if let Option<f64>.Some { value: position } = &value {
+      if !f64.isFinite(position) {
+        fail RenderError.InvalidGeometry
+      }
+      let clamped = f64.max(position, largest)
+      largest = clamped
+      value = Option<f64>.some(clamped)
+    }
+    run positions.append(value)
+    i = i + 1
+  }
+
+  // Unpositioned stops are spread evenly between their positioned neighbours.
+  i = 0
+  while i < count {
+    if positions.asSlice()[i].isSome() {
+      i = i + 1
+      continue
+    }
+    let start = i - 1
+    let mut end = i
+    while positions.asSlice()[end].isNone() {
+      end = end + 1
+    }
+    let from = match &positions.asSlice()[start] {
+      Option<f64>.Some { value } => value
+      _ => 0.0
+    }
+    let to = match &positions.asSlice()[end] {
+      Option<f64>.Some { value } => value
+      _ => from
+    }
+    let mut k = i
+    while k < end {
+      positions.set(
+        k,
+        Option<f64>.some(from + (to - from) * usize.toF64(k - start) / usize.toF64(end - start)),
+      )
+      k = k + 1
+    }
+    i = end
+  }
+  let mut result = List<Stop>.make()
+  let first = match &positions.asSlice()[0] {
+    Option<f64>.Some { value } => value
+    _ => 0.0
+  }
+  let span = f64.max(0.0, largest - first)
+  i = 0
+  while i < count {
+    let position = match &positions.asSlice()[i] {
+      Option<f64>.Some { value } => value
+      _ => 0.0
+    }
+    match &source[i] {
+      CssStop.ColorStop { color, position: ignored } => {
+        run result.append(Stop { position: position, color: run stopColor(color, current) })
+      }
+      CssStop.Hint { position: ignored } => {
+        // A hint always sits between two color stops.
+        let before = result.asSlice()[result.length() - 1]
+        let afterColor = match &source[i + 1] {
+          CssStop.ColorStop { color, position: unused } => run stopColor(color, current)
+          _ => {
+            fail RenderError.InvalidGeometry
+          }
+        }
+        let afterPosition = match &positions.asSlice()[i + 1] {
+          Option<f64>.Some { value } => value
+          _ => position
+        }
+        let distance = afterPosition - before.position
+        if distance > 0.0 {
+          let hint = (position - before.position) / distance
+          if hint <= 0.0 {
+            run result.append(Stop { position: before.position, color: afterColor })
+          } else if hint >= 1.0 {
+            run result.append(Stop { position: afterPosition, color: before.color })
+          } else if hint != 0.5 {
+            let samples = if span > 0.0 {
+              f64.max(2.0, f64.ceil(HINT_SAMPLES * distance / span))
+            } else {
+              2.0
+            }
+            let steps = f64.toUsize(f64.min(samples, HINT_SAMPLES))
+            let mut k: usize = 1
+            while k < steps {
+              let t = usize.toF64(k) / usize.toF64(steps)
+              run result.append(
+                Stop {
+                  position: before.position + distance * t,
+                  color: mix(before.color, afterColor, hintWeight(t, hint)),
+                },
+              )
+              k = k + 1
+            }
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+  return move result
+}
+
+/// The color at `position` of a resolved stop list, clamped at both ends.
+fn colorAt(stops: &[Stop], position: f64) -> Color {
+  if position <= stops[0].position {
+    return stops[0].color
+  }
+  let mut i: usize = 1
+  while i < stops.length {
+    if position < stops[i].position {
+      let left = stops[i - 1]
+      let right = stops[i]
+      let span = right.position - left.position
+      return if span > 0.0 {
+        mix(left.color, right.color, (position - left.position) / span)
+      } else {
+        right.color
+      }
+    }
+    i = i + 1
+  }
+  return stops[stops.length - 1].color
+}
+
+/// The average of one repeating period (#repeating-gradients): the integral of
+/// premultiplied colors over the span, or of the first and last stops when the
+/// span is empty.
+fn average(stops: &[Stop]) -> Color {
+  let first = stops[0]
+  let last = stops[stops.length - 1]
+  let span = last.position - first.position
+  let mut r: f64 = 0.0
+  let mut g: f64 = 0.0
+  let mut b: f64 = 0.0
+  let mut a: f64 = 0.0
+  if span > 0.0 {
+    let mut i: usize = 1
+    while i < stops.length {
+      let left = stops[i - 1]
+      let right = stops[i]
+      let weight = (right.position - left.position) / span * 0.5
+      r = r + (left.color.r * left.color.a + right.color.r * right.color.a) * weight
+      g = g + (left.color.g * left.color.a + right.color.g * right.color.a) * weight
+      b = b + (left.color.b * left.color.a + right.color.b * right.color.a) * weight
+      a = a + (left.color.a + right.color.a) * weight
+      i = i + 1
+    }
+  } else {
+    r = (first.color.r * first.color.a + last.color.r * last.color.a) * 0.5
+    g = (first.color.g * first.color.a + last.color.g * last.color.a) * 0.5
+    b = (first.color.b * first.color.a + last.color.b * last.color.a) * 0.5
+    a = (first.color.a + last.color.a) * 0.5
+  }
+  if a <= 0.0 {
+    return Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+  }
+  return Color { r: r / a, g: g / a, b: b / a, a: a }
+}
+
+/// Appends stop offsets normalized to [lo, hi] and the gradient definition.
+effect fn define(
+  store: &mut PaintStore,
+  stops: &[Stop],
+  lo: f64,
+  hi: f64,
+  geometry: GradientGeometry,
+  repeating: bool,
+) -> usize
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut palette = List<GradientStop>.make()
+  let span = hi - lo
+  let mut i: usize = 0
+  while i < stops.length {
+    let offset = if span > 0.0 {
+      f64.min(1.0, f64.max(0.0, (stops[i].position - lo) / span))
+    } else if i == 0 {
+      0.0
+    } else {
+      1.0
+    }
+    run palette.append(GradientStop { offset: offset, color: stops[i].color })
+    i = i + 1
+  }
+  let index = store.gradientStops.length()
+  run store.gradientStops.append(move palette)
+  let gradient = store.gradients.length()
+  run store.gradients.append(
+    Gradient {
+      geometry: geometry,
+      stops: index,
+      spread: if repeating {
+        SpreadMethod.Repeat
+      } else {
+        SpreadMethod.Pad
+      },
+      linearRgb: false,
+      premultiplied: true,
+    },
+  )
+  return gradient
+}
+
+/// A hard transition at one position has no gradient length; widen it far below
+/// one ramp entry of any representable picture.
+fn widened(lo: f64, hi: f64, scale: f64) -> f64 {
+  if hi > lo {
+    return hi
+  }
+  return lo + f64.max(f64.abs(lo), f64.max(scale, 1.0)) * 0.000000001
+}
+
+// https://www.w3.org/TR/css-images-3/#linear-gradients
+effect fn linear(
+  store: &mut PaintStore,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  repeating: bool,
+  direction: Direction,
+  stops: &List<CssStop>,
+  width: f64,
+  height: f64,
+  current: Color,
+) -> Painted
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut dx: f64 = 0.0
+  let mut dy: f64 = 1.0
+  match &direction {
+    Direction.Angle { angle } => {
+      let radians = math.radians(run length(&mut engine.*, style, angle, 0.0))
+      dx = f64.sin(radians)
+      dy = -f64.cos(radians)
+    }
+    Direction.Corner { x, y } => {
+      let sx = match x {
+        Edge.Start => -1.0
+        Edge.Center => 0.0
+        Edge.End => 1.0
+      }
+      let sy = match y {
+        Edge.Start => -1.0
+        Edge.Center => 0.0
+        Edge.End => 1.0
+      }
+      if sx != 0.0 && sy != 0.0 {
+        // Perpendicular to the line joining the two neighbouring corners.
+        let norm = math.hypot(width, height)
+        if norm > 0.0 {
+          dx = sx * height / norm
+          dy = sy * width / norm
+        } else {
+          dx = sx
+          dy = sy
+        }
+      } else {
+        dx = sx
+        dy = sy
+      }
+    }
+  }
+  let size = f64.abs(width * dx) + f64.abs(height * dy)
+  let startX = width * 0.5 - dx * size * 0.5
+  let startY = height * 0.5 - dy * size * 0.5
+  let resolved = run resolveStops(&mut engine.*, style, stops, size, current)
+  let list = resolved.asSlice()
+  let lo = list[0].position
+  let hi = list[list.length - 1].position
+  if repeating {
+    if !(hi - lo > 0.0) {
+      return Painted.Solid { color: average(list) }
+    }
+  }
+
+  // A non-repeating ramp spans the whole gradient line too, so a hard
+  // transition at the first stop keeps the first color before it.
+  let start = if repeating {
+    lo
+  } else {
+    f64.min(lo, 0.0)
+  }
+  let end = if repeating {
+    hi
+  } else {
+    widened(start, f64.max(hi, size), size)
+  }
+  let geometry = GradientGeometry.Linear {
+    start: Point.new(startX + dx * start, startY + dy * start),
+    end: Point.new(startX + dx * end, startY + dy * end),
+  }
+  let gradient = run define(&mut store.*, list, start, end, geometry, repeating)
+  return Painted.Gradient { gradient: gradient, local: Transform.identity() }
+}
+
+// https://www.w3.org/TR/css-images-3/#radial-gradients
+effect fn radial(
+  store: &mut PaintStore,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  repeating: bool,
+  circle: bool,
+  radialSize: RadialSize,
+  center: Position,
+  stops: &List<CssStop>,
+  width: f64,
+  height: f64,
+  current: Color,
+) -> Painted
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let cx = run offset(&mut engine.*, style, center.x, width)
+  let cy = run offset(&mut engine.*, style, center.y, height)
+  let closeX = f64.min(f64.abs(cx), f64.abs(width - cx))
+  let closeY = f64.min(f64.abs(cy), f64.abs(height - cy))
+  let farX = f64.max(f64.abs(cx), f64.abs(width - cx))
+  let farY = f64.max(f64.abs(cy), f64.abs(height - cy))
+  let mut rx: f64 = 0.0
+  let mut ry: f64 = 0.0
+  match &radialSize {
+    RadialSize.Extent { extent } => {
+      if circle {
+        rx = match extent {
+          Extent.ClosestSide => f64.min(closeX, closeY)
+          Extent.FarthestSide => f64.max(farX, farY)
+          Extent.ClosestCorner => math.hypot(closeX, closeY)
+          Extent.FarthestCorner => math.hypot(farX, farY)
+        }
+        ry = rx
+      } else {
+        // Corner extents keep the matching side extent's aspect ratio and so
+        // scale it by sqrt(2).
+        let corner = 1.4142135623730951
+        match extent {
+          Extent.ClosestSide => {
+            rx = closeX
+            ry = closeY
+          }
+          Extent.FarthestSide => {
+            rx = farX
+            ry = farY
+          }
+          Extent.ClosestCorner => {
+            rx = closeX * corner
+            ry = closeY * corner
+          }
+          Extent.FarthestCorner => {
+            rx = farX * corner
+            ry = farY * corner
+          }
+        }
+      }
+    }
+    RadialSize.Radii { x, y } => {
+      rx = f64.max(0.0, run length(&mut engine.*, style, x, width))
+      ry = match &y {
+        Option<ExprId>.Some { value } => f64.max(
+          0.0,
+          run length(&mut engine.*, style, value, height),
+        )
+        _ => rx
+      }
+    }
+  }
+  if !f64.isFinite(rx) || !f64.isFinite(ry) {
+    fail RenderError.InvalidGeometry
+  }
+  let resolved = run resolveStops(&mut engine.*, style, stops, rx, current)
+  let list = resolved.asSlice()
+
+  // #degenerate-radials: a zero-height ending shape (including a zero circle)
+  // paints the last stop, or the period average when repeating.
+  if ry <= 0.0 {
+    return if repeating {
+      Painted.Solid { color: average(list) }
+    } else {
+      Painted.Solid { color: list[list.length - 1].color }
+    }
+  }
+  let mut stretch = ry / f64.max(rx, 0.0)
+  if rx <= 0.0 {
+    // A zero-width ellipse is a very thin one.
+    rx = ry * 0.000000001
+    stretch = 1000000000.0
+  }
+  let mut lo = list[0].position
+  let mut hi = list[list.length - 1].position
+  let mut shifted = List<Stop>.make()
+  if repeating {
+    let period = hi - lo
+    if !(period > 0.0) {
+      return Painted.Solid { color: average(list) }
+    }
+
+    // Move the period to start at a non-negative radius.
+    let shift = if lo < 0.0 {
+      f64.ceil(-lo / period) * period
+    } else {
+      0.0
+    }
+    let mut i: usize = 0
+    while i < list.length {
+      run shifted.append(Stop { position: list[i].position + shift, color: list[i].color })
+      i = i + 1
+    }
+    lo = lo + shift
+    hi = hi + shift
+  } else if lo < 0.0 {
+    // Negative radii are never painted; begin the ramp at the center.
+    run shifted.append(Stop { position: 0.0, color: colorAt(list, 0.0) })
+    let mut i: usize = 0
+    while i < list.length {
+      if list[i].position > 0.0 {
+        run shifted.append(list[i])
+      }
+      i = i + 1
+    }
+    lo = 0.0
+    hi = f64.max(hi, 0.0)
+  } else {
+    // The ramp starts at the center, so a hard transition at the first stop
+    // keeps the first color inside it.
+    let mut i: usize = 0
+    while i < list.length {
+      run shifted.append(list[i])
+      i = i + 1
+    }
+    lo = 0.0
+  }
+  let end = if repeating {
+    hi
+  } else {
+    widened(lo, f64.max(hi, rx), rx)
+  }
+  let geometry = GradientGeometry.Radial {
+    center: Point.new(cx, cy),
+    radius: end,
+    focal: Point.new(cx, cy),
+    focalRadius: lo,
+  }
+  let gradient = run define(&mut store.*, shifted.asSlice(), lo, end, geometry, repeating)
+  return Painted.Gradient {
+    gradient: gradient,
+    local: Transform.new(1.0, 0.0, 0.0, stretch, 0.0, cy - cy * stretch),
+  }
+}
+
+effect fn copyStops(stops: &List<CssStop>) -> List<CssStop>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = run List<CssStop>.makeWithCapacity(stops.length())
+  let mut i: usize = 0
+  while i < stops.length() {
+    run result.append(stops.asSlice()[i])
+    i = i + 1
+  }
+  return move result
+}
+
+/// An owned copy of a layer's <gradient> value, so stops can be resolved while
+/// the engine's numeric store grows. None for none and url() references.
+pub effect fn layerImage(engine: &Engine<'_>, style: StyleId, layer: usize) -> Option<Image>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &item(engine, style, Property.MaskImage, layer) {
+    Option<MaskItem>.Some { value } => match &value {
+      MaskItem.Image { value: image } => match &image.* {
+        Image.Linear { repeating, direction, stops } => Option<Image>.some(
+          Image.Linear { repeating: repeating, direction: direction, stops: run copyStops(&stops) },
+        )
+        Image.Radial { repeating, circle, size, position, stops } => Option<Image>.some(
+          Image.Radial {
+            repeating: repeating,
+            circle: circle,
+            size: size,
+            position: position,
+            stops: run copyStops(&stops),
+          },
+        )
+        _ => Option<Image>.None
+      }
+      _ => Option<Image>.None
+    }
+    _ => Option<Image>.None
+  }
+}
+
+/// Builds a <gradient> image of the given concrete size. `current` resolves
+/// currentColor stops. Returns None for images that are not gradients.
+pub effect fn gradient(
+  store: &mut PaintStore,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  image: &Image,
+  width: f64,
+  height: f64,
+  current: Color,
+) -> Option<Painted>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return match &image.* {
+    Image.Linear { repeating, direction, stops } => Option<Painted>.some(
+      run linear(
+        &mut store.*,
+        &mut engine.*,
+        style,
+        repeating,
+        direction,
+        &stops,
+        width,
+        height,
+        current,
+      ),
+    )
+    Image.Radial { repeating, circle, size: radialSize, position, stops } => Option<Painted>.some(
+      run radial(
+        &mut store.*,
+        &mut engine.*,
+        style,
+        repeating,
+        circle,
+        radialSize,
+        position,
+        &stops,
+        width,
+        height,
+        current,
+      ),
+    )
+    _ => Option<Painted>.None
+  }
+}

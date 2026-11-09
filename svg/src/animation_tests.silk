@@ -1,0 +1,102 @@
+//! SMIL clock values and sampling at a document time; the rendered cases live in
+//! tests/fixtures/animation.
+import silk.text.string { String }
+import animation { animated, clock, sample }
+import silk.xml.document { XmlDocument, XmlError }
+import svg_css.tokens { equal }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn seconds(text: &[u8]) -> f64 {
+  return match clock(text) {
+    Option<f64>.Some { value } => value
+    _ => -1.0
+  }
+}
+
+// https://www.w3.org/TR/SMIL3/smil-timing.html#q22
+test effect fn clockValues() -> ()
+  ! AssertionError<'static> {
+  run Testing.expect(seconds(b"02:30:03") == 9003.0, "full clock value")
+  run Testing.expect(seconds(b"50:00:10.25") == 180010.25, "hours may exceed two digits")
+  run Testing.expect(seconds(b"02:33") == 153.0, "partial clock value")
+  run Testing.expect(seconds(b"00:10.5") == 10.5, "partial clock fraction")
+  run Testing.expect(seconds(b"3.2h") == 11520.0, "hour timecount")
+  run Testing.expect(seconds(b"45min") == 2700.0, "minute timecount")
+  run Testing.expect(seconds(b" 30s ") == 30.0, "second timecount with spaces")
+  run Testing.expect(seconds(b"5ms") == 0.005, "millisecond timecount")
+  run Testing.expect(seconds(b"12.467") == 12.467, "bare timecount is seconds")
+  run Testing.expect(seconds(b"2:30") == -1.0, "minutes need two digits")
+  run Testing.expect(seconds(b"00:60") == -1.0, "seconds below 60")
+  run Testing.expect(seconds(b"1:2:3:4") == -1.0, "at most two colons")
+  run Testing.expect(seconds(b"5 s") == -1.0, "no space before the metric")
+  run Testing.expect(seconds(b"5days") == -1.0, "unknown metric")
+  run Testing.expect(seconds(b"") == -1.0, "empty")
+}
+
+// Geometry properties such as x are CSS properties in SVG 2, so their animated
+// values land in the animated namespace rather than on the attribute. An empty
+// expected value means no animation applies.
+effect fn sampled(source: &[u8], time: f64, namespace: string, name: string, expected: &[u8]) -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let mut document = run XmlDocument.parse(source)
+  run sample(&mut document, time, &[])
+  let value = (XmlDocument.attribute(&document, XmlDocument.root(&document), namespace, name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+  run Testing.expect(
+    match &value {
+      Option<&[u8]>.Some { value: found } => expected.length > 0 && equal(found, expected)
+      _ => expected.length == 0
+    },
+    "the sampled attribute has the expected value",
+  )
+}
+
+// https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-AnimationSandwichModel
+test effect fn sampleWritesAttributes() -> ()
+  ! XmlError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run sampled(
+    b"<rect xmlns='http://www.w3.org/2000/svg' x='1'><animate attributeName='x' from='0' to='10' dur='4s'/></rect>",
+    1.0,
+    animated(),
+    "x",
+    b"2.5",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run sampled(
+    b"<rect xmlns='http://www.w3.org/2000/svg' x='1'><animate attributeName='x' from='0' to='10' dur='4s'/></rect>",
+    5.0,
+    animated(),
+    "x",
+    b"",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run sampled(
+    b"<rect xmlns='http://www.w3.org/2000/svg' x='1'><set attributeName='x' to='7' begin='1s;3s' dur='1s'/></rect>",
+    3.5,
+    animated(),
+    "x",
+    b"7",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run sampled(
+    b"<rect xmlns='http://www.w3.org/2000/svg' x='1'><set attributeName='x' to='7' begin='1s;3s' dur='1s'/></rect>",
+    2.5,
+    animated(),
+    "x",
+    b"",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run sampled(
+    b"<rect xmlns='http://www.w3.org/2000/svg' transform='scale(2)'><animateMotion from='0,0' to='10,0' dur='1s'/></rect>",
+    0.5,
+    "",
+    "transform",
+    b"translate(5 0) rotate(0) scale(2)",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}

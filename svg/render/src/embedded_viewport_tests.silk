@@ -1,0 +1,197 @@
+import svg_css.computed { Initials }
+import silk.core.option { Option }
+import svg_core.structure { Options as StructureOptions }
+import svg_fonts.database { FontDatabase }
+import lib { RenderOptions, RenderError, Pixmap as Image }
+import lib as renderer
+import environment { Environment, noHostStyles }
+import svg_core.url { Url, UrlError }
+import svg_core.resources {
+  Resolver,
+  DataOnly,
+  Limits as ResourceLimits,
+  ResourceKind,
+  ResourceError,
+  Response,
+  ProcessingMode
+}
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import svg_geometry.geometry { Size }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn renderEmbedded(data: &[u8], width: f64, height: f64) -> Image
+  ! UrlError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://example.test/image.svg")
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let fonts = FontDatabase.make()
+  let environment = Environment {
+    base: &base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: &fonts,
+    styles: noHostStyles(),
+  }
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let options = RenderOptions.make()
+  let tree = run renderer.parseEmbedded(data, &options, &environment, Size.new(width, height))
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  let list = run renderer.record(move tree)
+  return run renderer.renderDisplayList(&list)
+}
+
+fn samePixels(left: &Image, right: &Image) -> bool {
+  if Image.width(left) != Image.width(right) || Image.height(left) != Image.height(right) {
+    return false
+  }
+  let a = Image.data(left)
+  let b = Image.data(right)
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn embeddedViewportOverridesRootDimensionsAndAspectRatio() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1' viewBox='0 0 2 1' preserveAspectRatio='xMidYMid meet'><rect width='1' height='1' fill='red'/><rect x='1' width='1' height='1' fill='blue'/></svg>",
+    8.0,
+    8.0,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='4' height='8' fill='red'/><rect x='4' width='4' height='8' fill='blue'/></svg>",
+    8.0,
+    8.0,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    Image.width(&actual) == 8 && Image.height(&actual) == 8 && samePixels(&actual, &expected),
+    "image-rendering viewport replaces root size and treats root PAR as none",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn embeddedMediaAndViewportUnitsUseTheImageViewport() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1'><style>rect { width:50vw; height:100vh; fill:red } @media (max-width:10px) { rect { fill:blue } }</style><rect/></svg>",
+    8.0,
+    8.0,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='4' height='8' fill='blue'/></svg>",
+    8.0,
+    8.0,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "embedded style resolution uses its own viewport instead of the host's 300 by 150 context",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn fractionalEmbeddedViewportDoesNotStretchToIntegerAllocation() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let actual = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 1'><rect width='1' height='1' fill='red'/></svg>",
+    4.8,
+    3.2,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let expected = run renderEmbedded(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='2.4' height='3.2' fill='red'/></svg>",
+    5.0,
+    4.0,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    samePixels(&actual, &expected),
+    "ceil only allocates storage; it does not scale the logical image viewport",
+  )
+}
+
+struct SpyResolver {
+  calls: usize
+}
+
+impl SpyResolver {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    fail ResourceError.InvalidData
+  }
+}
+
+impl Resolver for SpyResolver {
+  fetch: SpyResolver.fetch
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-animated-mode
+test effect fn embeddedDocumentsBlockExternalRequestsBeforeHostDispatch() -> ()
+  ! AssertionError<'static> | UrlError | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let base = run Url.parseAbsolute(b"https://example.test/image.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let modes = [ProcessingMode.Static, ProcessingMode.Animated]
+  let mut i: usize = 0
+  while i < modes.length {
+    let fonts = FontDatabase.make()
+    let mut host = Environment {
+      base: &base,
+      media: MediaEnvironment.headless(300.0, 150.0),
+      colors: ColorContext.make(black, [black; 19]),
+      fontFamily: b"\"Test Serif\"",
+      systemFonts: [b"16px \"Test Serif\""; 6],
+      cssLimits: Limits.make(),
+      structure: StructureOptions.defaults(),
+      fonts: &fonts,
+      styles: noHostStyles(),
+    }
+    host.structure.policy.mode = modes[i]
+    let mut spy = SpyResolver { calls: 0 }
+    let tree = run renderer.parseEmbedded(
+      b"<svg xmlns='http://www.w3.org/2000/svg'><style>@import url(external.css);</style><use href='external.svg#shape'/><image href='external.png' width='4' height='4'/></svg>",
+      &RenderOptions.make(),
+      &host,
+      Size.new(8.0, 8.0),
+    )
+      |> Effect.provideMut<Resolver>(&mut spy)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let expected = if modes[i] == ProcessingMode.Animated {
+      ProcessingMode.SecureAnimated
+    } else {
+      ProcessingMode.SecureStatic
+    }
+    run Testing.expect(
+      spy.calls == 0 && tree.graph.documents.asSlice()[0].policy.mode == expected,
+      "embedded stylesheet, use, and image requests are blocked before host dispatch in both modes",
+    )
+    i = i + 1
+  }
+}

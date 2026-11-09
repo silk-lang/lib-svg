@@ -1,0 +1,23 @@
+//! The two host imports the exports use to move bytes in and out of wasm memory.
+static if Intrinsic.targetArchitecture() == "wasm32" {
+  pub unsafe extern "C" fn hostInput(
+    slot: u32,
+    destination: ?[*]mut u8,
+    length: u32,
+  ) -> () as "host#input"
+
+  pub unsafe extern "C" fn hostOutput(
+    kind: u32,
+    source: ?[*]const u8,
+    length: u32,
+  ) -> () as "host#output"
+} else {
+  // Lets workspace builds for native targets compile; the exports are only usable on wasm32.
+  pub unsafe fn hostInput(slot: u32, destination: ?[*]mut u8, length: u32) -> () {
+    Intrinsic.trap("svg-wasm needs a wasm32 host")
+  }
+
+  pub unsafe fn hostOutput(kind: u32, source: ?[*]const u8, length: u32) -> () {
+    Intrinsic.trap("svg-wasm needs a wasm32 host")
+  }
+}

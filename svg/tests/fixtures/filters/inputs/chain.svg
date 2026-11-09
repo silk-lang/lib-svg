@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <filter id="a" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><feOffset dx="10"/></filter><filter id="b" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><feOffset dy="20"/></filter><rect x="10" y="10" width="30" height="30" fill="green" filter="url(#a) url(#b)"/>
+</svg>

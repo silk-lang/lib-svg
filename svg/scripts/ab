@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// Compare identical workloads using new/old native-stage median ratios.
+import { main } from '../bench/harness.mjs';
+await main('ab');

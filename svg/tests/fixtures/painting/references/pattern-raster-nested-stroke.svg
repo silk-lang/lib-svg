@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <rect width="32" height="16" fill="blue"/>
+  <g fill="red">
+    <rect width="4" height="16"/><rect x="8" width="4" height="16"/>
+    <rect x="16" width="4" height="16"/><rect x="24" width="4" height="16"/>
+  </g>
+  <g fill="black">
+    <rect x="3" width="2" height="16"/><rect x="11" width="2" height="16"/>
+    <rect x="19" width="2" height="16"/><rect x="27" width="2" height="16"/>
+  </g>
+</svg>

@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#PaintServerTemplates -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><path d="M0 0H16V16H0Z" fill="red"/><path d="M16 0H32V16H16Z" fill="blue"/></svg>

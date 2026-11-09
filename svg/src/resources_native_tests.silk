@@ -1,0 +1,280 @@
+//! Native resource policy tests; URL syntax follows the pinned URL Standard.
+static if (Intrinsic.targetOperatingSystem() == "windows"
+  && Intrinsic.targetArchitecture() == "x86_64"
+  && Intrinsic.targetAbi() == "msvc"
+  && Intrinsic.profileText("libc") == "system")
+  || Intrinsic.targetOperatingSystem() == "wasi"
+  || (Intrinsic.targetOperatingSystem() == "darwin" && Intrinsic.targetArchitecture() == "aarch64"
+    && Intrinsic.targetAbi() == "apple"
+    && Intrinsic.profileText("libc") == "system")
+  || (Intrinsic.targetOperatingSystem() == "linux" && Intrinsic.targetAbi() == "gnu"
+    && Intrinsic.profileText("libc") == "gnu"
+    && (Intrinsic.targetArchitecture() == "aarch64"
+      || Intrinsic.targetArchitecture() == "x86_64")) {
+  import resources_native { FileSystem }
+  import resources { Limits, Resolver, Response, ResourceKind, ResourceError }
+  import url { Url, UrlError }
+  import silk.collections.bytes { Bytes }
+  import silk.core.effect { Effect }
+  import silk.core.result { Result }
+  import silk.mem.allocator { Allocator, OutOfMemoryError }
+  import silk.testing.testing { Testing, AssertionError }
+  import silk.text.string { String }
+
+  effect fn expectFetchError(files: &mut FileSystem, address: &Url, expected: ResourceError) -> ()
+    ! AssertionError<'static> | OutOfMemoryError
+    ? &mut Allocator {
+    let outcome = run Effect.result(
+      FileSystem.fetch(&mut files.*, address, ResourceKind.StyleSheet),
+    )
+    match move outcome {
+      Result<Response, ResourceError | OutOfMemoryError>.Success { value } => {
+        run Testing.expect(false, "fetch must fail with its typed policy or IO error")
+      }
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match move error {
+        ResourceError failure => {
+          run Testing.expect(failure == expected, "fetch preserves the resource error category")
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+  }
+
+  effect fn expectBadBase(base: &[u8]) -> ()
+    ! AssertionError<'static> | OutOfMemoryError
+    ? &mut Allocator {
+    let outcome = run Effect.result(FileSystem.make(base, Limits.defaults()))
+    match move outcome {
+      Result<FileSystem, ResourceError | OutOfMemoryError>.Success { value } => {
+        run Testing.expect(false, "malformed base must fail before the trapping native constructor")
+      }
+      Result<FileSystem, ResourceError | OutOfMemoryError>.Failure { error } => match move error {
+        ResourceError failure => {
+          run Testing.expect(
+            failure == ResourceError.BlockedLocation,
+            "base must be a normalized absolute host path",
+          )
+        }
+        OutOfMemoryError exhausted => {
+          fail move exhausted
+        }
+      }
+    }
+  }
+
+  // https://url.spec.whatwg.org/#file-state
+  // Host constructor policy is deliberately stricter than URL path normalization.
+  test effect fn malformedNativeBasesNeverReachTrappingConstructor() -> ()
+    ! AssertionError<'static> | OutOfMemoryError {
+    let mut allocator = Allocator.systemAllocatorProvider()
+    let cases: [string; 8] = ["", "relative", ".", "/a/", "/a//b", "/a/./b", "/a/../b", "//a"]
+    let mut index: usize = 0
+    while index < cases.length {
+      run expectBadBase(String.utf8Bytes(cases[index]))
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      index = index + 1
+    }
+    let nul: [u8; 3] = [47, 0, 97]
+    run expectBadBase(&nul) |> Effect.provideMut<Allocator>(&mut allocator)
+  }
+
+  effect fn sandboxPolicy() -> ()
+    ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    let mut files = run FileSystem.make(b"/C:/svg-resource-sandbox", Limits.defaults())
+    let cases: [string; 9] = [
+      "file:///C:/svg-resource-sandbox-extra/style.css",
+      "file:///C:/svg-resource-sandbox/../outside.css",
+      "file:///C:/svg-resource-sandbox/%2e%2e/outside.css",
+      "file://remote/C:/svg-resource-sandbox/style.css",
+      "file:///C:/svg-resource-sandbox/a%2fb.css",
+      "file:///C:/svg-resource-sandbox/a%2Fb.css",
+      "file:///C:/svg-resource-sandbox/a%5cb.css",
+      "file:///C:/svg-resource-sandbox/%00.css",
+      "file:///C:/svg-resource-sandbox/a%2f..%2foutside.css",
+    ]
+    let mut index: usize = 0
+    while index < cases.length {
+      let address = run Url.parseAbsolute(String.utf8Bytes(cases[index]))
+      run expectFetchError(&mut files, &address, ResourceError.BlockedLocation)
+      index = index + 1
+    }
+    let network = run Url.parseAbsolute(b"https://example.test/style.css")
+    run expectFetchError(&mut files, &network, ResourceError.UnsupportedScheme)
+    let malformed = run Url.parseAbsolute(b"file:///C:/svg-resource-sandbox/bad%xx.css")
+    run expectFetchError(&mut files, &malformed, ResourceError.InvalidData)
+  }
+
+  // https://url.spec.whatwg.org/#file-host-state
+  // https://url.spec.whatwg.org/#path-state
+  // https://url.spec.whatwg.org/#percent-decode
+  test effect fn nativeSandboxRejectsEscapesBeforeOpeningFiles() -> ()
+    ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+    let mut allocator = Allocator.systemAllocatorProvider()
+    run sandboxPolicy() |> Effect.provideMut<Allocator>(&mut allocator)
+  }
+
+  effect fn dataDispatch() -> ()
+    ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    let mut files = run FileSystem.make(
+      b"/C:/svg-resource-base-does-not-exist",
+      Limits { maxResourceBytes: 3 },
+    )
+    let data = run Url.parseAbsolute(b"data:;base64,YWJj#ignored")
+    let payload = run Resolver.fetch(&data, ResourceKind.Font)
+      |> Effect.provideMut<Resolver>(&mut files)
+    let bytes = Bytes.asSlice(&payload.bytes)
+    run Testing.expect(
+      bytes.length == 3 && bytes[0] == 97 && bytes[1] == 98 && bytes[2] == 99,
+      "native resolver delegates data URLs without opening its root",
+    )
+    let large = run Url.parseAbsolute(b"data:,abcd")
+    run expectFetchError(&mut files, &large, ResourceError.TooLarge)
+    let malformed = run Url.parseAbsolute(b"data:;base64,@@==")
+    run expectFetchError(&mut files, &malformed, ResourceError.InvalidData)
+  }
+
+  // https://www.rfc-editor.org/rfc/rfc2397.html#section-2
+  // https://www.rfc-editor.org/rfc/rfc2397.html#section-3
+  test effect fn nativeResolverUsesDataOnlyLimitsAndDecoding() -> ()
+    ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+    let mut allocator = Allocator.systemAllocatorProvider()
+    run dataDispatch() |> Effect.provideMut<Allocator>(&mut allocator)
+  }
+
+  // A WASI host need not preopen /tmp. Native fixtures are separate from portable policy tests.
+  static if Intrinsic.targetOperatingSystem() != "wasi" {
+    import silk.system.filesystem { FileSystem as HostFileSystem, FileError, Path }
+    import silk.system.filesystem_machine { MachineFileSystem }
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      import silk.platform.windows.path { WindowsPath }
+      import silk.platform.windows.host_input { WindowsHostInput }
+      import silk.system.host_input { HostInput, HostInputError }
+    }
+
+    effect fn fixtureBody(scratch: &Path) -> ()
+      ! AssertionError<'static> | UrlError | ResourceError | FileError | OutOfMemoryError
+      ? &mut HostFileSystem | &mut Allocator {
+      let base = run Path.join(scratch, "base")
+      run HostFileSystem.createDirectory(&base)
+      let file = run Path.join(&base, "with space.css")
+      run HostFileSystem.writeFile(&file, b"abcd")
+      let encodedName = run Path.join(&base, "%2f.css")
+      run HostFileSystem.writeFile(&encodedName, b"abcd")
+      let large = run Path.join(&base, "large.css")
+      run HostFileSystem.writeFile(&large, b"abcde")
+      let empty = run Path.join(&base, "empty.css")
+      run HostFileSystem.writeFile(&empty, b"")
+      let outside = run Path.join(scratch, "outside.css")
+      run HostFileSystem.writeFile(&outside, b"secret")
+      let neighbor = run Path.join(scratch, "base-extra")
+      run HostFileSystem.createDirectory(&neighbor)
+      let neighborFile = run Path.join(&neighbor, "style.css")
+      run HostFileSystem.writeFile(&neighborFile, b"secret")
+      let mut files = run FileSystem.make(Path.rawBytes(&base), Limits { maxResourceBytes: 4 })
+      let address = run Url.fromFilePath(Path.rawBytes(&file))
+      let decorated = run Url.resolve(&address, b"?ignored#fragment")
+      let payload = run Resolver.fetch(&decorated, ResourceKind.StyleSheet)
+        |> Effect.provideMut<Resolver>(&mut files)
+      let bytes = Bytes.asSlice(&payload.bytes)
+      run Testing.expect(
+        bytes.length == 4 && bytes[0] == 97 && bytes[3] == 100,
+        "file path is decoded, root-relative, and independent of query and fragment",
+      )
+      let encodedAddress = run Url.fromFilePath(Path.rawBytes(&encodedName))
+      let encodedPayload = run FileSystem.fetch(
+        &mut files,
+        &encodedAddress,
+        ResourceKind.StyleSheet,
+      )
+      run Testing.expect(
+        Bytes.asSlice(&encodedPayload.bytes).length == 4,
+        "percent decoding occurs once, not recursively",
+      )
+      let largeAddress = run Url.fromFilePath(Path.rawBytes(&large))
+      run expectFetchError(&mut files, &largeAddress, ResourceError.TooLarge)
+      let outsideAddress = run Url.fromFilePath(Path.rawBytes(&outside))
+      run expectFetchError(&mut files, &outsideAddress, ResourceError.BlockedLocation)
+      let neighborAddress = run Url.fromFilePath(Path.rawBytes(&neighborFile))
+      run expectFetchError(&mut files, &neighborAddress, ResourceError.BlockedLocation)
+      let missing = run Url.resolve(&address, b"missing.css")
+      run expectFetchError(&mut files, &missing, ResourceError.Io)
+      let directory = run Url.fromFilePath(Path.rawBytes(&base))
+      run expectFetchError(&mut files, &directory, ResourceError.Io)
+      let mut zero = run FileSystem.make(Path.rawBytes(&base), Limits { maxResourceBytes: 0 })
+      let emptyAddress = run Url.fromFilePath(Path.rawBytes(&empty))
+      let emptyPayload = run FileSystem.fetch(&mut zero, &emptyAddress, ResourceKind.Image)
+      run Testing.expect(
+        Bytes.asSlice(&emptyPayload.bytes).length == 0,
+        "zero budget permits an empty file",
+      )
+      run expectFetchError(&mut zero, &address, ResourceError.TooLarge)
+
+      // The URL parser canonicalizes localhost to the empty file host.
+      let mut localhostBytes = Bytes.make()
+      run Bytes.append(&mut localhostBytes, b"file://localhost")
+      run Bytes.append(&mut localhostBytes, Url.path(&address))
+      let localhost = run Url.parseAbsolute(Bytes.asSlice(&localhostBytes))
+      let localPayload = run FileSystem.fetch(&mut files, &localhost, ResourceKind.StyleSheet)
+      run Testing.expect(
+        Bytes.asSlice(&localPayload.bytes).length == 4,
+        "canonical localhost is a local file URL",
+      )
+      static if Intrinsic.targetOperatingSystem() != "windows" {
+        let mut root = run FileSystem.make(b"/", Limits { maxResourceBytes: 4 })
+        let rootPayload = run FileSystem.fetch(&mut root, &address, ResourceKind.StyleSheet)
+        run Testing.expect(
+          Bytes.asSlice(&rootPayload.bytes).length == 4,
+          "host root boundary does not strip the first path component",
+        )
+      }
+    }
+
+    effect fn temporaryRoot() -> Path
+      ! FileError | OutOfMemoryError
+      ? &mut Allocator {
+      static if Intrinsic.targetOperatingSystem() == "windows" {
+        let mut inputs = run Effect.catch<HostInputError>(WindowsHostInput.capture(), hostFailure)
+        let cwd = run Effect.catch<HostInputError>(
+          HostInput.workingDirectory() |> Effect.provideMut<HostInput>(&mut inputs),
+          hostFailure,
+        )
+        return run WindowsPath.fromNativeBytes(Bytes.asSlice(&cwd))
+      } else {
+        return run Path.make("/tmp")
+      }
+    }
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      effect fn hostFailure(error: HostInputError) -> never
+        ! FileError {
+        drop error
+        fail HostFileSystem.error(HostFileSystem.pathOperation(), HostFileSystem.other())
+      }
+    }
+
+    effect fn fixture() -> ()
+      ! AssertionError<'static> | UrlError | ResourceError | FileError | OutOfMemoryError
+      ? &mut HostFileSystem | &mut Allocator {
+      let temporaryRoot = run temporaryRoot()
+      let scratch = run HostFileSystem.temporaryDirectory(&temporaryRoot, "svg-resources-")
+      let ownedPath = run Path.fromBytes(Path.rawBytes(&scratch.path))
+      run Effect.ensuring(fixtureBody(&ownedPath), HostFileSystem.releaseIgnored(move scratch))
+    }
+
+    // https://url.spec.whatwg.org/#file-host-state
+    // https://url.spec.whatwg.org/#path-state
+    // https://url.spec.whatwg.org/#percent-decode
+    // Resource byte limits and root confinement are host-provider policy, not URL grammar.
+    test effect fn nativeTemporaryFilesRespectSandboxAndByteBudget() -> ()
+      ! AssertionError<'static> | UrlError | ResourceError | FileError | OutOfMemoryError {
+      let mut allocator = Allocator.systemAllocatorProvider()
+      let mut host = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+      run fixture()
+        |> Effect.provideMut<HostFileSystem>(&mut host)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+    }
+  }
+}

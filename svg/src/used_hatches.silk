@@ -1,0 +1,281 @@
+//! Hatches (2016 CR pservers.html #Hatches): strips of repeated hatch paths, drawn as a
+//! pattern whose tile is one strip wide and spans the painted element along the strip.
+import silk.text.string { String }
+import scene { Paint, Style, RenderError }
+import structure { Graph, OccurrenceId }
+import document_styles { StyledGraph }
+import paint_metadata { Metadata, CoordinateUnits, HatchMetadata }
+import used_paints { Store }
+import used_paints
+import silk.xml.document { XmlDocument }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.dimensions { ExprId }
+import svg_geometry.geometry { Path, Point, Segment, Arc }
+import svg_geometry.svg
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+
+/// Path segments in one hatch picture at most.
+pub const MAX_SEGMENTS: f64 = 1000000.0
+
+pub fn named(graph: &Graph, node: OccurrenceId, name: &[u8]) -> bool {
+  let source = graph.occurrences.asSlice()[node.index].source
+  let document = graph.sourceDocument(source)
+  return equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)),
+    b"http://www.w3.org/2000/svg",
+  )
+    && equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), name)
+}
+
+pub fn firstChild(graph: &Graph, node: OccurrenceId) -> Option<OccurrenceId> {
+  let occurrence = &graph.occurrences.asSlice()[node.index]
+  return match &occurrence.shadow {
+    Option<OccurrenceId>.Some { value } => Option<OccurrenceId>.some(value)
+    _ => occurrence.firstChild
+  }
+}
+
+// #PaintServerTemplates: each attribute comes from the first element of the template
+// chain that specifies it.
+pub effect fn merged(
+  store: &mut Store,
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  limits: &Limits,
+) -> Option<HatchMetadata>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut data = HatchMetadata {
+    units: Option<CoordinateUnits>.None,
+    contentUnits: Option<CoordinateUnits>.None,
+    x: Option<ExprId>.None,
+    y: Option<ExprId>.None,
+    pitch: Option<ExprId>.None,
+    rotate: Option<ExprId>.None,
+  }
+  let mut current = Option<OccurrenceId>.some(node)
+  let mut count: usize = 0
+  let mut found = false
+  while let Option<OccurrenceId>.Some { value: target } = &current {
+    if count >= graph.occurrences.length() {
+      fail RenderError.TooLarge
+    }
+    count = count + 1
+    let index = match &(run used_paints.metadataIndex(
+      &mut store.*,
+      graph,
+      &mut styles.*,
+      target,
+      limits,
+    )) {
+      Option<usize>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    match &store.metadata.asSlice()[index] {
+      Metadata.Hatch { value } => {
+        found = true
+        if data.units.isNone() {
+          data.units = value.units
+        }
+        if data.contentUnits.isNone() {
+          data.contentUnits = value.contentUnits
+        }
+        if data.x.isNone() {
+          data.x = value.x
+        }
+        if data.y.isNone() {
+          data.y = value.y
+        }
+        if data.pitch.isNone() {
+          data.pitch = value.pitch
+        }
+        if data.rotate.isNone() {
+          data.rotate = value.rotate
+        }
+      }
+      _ => {
+        break
+      }
+    }
+    current = styles.template(target)
+  }
+  return if found {
+    Option<HatchMetadata>.some(data)
+  } else {
+    Option<HatchMetadata>.None
+  }
+}
+
+/// A hatchpath's stroke (#HatchpathNotes): only solid colours paint; anything else, and
+/// any fill, paints nothing.
+pub fn strokeOnly(style: Style) -> Style {
+  let mut result = style
+  result.fill = Paint.None
+  result.stroke = match &style.stroke {
+    Paint.Solid { color } => style.stroke
+    Paint.CurrentColor => Paint.Solid { color: style.color }
+    _ => Paint.None
+  }
+  return result
+}
+
+fn shifted(segment: Segment, dy: f64) -> Segment {
+  return match &segment {
+    Segment.MoveTo { to } => Segment.MoveTo { to: Point.new(to.x, to.y + dy) }
+    Segment.LineTo { to } => Segment.LineTo { to: Point.new(to.x, to.y + dy) }
+    Segment.QuadraticTo { control, to } => Segment.QuadraticTo {
+      control: Point.new(control.x, control.y + dy),
+      to: Point.new(to.x, to.y + dy),
+    }
+    Segment.CubicTo { control1, control2, to } => Segment.CubicTo {
+      control1: Point.new(control1.x, control1.y + dy),
+      control2: Point.new(control2.x, control2.y + dy),
+      to: Point.new(to.x, to.y + dy),
+    }
+    Segment.ArcTo { arc } => Segment.ArcTo {
+      arc: Arc {
+        radii: arc.radii,
+        rotationDegrees: arc.rotationDegrees,
+        largeArc: arc.largeArc,
+        sweep: arc.sweep,
+        to: Point.new(arc.to.x, arc.to.y + dy),
+      },
+    }
+    Segment.Close => Segment.Close
+  }
+}
+
+fn endPoint(segment: Segment) -> Option<Point> {
+  return match &segment {
+    Segment.MoveTo { to } => Option<Point>.some(to)
+    Segment.LineTo { to } => Option<Point>.some(to)
+    Segment.QuadraticTo { control, to } => Option<Point>.some(to)
+    Segment.CubicTo { control1, control2, to } => Option<Point>.some(to)
+    Segment.ArcTo { arc } => Option<Point>.some(arc.to)
+    Segment.Close => Option<Point>.None
+  }
+}
+
+/// One repeating section of a hatch path from its `d` data (#HatchpathNotes), or None
+/// when it is not rendered. Without an initial moveto the section starts at (x, 0), x
+/// being the last data point's; relative data still resolve from (0, 0).
+pub struct Section {
+  pub path: Path,
+  /// The y of the last data point: each repeat moves down by it.
+  pub period: f64,
+  /// Consecutive sections continue one subpath.
+  pub joined: bool,
+}
+
+pub effect fn section(data: &[u8]) -> Option<Section>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut first: usize = 0
+  while first < data.length
+    && (data[first] == 32 || data[first] == 9 || data[first] == 10 || data[first] == 13) {
+    first = first + 1
+  }
+  if first == data.length {
+    return Option<Section>.None
+  }
+  let moveto = (data[first] | 32) == 109
+  let mut text = List<u8>.make()
+  if !moveto {
+    run text.appendSlice(b"M0 0 ")
+  }
+  run text.appendSlice(data)
+  let parsed = run svg.parsePath(text.asSlice())
+  let segments = parsed.path.segments()
+  let mut last = Option<Point>.None
+  let mut closed = false
+  let mut i: usize = 0
+  while i < segments.length {
+    match &endPoint(segments[i]) {
+      Option<Point>.Some { value } => {
+        last = Option<Point>.some(value)
+        closed = false
+      }
+      _ => {
+        closed = true
+      }
+    }
+    i = i + 1
+  }
+  let end = match &last {
+    Option<Point>.Some { value } => value
+    _ => {
+      return Option<Section>.None
+    }
+  }
+  if !(end.y > 0.0) || segments.length < 2 {
+    return Option<Section>.None
+  }
+  let mut path = Path.make()
+  run path.reserve(segments.length)
+  i = 0
+  while i < segments.length {
+    let segment = if i == 0 && !moveto {
+      Segment.MoveTo { to: Point.new(end.x, 0.0) }
+    } else {
+      segments[i]
+    }
+    drop run path.append(segment)
+    i = i + 1
+  }
+  return Option<Section>.some(
+    Section { path: move path, period: end.y, joined: !moveto && !closed },
+  )
+}
+
+/// Sections `first` to `last` of a hatch path, each moved down by `period` from the one
+/// before; joined sections continue the previous subpath.
+pub effect fn repeat(section: &Section, first: f64, last: f64) -> Path
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let segments = section.path.segments()
+  let mut path = Path.make()
+  let mut k = first
+  while k <= last {
+    let dy = k * section.period
+    let mut i: usize = 0
+    while i < segments.length {
+      let segment = shifted(segments[i], dy)
+      if i == 0 && section.joined && k > first {
+        // The previous section ends where this one starts, unless relative data moved
+        // the start; then a line joins them.
+        let to = match &endPoint(segment) {
+          Option<Point>.Some { value } => value
+          _ => Point.new(0.0, 0.0)
+        }
+        let at = match &path.currentPoint() {
+          Option<Point>.Some { value } => value
+          _ => to
+        }
+        if at.x != to.x || at.y != to.y {
+          drop run path.append(Segment.LineTo { to: to })
+        }
+      } else {
+        drop run path.append(segment)
+      }
+      i = i + 1
+    }
+    k = k + 1.0
+  }
+  return move path
+}
+
+/// The default hatch path: an infinite line along the strip, here from `top` to `bottom`.
+pub effect fn line(top: f64, bottom: f64) -> Path
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut path = Path.make()
+  drop run path.append(Segment.MoveTo { to: Point.new(0.0, top) })
+  drop run path.append(Segment.LineTo { to: Point.new(0.0, bottom) })
+  return move path
+}

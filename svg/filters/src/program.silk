@@ -1,0 +1,195 @@
+//! Resolved filter programs: one `filter` element's region and primitives in the
+//! filtered element's user space. Lengths are already in user units; the executor
+//! scales them into its pixel space.
+import svg_geometry.geometry { Rect }
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+
+/// Straight-alpha sRGB, normalized to [0, 1].
+pub struct Rgba {
+  pub r: f64,
+  pub g: f64,
+  pub b: f64,
+  pub a: f64,
+}
+
+impl Copy for Rgba {}
+
+/// https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in
+pub union Input {
+  SourceGraphic,
+  SourceAlpha,
+  /// The result of an earlier primitive of the same program.
+  Result { pub index: usize },
+  /// An image layer: `FillPaint` or `StrokePaint` rendered over the filter region.
+  Image { pub index: usize },
+  /// `BackgroundImage`, or `BackgroundAlpha` when `alpha`: the backdrop the caller passes
+  /// after the image layers when `Program.background` is set.
+  Background { pub alpha: bool },
+  Transparent,
+}
+
+impl Copy for Input {}
+
+/// https://www.w3.org/TR/filter-effects-1/#transfer-function-element-attributes
+/// Table values live in `Program.numbers`.
+pub union Function {
+  Identity,
+  Table { pub first: usize, pub count: usize },
+  Discrete { pub first: usize, pub count: usize },
+  Linear { pub slope: f64, pub intercept: f64 },
+  Gamma { pub amplitude: f64, pub exponent: f64, pub offset: f64 },
+}
+
+impl Copy for Function {}
+
+pub enum CompositeOperator {
+  Over,
+  In,
+  Out,
+  Atop,
+  Xor,
+  Lighter,
+  Arithmetic,
+}
+
+pub enum ColorMatrixKind {
+  Matrix,
+  Saturate,
+  HueRotate,
+  LuminanceToAlpha,
+}
+
+pub enum MorphologyOperator {
+  Erode,
+  Dilate,
+}
+
+/// https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-edgemode
+pub enum EdgeMode {
+  Duplicate,
+  Wrap,
+  None,
+}
+
+/// A color channel of `feDisplacementMap`'s map.
+pub enum Channel {
+  R,
+  G,
+  B,
+  A,
+}
+
+/// https://www.w3.org/TR/filter-effects-1/#light-source: positions in user space.
+pub union LightSource {
+  Distant { pub azimuth: f64, pub elevation: f64 },
+  Point { pub position: [f64; 3] },
+  /// `cone` is the limiting cone angle in degrees, or negative for none.
+  Spot { pub position: [f64; 3], pub pointsAt: [f64; 3], pub exponent: f64, pub cone: f64 },
+}
+
+impl Copy for LightSource {}
+
+/// One primitive's operation. `Copy` reads its input unchanged: it stands for primitives
+/// whose effect is disabled (a zero blur, a zero morphology radius).
+pub union Operation {
+  Copy,
+  Flood { pub color: Rgba },
+  Offset { pub dx: f64, pub dy: f64 },
+  Blur { pub x: f64, pub y: f64 },
+  /// `feMergeNode` inputs, from `Program.inputs`.
+  Merge { pub first: usize, pub count: usize },
+  /// A `vector.layer` blend code.
+  Blend { pub mode: u8, pub composite: bool },
+  Composite { pub operator: CompositeOperator, pub k: [f64; 4] },
+  /// Matrix values, from `Program.numbers`.
+  ColorMatrix { pub kind: ColorMatrixKind, pub first: usize, pub count: usize },
+  ComponentTransfer { pub functions: [Function; 4] },
+  Morphology { pub operator: MorphologyOperator, pub x: f64, pub y: f64 },
+  Tile,
+  DropShadow { pub dx: f64, pub dy: f64, pub x: f64, pub y: f64, pub color: Rgba },
+  /// Noise is defined on coordinates `(user - origin) / unit`, the `primitiveUnits` space;
+  /// `frequency` is per unit of it.
+  Turbulence {
+    pub frequency: [f64; 2],
+    pub octaves: u32,
+    pub seed: f64,
+    pub fractal: bool,
+    pub stitch: bool,
+    pub origin: [f64; 2],
+    pub unit: [f64; 2],
+  },
+  /// `orderX * orderY` kernel values, from `Program.numbers`; `divisor` is nonzero.
+  ConvolveMatrix {
+    pub orderX: u32,
+    pub orderY: u32,
+    pub first: usize,
+    pub divisor: f64,
+    pub bias: f64,
+    pub targetX: u32,
+    pub targetY: u32,
+    pub edgeMode: EdgeMode,
+    pub preserveAlpha: bool,
+    /// `kernelUnitLength` in user units, or zeros for one surface pixel.
+    pub unit: [f64; 2],
+  },
+  /// `scale` along each axis in user units.
+  DisplacementMap { pub scale: [f64; 2], pub x: Channel, pub y: Channel },
+  /// `feImage`: the program's `index`th image layer, rendered by the caller in filter space.
+  Image { pub index: usize },
+  /// `feDiffuseLighting` (`specular` false; `constant` is kd) or `feSpecularLighting`.
+  Lighting {
+    pub specular: bool,
+    pub surfaceScale: f64,
+    pub constant: f64,
+    pub exponent: f64,
+    pub color: Rgba,
+    pub light: LightSource,
+    /// `kernelUnitLength` in user units, or zeros for one surface pixel.
+    pub unit: [f64; 2],
+  },
+}
+
+impl Copy for Operation {}
+
+pub struct Primitive {
+  pub operation: Operation,
+  pub input: Input,
+  pub input2: Input,
+  /// https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion, already defaulted.
+  /// An empty subregion disables the primitive: its result is transparent black.
+  pub subregion: Rect,
+  pub linearRgb: bool,
+}
+
+impl Copy for Primitive {}
+
+pub struct Program {
+  /// https://www.w3.org/TR/filter-effects-1/#filter-region
+  pub region: Rect,
+  /// SVG 1.1 `filterRes`: the intermediate images' width and height in pixels, or zeros
+  /// for the automatic resolution.
+  pub resolution: [f64; 2],
+  pub primitives: List<Primitive>,
+  pub inputs: List<Input>,
+  pub numbers: List<f64>,
+  /// How many image layers (`feImage`, `FillPaint` and `StrokePaint` renderings) the
+  /// caller passes to the executor.
+  pub images: usize,
+  /// Whether a primitive reads the backdrop, which the caller then passes after the layers.
+  pub background: bool,
+}
+
+impl Program {
+  pub fn make(region: Rect) -> Program {
+    return Program {
+      region: region,
+      resolution: [0.0, 0.0],
+      primitives: List<Primitive>.make(),
+      inputs: List<Input>.make(),
+      numbers: List<f64>.make(),
+      images: 0,
+      background: false,
+    }
+  }
+}

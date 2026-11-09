@@ -1,0 +1,165 @@
+// Lowering onto a canvas against the CPU executor: the reference canvas has
+// gpu_scene's semantics, so these hold for the GPU too.
+import lib { RenderOptions, RenderError, DisplayList, Pixmap as Image }
+import lib as renderer
+import environment { Environment, noHostStyles }
+import svg_core.structure { Options as StructureOptions }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import svg_fonts.database { FontDatabase }
+import svg_raster.cpu
+import svg_raster.lower { Lowering, PixmapCanvas }
+import svg_raster.lower
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.u8
+import silk.num.u32
+
+fn environmentFor<'a>(base: &'a Url, fonts: &'a FontDatabase) -> Environment<'a, 'a> {
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  return Environment<'a, 'a> {
+    base: base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: fonts,
+    styles: noHostStyles(),
+  }
+}
+
+effect fn invalidBase(error: UrlError) -> never
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidStyleContext
+}
+
+effect fn displayList(data: &[u8]) -> DisplayList
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Effect.catch<UrlError>(Url.fromFilePath(b"/fixtures/input.svg"), invalidBase)
+  let fonts = FontDatabase.make()
+  let environment = environmentFor(&base, &fonts)
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let options = RenderOptions.make()
+  let tree = run renderer.parse(data, &options, &environment)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+  return run renderer.record(move tree)
+}
+
+struct Comparison {
+  lowering: Lowering,
+  /// The largest channel difference from the CPU executor.
+  delta: u32,
+}
+
+effect fn compare(data: &[u8]) -> Comparison
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let list = run displayList(data)
+  let expected = run cpu.execute(&list)
+  let mut canvas = run PixmapCanvas.make(list.width, list.height)
+  let lowering = run lower.lower(&list, &mut canvas)
+  let actual = canvas.finish()
+  let a = Image.data(&expected)
+  let b = Image.data(&actual)
+  let mut delta: u32 = 0
+  let mut i: usize = 0
+  while i < a.length {
+    let x = u8.toU32(a[i])
+    let y = u8.toU32(b[i])
+    let d = if x > y {
+      x - y
+    } else {
+      y - x
+    }
+    if d > delta {
+      delta = d
+    }
+    i = i + 1
+  }
+  return Comparison { lowering: lowering, delta: delta }
+}
+
+effect fn lowersExactly(data: &[u8], message: string<'static>) -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let result = run compare(data)
+  run Testing.expect(
+    result.delta == 0 && result.lowering.fallbacks == 0 && !result.lowering.whole,
+    message,
+  )
+}
+
+test effect fn fillsStrokesAndGroupsLowerExactly() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run lowersExactly(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><rect width='40' height='30' fill='#eee'/><circle cx='15' cy='15' r='9' fill='rgba(200,30,40,0.7)'/><path d='M2 28 C 10 2, 30 2, 38 28' fill='none' stroke='navy' stroke-width='3' stroke-dasharray='4 2' stroke-linecap='round'/><ellipse cx='30' cy='10' rx='8' ry='5' fill='green' fill-opacity='0.5' stroke='black' stroke-opacity='0.4' transform='rotate(20 30 10)'/></svg>",
+    "solid fills and dashed strokes match the CPU executor",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run lowersExactly(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='32' height='24'><rect width='32' height='24' fill='orange'/><g opacity='0.6'><rect x='2' y='2' width='20' height='14' fill='blue'/><rect x='10' y='8' width='20' height='14' fill='red'/></g><g style='mix-blend-mode:multiply'><circle cx='16' cy='12' r='8' fill='teal'/></g><rect x='4' y='4' width='6' height='6' fill='purple' shape-rendering='crispEdges' transform='rotate(10)'/></svg>",
+    "group opacity, blend modes and crisp edges match the CPU executor",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn paintServersLowerExactly() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run lowersExactly(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='48' height='32'><defs><linearGradient id='l' x1='0' x2='1' spreadMethod='reflect' gradientTransform='scale(0.5)'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue' stop-opacity='0.5'/></linearGradient><radialGradient id='r' fx='0.3' fy='0.3'><stop offset='0' stop-color='white'/><stop offset='1' stop-color='black'/></radialGradient><pattern id='p' width='6' height='6' patternUnits='userSpaceOnUse' patternTransform='rotate(30)'><rect width='3' height='3' fill='green'/><circle cx='4.5' cy='4.5' r='1.5' fill='gold'/></pattern></defs><rect width='24' height='16' fill='url(#l)'/><circle cx='36' cy='8' r='8' fill='url(#r)'/><rect y='16' width='48' height='16' fill='url(#p)' stroke='url(#l)' stroke-width='2'/></svg>",
+    "gradients and patterns match the CPU executor",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn clipsAndMasksLowerWithinOneLevel() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let clipped = run compare(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><defs><clipPath id='c'><circle cx='20' cy='15' r='11'/><rect x='0' y='0' width='8' height='8'/></clipPath></defs><rect width='40' height='30' fill='#ccc'/><g clip-path='url(#c)' opacity='0.8'><rect x='5' y='5' width='30' height='20' fill='crimson'/><path d='M0 0 L40 30' stroke='black' stroke-width='4'/></g></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    clipped.lowering.fallbacks == 0 && !clipped.lowering.whole && clipped.delta <= 1,
+    "clip paths lower to canvas masks",
+  )
+  let masked = run compare(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><defs><linearGradient id='g'><stop offset='0' stop-color='white'/><stop offset='1' stop-color='black'/></linearGradient><mask id='m' x='0' y='0' width='1' height='1'><rect width='40' height='30' fill='url(#g)'/></mask><clipPath id='c'><rect x='4' y='4' width='32' height='22'/></clipPath></defs><rect width='40' height='30' fill='gold'/><g mask='url(#m)' clip-path='url(#c)'><circle cx='20' cy='15' r='12' fill='navy'/></g></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    masked.lowering.fallbacks == 0 && !masked.lowering.whole && masked.delta <= 1,
+    "luminance masks on clipped groups lower to canvas masks",
+  )
+}
+
+test effect fn unsupportedElementsRunOnTheCpu() -> ()
+  ! AssertionError<'static> | RenderError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let filtered = run compare(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><defs><filter id='f'><feGaussianBlur stdDeviation='2'/></filter></defs><rect width='40' height='30' fill='white'/><circle cx='12' cy='15' r='8' fill='blue' filter='url(#f)'/><rect x='24' y='8' width='12' height='14' fill='red'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    filtered.lowering.fallbacks == 1 && !filtered.lowering.whole && filtered.delta == 0,
+    "a filtered element runs alone on the CPU and composites as an image",
+  )
+  let linear = run compare(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='30' height='20'><rect width='30' height='20' fill='yellow'/><g opacity='0.9'><g color-interpolation='linearRGB' opacity='0.5'><rect width='20' height='20' fill='blue'/></g></g><rect x='20' width='10' height='20' fill='green'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    linear.lowering.fallbacks == 1 && !linear.lowering.whole && linear.delta <= 1,
+    "a linearRGB group runs on the CPU inside its normal parent",
+  )
+}

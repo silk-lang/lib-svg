@@ -1,0 +1,590 @@
+//! Glyph geometry in user space: outlines for painting and glyph cells for the bounding box.
+import layout { Layout, PlacedGlyph, Instance, fontOf, spanInstance }
+import font_outline.outline { Outlines, Recorder, Op }
+import svg_fonts.database { Fonts }
+import svg_geometry.geometry { Path, Point, Segment, Transform }
+import read_fonts.lib { FontRef, ReadError, TableProvider }
+import read_fonts.tables.svg { Svg }
+import font_types.lib { F2Dot14, GlyphId }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f32
+import silk.num.f64
+import silk.num.u16
+
+/// Font units to user space for one glyph: scale, y flip, synthetic oblique shear, the
+/// shaper offset, then the glyph's rotation about its position.
+struct Placement {
+  scale: f64,
+  scaleX: f64,
+  shear: f64,
+  offsetX: f64,
+  offsetY: f64,
+  cos: f64,
+  sin: f64,
+  x: f64,
+  y: f64,
+}
+
+impl Copy for Placement {}
+
+fn placement(glyph: &PlacedGlyph, instance: &Instance) -> Placement {
+  let radians = glyph.rotate * f64.PI / 180.0
+  return Placement {
+    scale: instance.scale,
+    scaleX: glyph.scaleX,
+    shear: f64.tan(instance.selection.syntheticOblique * f64.PI / 180.0),
+    offsetX: glyph.offsetX,
+    offsetY: glyph.offsetY,
+    cos: f64.cos(radians),
+    sin: f64.sin(radians),
+    x: glyph.x,
+    y: glyph.y,
+  }
+}
+
+/// A point already in unscaled user units relative to the glyph position.
+fn rotated(at: Placement, u: f64, v: f64) -> Point {
+  if at.sin == 0.0 && at.cos == 1.0 {
+    return Point.new(at.x + u, at.y + v)
+  }
+  return Point.new(at.x + u * at.cos - v * at.sin, at.y + u * at.sin + v * at.cos)
+}
+
+fn mapped(at: Placement, fx: f32, fy: f32) -> Point {
+  let x = f32.toF64(fx)
+  let y = f32.toF64(fy)
+  return rotated(
+    at,
+    (x + at.shear * y) * at.scale * at.scaleX + at.offsetX,
+    at.offsetY - y * at.scale,
+  )
+}
+
+effect fn segment(path: &mut Path, value: Segment) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  drop run path.append(value)
+}
+
+/// Converts recorded font-unit commands into path segments.
+effect fn emit(commands: &[f32], at: Placement, path: &mut Path) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  while index < commands.length {
+    let op = commands[index]
+    if op == 0.0 {
+      run segment(
+        &mut path,
+        Segment.MoveTo { to: mapped(at, commands[index + 1], commands[index + 2]) },
+      )
+      index = index + 3
+    } else if op == 1.0 {
+      run segment(
+        &mut path,
+        Segment.LineTo { to: mapped(at, commands[index + 1], commands[index + 2]) },
+      )
+      index = index + 3
+    } else if op == 2.0 {
+      run segment(
+        &mut path,
+        Segment.QuadraticTo {
+          control: mapped(at, commands[index + 1], commands[index + 2]),
+          to: mapped(at, commands[index + 3], commands[index + 4]),
+        },
+      )
+      index = index + 5
+    } else if op == 3.0 {
+      run segment(
+        &mut path,
+        Segment.CubicTo {
+          control1: mapped(at, commands[index + 1], commands[index + 2]),
+          control2: mapped(at, commands[index + 3], commands[index + 4]),
+          to: mapped(at, commands[index + 5], commands[index + 6]),
+        },
+      )
+      index = index + 7
+    } else {
+      run segment(&mut path, Segment.Close)
+      index = index + 1
+    }
+  }
+}
+
+/// The index of each point's x coordinate in `commands`, and the end of each contour in
+/// that list.
+effect fn contourPoints(commands: &[f32], points: &mut List<usize>, ends: &mut List<usize>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  while index < commands.length {
+    let op = commands[index]
+    let count: usize = if op == 0.0 || op == 1.0 {
+      1
+    } else if op == 2.0 {
+      2
+    } else if op == 3.0 {
+      3
+    } else {
+      0
+    }
+    if op == 0.0 && List<usize>.length(&points.*) > 0 {
+      run List<usize>.append(&mut ends, List<usize>.length(&points.*))
+    }
+    let mut k: usize = 0
+    while k < count {
+      run List<usize>.append(&mut points, index + 1 + 2 * k)
+      k = k + 1
+    }
+    index = index + 1 + 2 * count
+  }
+  if List<usize>.length(&points.*) > 0 {
+    run List<usize>.append(&mut ends, List<usize>.length(&points.*))
+  }
+}
+
+/// Synthetic bold (CSS Fonts 4 #font-synthesis-weight leaves the method to the UA): FreeType's
+/// FT_Outline_EmboldenXY in font units, in doubles. Each point moves by half the strength
+/// plus a shift along the bisector of its edges, so outlines grow by `strength` in x and y.
+effect fn embolden(list: &mut List<f32>, strength: f64) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut points = List<usize>.make()
+  let mut ends = List<usize>.make()
+  run contourPoints(List<f32>.asSlice(&list.*), &mut points, &mut ends)
+  let at = List<usize>.asSlice(&points)
+  let commands = List<f32>.asMutSlice(&mut list)
+  let mut area = 0.0
+  let mut first: usize = 0
+  let mut contour: usize = 0
+  while contour < List<usize>.length(&ends) {
+    let end = List<usize>.get(&ends, contour)
+    let mut previous = end - 1
+    let mut index = first
+    while index < end {
+      let px = f32.toF64(commands[at[previous]])
+      let py = f32.toF64(commands[at[previous] + 1])
+      let cx = f32.toF64(commands[at[index]])
+      let cy = f32.toF64(commands[at[index] + 1])
+      area = area + (cy - py) * (cx + px)
+      previous = index
+      index = index + 1
+    }
+    first = end
+    contour = contour + 1
+  }
+  let truetype = area < 0.0
+  let half = strength / 2.0
+  let mut moved = List<f64>.make()
+  first = 0
+  contour = 0
+  while contour < List<usize>.length(&ends) {
+    let end = List<usize>.get(&ends, contour)
+    let n = end - first
+    let mut i: usize = 0
+    while i < n {
+      let cx = f32.toF64(commands[at[first + i]])
+      let cy = f32.toF64(commands[at[first + i] + 1])
+      let mut prevX = cx
+      let mut prevY = cy
+      let mut nextX = cx
+      let mut nextY = cy
+      let mut found = 0
+      let mut k: usize = 1
+      while k < n && found & 1 == 0 {
+        let q = at[first + (i + n - k) % n]
+        let qx = f32.toF64(commands[q])
+        let qy = f32.toF64(commands[q + 1])
+        if qx != cx || qy != cy {
+          prevX = qx
+          prevY = qy
+          found = found + 1
+        }
+        k = k + 1
+      }
+      k = 1
+      while k < n && found & 2 == 0 {
+        let q = at[first + (i + k) % n]
+        let qx = f32.toF64(commands[q])
+        let qy = f32.toF64(commands[q + 1])
+        if qx != cx || qy != cy {
+          nextX = qx
+          nextY = qy
+          found = found + 2
+        }
+        k = k + 1
+      }
+      if found != 3 {
+        run List<f64>.append(&mut moved, cx)
+        run List<f64>.append(&mut moved, cy)
+      } else {
+        let mut ix = cx - prevX
+        let mut iy = cy - prevY
+        let li = f64.sqrt(ix * ix + iy * iy)
+        ix = ix / li
+        iy = iy / li
+        let mut ox = nextX - cx
+        let mut oy = nextY - cy
+        let lo = f64.sqrt(ox * ox + oy * oy)
+        ox = ox / lo
+        oy = oy / lo
+        let mut d = ix * ox + iy * oy
+        let mut sx = 0.0
+        let mut sy = 0.0
+
+        // Shift only where the turn is less than about 160 degrees.
+        if d > -0.9375 {
+          d = d + 1.0
+          sx = iy + oy
+          sy = ix + ox
+          if truetype {
+            sx = -sx
+          } else {
+            sy = -sy
+          }
+          let mut q = ox * iy - oy * ix
+          if truetype {
+            q = -q
+          }
+          let l = f64.min(li, lo)
+          if half * q <= l * d {
+            sx = sx * half / d
+            sy = sy * half / d
+          } else {
+            sx = sx * l / q
+            sy = sy * l / q
+          }
+        }
+        run List<f64>.append(&mut moved, cx + (half + sx))
+        run List<f64>.append(&mut moved, cy + (half + sy))
+      }
+      i = i + 1
+    }
+    first = end
+    contour = contour + 1
+  }
+  let values = List<f64>.asSlice(&moved)
+  let mut p: usize = 0
+  while p < at.length {
+    commands[at[p]] = f64.toF32(values[2 * p])
+    commands[at[p] + 1] = f64.toF32(values[2 * p + 1])
+    p = p + 1
+  }
+}
+
+/// The frame along a glyph's line: an upright glyph of vertical text is set across it.
+fn frame(glyph: &PlacedGlyph) -> Placement {
+  let turn = if glyph.upright {
+    90.0
+  } else {
+    0.0
+  }
+  let radians = (glyph.rotate + turn) * f64.PI / 180.0
+  return Placement {
+    scale: 1.0,
+    scaleX: 1.0,
+    shear: 0.0,
+    offsetX: 0.0,
+    offsetY: 0.0,
+    cos: f64.cos(radians),
+    sin: f64.sin(radians),
+    x: glyph.x,
+    y: glyph.y,
+  }
+}
+
+/// Appends the glyph cell (#TermGlyphCell): the advance by the ascent and descent, which
+/// for an upright glyph are centred on its position.
+effect fn cell(glyph: &PlacedGlyph, instance: &Instance, cells: &mut Path) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let at = frame(glyph)
+  let half = (instance.ascent + instance.descent) / 2.0
+  let top = if glyph.upright {
+    -half
+  } else {
+    -instance.ascent
+  }
+  let bottom = if glyph.upright {
+    half
+  } else {
+    instance.descent
+  }
+  run segment(&mut cells, Segment.MoveTo { to: rotated(at, 0.0, top) })
+  run segment(&mut cells, Segment.LineTo { to: rotated(at, glyph.advance, top) })
+  run segment(&mut cells, Segment.LineTo { to: rotated(at, glyph.advance, bottom) })
+  run segment(&mut cells, Segment.LineTo { to: rotated(at, 0.0, bottom) })
+  run segment(&mut cells, Segment.Close)
+}
+
+/// A glyph drawn from its font's SVG table (OpenType 1.9 `SVG ` table) instead of its
+/// outline: the glyph document's coordinates, font units with y down and the origin
+/// at the glyph origin, map to user space by `transform`.
+pub struct ColorGlyph {
+  pub face: usize,
+  pub glyph: u32,
+  pub transform: Transform,
+}
+
+impl Copy for ColorGlyph {}
+
+// Glyph-document coordinates (x, y), font units with y down, to user space: as `mapped`
+// applied to the font-unit point (x, -y).
+fn documentTransform(at: Placement) -> Transform {
+  let a = at.scale * at.scaleX
+  let c = -at.shear * at.scale * at.scaleX
+  let d = at.scale
+  return Transform {
+    xx: a * at.cos,
+    yx: a * at.sin,
+    xy: c * at.cos - d * at.sin,
+    yy: c * at.sin + d * at.cos,
+    dx: at.x + at.offsetX * at.cos - at.offsetY * at.sin,
+    dy: at.y + at.offsetX * at.sin + at.offsetY * at.cos,
+  }
+}
+
+/// Appends the outlines and glyph cells of the glyphs of `span`, and the glyphs that
+/// have SVG glyph documents, which take no outline (OpenType `SVG ` table: a glyph with
+/// an SVG description is drawn from it).
+pub effect fn spanGeometry(
+  database: &Fonts<'_>,
+  layout: &Layout,
+  span: usize,
+  outlines: &mut Path,
+  cells: &mut Path,
+  colors: &mut List<ColorGlyph>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let glyphs = List<PlacedGlyph>.asSlice(&layout.glyphs)
+  let instances = List<Instance>.asSlice(&layout.instances)
+  let mut commands = List<f32>.make()
+  let mut current: usize = 0
+  while current < instances.length {
+    let instance = &instances[current]
+    if let Option<FontRef>.Some { value: font } = fontOf(database, instance.face) {
+      let reader = Outlines.new(&font, instance.glyphCount, instance.unitsPerEm)
+      let documents = TableProvider.svg(&font)
+      let mut index: usize = 0
+      while index < glyphs.length {
+        let glyph = &glyphs[index]
+        if glyph.span == span && glyph.instance == current && !glyph.hidden {
+          let at = placement(glyph, instance)
+          run cell(glyph, instance, &mut cells)
+          if let Result<Svg, ReadError>.Success { value: table } = &documents {
+            if Svg.glyphData(&table, GlyphId.new(glyph.glyph)).isSome() {
+              run colors.append(
+                ColorGlyph {
+                  face: instance.face,
+                  glyph: glyph.glyph,
+                  transform: documentTransform(at),
+                },
+              )
+              index = index + 1
+              continue
+            }
+          }
+          List<f32>.clear(&mut commands)
+          let mut sink = Recorder { out: &mut commands, failed: false }
+          drop run reader.draw(
+            GlyphId.new(glyph.glyph),
+            List<F2Dot14>.asSlice(&instance.coords),
+            &mut sink,
+          )
+          if sink.failed {
+            fail OutOfMemoryError {}
+          }
+          if instance.selection.syntheticBold {
+            let strength = u16.toF64(instance.unitsPerEm) / 24.0
+            run embolden(&mut commands, strength)
+          }
+          run emit(List<f32>.asSlice(&commands), at, &mut outlines)
+        }
+        index = index + 1
+      }
+    }
+    current = current + 1
+  }
+}
+
+/// The decoration lines an element declares (text-decoration-line), and an authored
+/// text-decoration-thickness in user units.
+pub struct Decoration {
+  pub underline: bool,
+  pub overline: bool,
+  pub lineThrough: bool,
+  pub thickness: Option<f64>,
+}
+
+impl Copy for Decoration {}
+
+/// One decoration line: its top and bottom below the decorating baseline.
+struct Band {
+  top: f64,
+  bottom: f64,
+}
+
+impl Copy for Band {}
+
+/// A run of unrotated glyphs on one baseline, decorated as one rectangle.
+struct Stretch {
+  left: f64,
+  right: f64,
+  y: f64,
+  open: bool,
+}
+
+effect fn quad(path: &mut Path, at: Placement, left: f64, right: f64, band: Band) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run segment(&mut path, Segment.MoveTo { to: rotated(at, left, band.top) })
+  run segment(&mut path, Segment.LineTo { to: rotated(at, right, band.top) })
+  run segment(&mut path, Segment.LineTo { to: rotated(at, right, band.bottom) })
+  run segment(&mut path, Segment.LineTo { to: rotated(at, left, band.bottom) })
+  run segment(&mut path, Segment.Close)
+}
+
+effect fn flush(path: &mut Path, stretch: &mut Stretch, band: Band) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if stretch.open {
+    let at = Placement {
+      scale: 1.0,
+      scaleX: 1.0,
+      shear: 0.0,
+      offsetX: 0.0,
+      offsetY: 0.0,
+      cos: 1.0,
+      sin: 0.0,
+      x: 0.0,
+      y: stretch.y,
+    }
+    run quad(&mut path, at, stretch.left, stretch.right, band)
+    stretch.open = false
+  }
+}
+
+/// Draws one decoration band under the glyphs of characters `[start, end)`, relative to
+/// the baseline of span `span` (CSS Text Decoration 3 #line-decoration: a decorating box's
+/// lines use its own font and baseline, also across descendants).
+effect fn band(
+  layout: &Layout,
+  span: usize,
+  start: usize,
+  end: usize,
+  value: Band,
+  path: &mut Path,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let glyphs = List<PlacedGlyph>.asSlice(&layout.glyphs)
+  let drops = List<f64>.asSlice(&layout.drops)
+  let mut stretch = Stretch { left: 0.0, right: 0.0, y: 0.0, open: false }
+  let mut index: usize = 0
+  while index < glyphs.length {
+    let glyph = glyphs[index]
+    if glyph.owner >= start && glyph.owner < end && !glyph.hidden && glyph.advance != 0.0 {
+      // The decorating box's baseline relative to this glyph's.
+      let lift = drops[span] - drops[glyph.span]
+      let left = f64.min(glyph.x, glyph.x + glyph.advance)
+      let right = f64.max(glyph.x, glyph.x + glyph.advance)
+      if glyph.rotate == 0.0 && !glyph.upright {
+        let y = glyph.y + lift
+        if stretch.open && stretch.y == y && stretch.right == left {
+          stretch.right = right
+        } else {
+          run flush(&mut path, &mut stretch, value)
+          stretch = Stretch { left: left, right: right, y: y, open: true }
+        }
+      } else {
+        run flush(&mut path, &mut stretch, value)
+        let shift = lift + glyph.center
+        run quad(
+          &mut path,
+          frame(&glyph),
+          0.0,
+          glyph.advance,
+          Band { top: value.top + shift, bottom: value.bottom + shift },
+        )
+      }
+    }
+    index = index + 1
+  }
+  run flush(&mut path, &mut stretch, value)
+}
+
+/// Appends the text decoration of the element with span `span` and characters
+/// `[start, end)`. Underlines and overlines go to `under`, painted before the text, and
+/// line-throughs to `over`, painted after it (CSS Text Decoration 3 #painting-order).
+/// Metrics come from the span's first face: the post underline and OS/2 strikeout, with
+/// the overline at the ascent.
+pub effect fn decorationGeometry(
+  layout: &Layout,
+  span: usize,
+  size: f64,
+  start: usize,
+  end: usize,
+  decoration: Decoration,
+  under: &mut Path,
+  over: &mut Path,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut underline = size / 10.0
+  let mut thickness = size / 20.0
+  let mut ascent = size * 0.8
+  let mut strikeout = Option<f64>.None
+  let mut strikeoutThickness = Option<f64>.None
+  if let Option<usize>.Some { value } = spanInstance(layout, span) {
+    let instance = &List<Instance>.asSlice(&layout.instances)[value]
+    ascent = instance.ascent
+    if let Option<f64>.Some { value: top } = instance.underline {
+      underline = top
+    }
+    if let Option<f64>.Some { value: measured } = instance.underlineThickness {
+      thickness = measured
+    }
+    strikeout = instance.strikeout
+    strikeoutThickness = instance.strikeoutThickness
+  }
+  if let Option<f64>.Some { value } = decoration.thickness {
+    thickness = value
+    strikeoutThickness = Option<f64>.Some { value: value }
+  }
+  if decoration.underline {
+    run band(
+      layout,
+      span,
+      start,
+      end,
+      Band { top: underline, bottom: underline + thickness },
+      &mut under,
+    )
+  }
+  if decoration.overline {
+    run band(
+      layout,
+      span,
+      start,
+      end,
+      Band { top: -ascent, bottom: -ascent + thickness },
+      &mut under,
+    )
+  }
+  if decoration.lineThrough {
+    let height = match strikeoutThickness {
+      Option<f64>.Some { value } => value
+      _ => thickness
+    }
+    let top = match strikeout {
+      Option<f64>.Some { value } => value
+      _ => -ascent / 3.0 - height / 2.0
+    }
+    run band(layout, span, start, end, Band { top: top, bottom: top + height }, &mut over)
+  }
+}

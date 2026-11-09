@@ -1,0 +1,155 @@
+//! Filter program pixel regions and validation.
+import program { Program, Primitive, Operation, Input, EdgeMode, Rgba, LightSource }
+import execute { Space }
+import execute
+import svg_geometry.geometry { Rect }
+import vector.filter { Region }
+import silk.core.effect { Effect }
+import silk.num.f64
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+fn same(a: Region, b: Region) -> bool {
+  return a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1
+}
+
+test effect fn regionsCoverTouchedPixels() -> ()
+  ! AssertionError<'static> {
+  let space = Space { sx: 2.0, sy: 1.0, tx: 0.5, ty: 0.0 }
+  let rect = Rect { xMin: 1.0, yMin: 1.25, xMax: 3.0, yMax: 2.0 }
+  run Testing.expect(
+    same(space.pixels(rect, 100, 100), Region.make(2, 1, 7, 2)),
+    "edges between pixels round outward",
+  )
+  let noisy = Space { sx: 0.1, sy: 0.1, tx: 0.0, ty: 0.0 }
+  let snapped = Rect { xMin: 30.0, yMin: 30.0, xMax: 70.0, yMax: 70.0 }
+  run Testing.expect(
+    same(noisy.pixels(snapped, 100, 100), Region.make(3, 3, 7, 7)),
+    "edges within rounding noise of a pixel boundary do not grow the region",
+  )
+  run Testing.expect(
+    same(
+      space.pixels(Rect { xMin: -10.0, yMin: -10.0, xMax: 1000.0, yMax: 5.0 }, 8, 4),
+      Region.make(0, 0, 8, 4),
+    ),
+    "regions are limited to the surface",
+  )
+}
+
+effect fn forwardReference() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let area = Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  let mut program = Program.make(area)
+  run Testing.expect(execute.valid(&program), "an empty program is valid")
+  run program.primitives.append(
+    Primitive {
+      operation: Operation.Merge { first: 0, count: 1 },
+      input: Input.SourceGraphic,
+      input2: Input.Transparent,
+      subregion: area,
+      linearRgb: false,
+    },
+  )
+  run Testing.expect(!execute.valid(&program), "merge inputs must exist")
+  run program.inputs.append(Input.Result { index: 0 })
+  run Testing.expect(!execute.valid(&program), "a merge node cannot read its own result")
+  let mut layered = Program.make(area)
+  run layered.primitives.append(
+    Primitive {
+      operation: Operation.Copy,
+      input: Input.Image { index: 0 },
+      input2: Input.Background { alpha: true },
+      subregion: area,
+      linearRgb: false,
+    },
+  )
+  run Testing.expect(!execute.valid(&layered), "image inputs name a layer")
+  layered.images = 1
+  run Testing.expect(!execute.valid(&layered), "backdrop inputs need the backdrop")
+  layered.background = true
+  run Testing.expect(execute.valid(&layered), "layer and backdrop inputs are valid when passed")
+}
+
+effect fn single(operation: Operation) -> bool
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let area = Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  let mut program = Program.make(area)
+  run program.numbers.append(1.0)
+  run program.primitives.append(
+    Primitive {
+      operation: operation,
+      input: Input.SourceGraphic,
+      input2: Input.SourceGraphic,
+      subregion: area,
+      linearRgb: false,
+    },
+  )
+  return execute.valid(&program)
+}
+
+fn kernel(orderX: u32, targetX: u32, divisor: f64) -> Operation {
+  return kernelWithUnit(orderX, targetX, divisor, [0.0, 0.0])
+}
+
+fn kernelWithUnit(orderX: u32, targetX: u32, divisor: f64, unit: [f64; 2]) -> Operation {
+  return Operation.ConvolveMatrix {
+    orderX: orderX,
+    orderY: 1,
+    first: 0,
+    divisor: divisor,
+    bias: 0.0,
+    targetX: targetX,
+    targetY: 0,
+    edgeMode: EdgeMode.Duplicate,
+    preserveAlpha: false,
+    unit: unit,
+  }
+}
+
+effect fn parameters() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  run Testing.expect(run single(kernel(1, 0, 1.0)), "a one-entry kernel is valid")
+  run Testing.expect(!(run single(kernel(2, 0, 1.0))), "kernel values must exist")
+  run Testing.expect(!(run single(kernel(1, 1, 1.0))), "the target lies inside the kernel")
+  run Testing.expect(!(run single(kernel(1, 0, 0.0))), "the divisor is nonzero")
+  let noise = Operation.Turbulence {
+    frequency: [0.1, 0.1],
+    octaves: execute.MAX_OCTAVES + 1,
+    seed: 0.0,
+    fractal: false,
+    stitch: false,
+    origin: [0.0, 0.0],
+    unit: [1.0, 1.0],
+  }
+  run Testing.expect(!(run single(noise)), "octaves are limited")
+  let light = Operation.Lighting {
+    specular: false,
+    surfaceScale: 1.0,
+    constant: 1.0,
+    exponent: 1.0,
+    color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+    light: LightSource.Point { position: [0.0, 0.0, f64.INFINITY] },
+    unit: [0.0, 0.0],
+  }
+  run Testing.expect(!(run single(light)), "light positions are finite")
+  run Testing.expect(
+    !(run single(kernelWithUnit(1, 0, 1.0, [-1.0, 1.0]))),
+    "kernel units are not negative",
+  )
+  run Testing.expect(run single(kernelWithUnit(1, 0, 1.0, [2.0, 0.5])), "kernel units may scale")
+}
+
+test effect fn validationRejectsDanglingIndices() -> ()
+  ! AssertionError<'static> | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run forwardReference() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn validationRejectsInvalidParameters() -> ()
+  ! AssertionError<'static> | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run parameters() |> Effect.provideMut<Allocator>(&mut allocator)
+}

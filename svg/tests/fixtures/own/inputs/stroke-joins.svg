@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="32">
+<path d="M8 24 V8 H24" fill="none" stroke="#802040" stroke-width="8" stroke-linejoin="miter"/>
+<path d="M40 24 V8 H56" fill="none" stroke="#208040" stroke-width="8" stroke-linejoin="bevel"/>
+<path d="M72 24 V8 H88" fill="none" stroke="#204080" stroke-width="8" stroke-linejoin="round"/>
+</svg>

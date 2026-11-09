@@ -1,0 +1,1133 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "static-mode-ignores-animation",
+      "input": "inputs/static-mode-ignores-animation.svg",
+      "references": [
+        {
+          "path": "references/static-mode-ignores-animation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Without a time the static processing mode does not run animations.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes",
+      "tolerance": {}
+    },
+    {
+      "id": "set-after-begin",
+      "input": "inputs/set-after-begin.svg",
+      "references": [
+        {
+          "path": "references/set-after-begin.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "set applies its to value for its whole active interval.",
+      "spec": "https://svgwg.org/specs/animations/#SetElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2s"
+      ]
+    },
+    {
+      "id": "set-before-begin",
+      "input": "inputs/set-before-begin.svg",
+      "references": [
+        {
+          "path": "references/set-before-begin.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Before the interval begins the base value shows.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-FromToByAndValues",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "linear-from-to",
+      "input": "inputs/linear-from-to.svg",
+      "references": [
+        {
+          "path": "references/linear-from-to.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Linear interpolation halfway through the simple duration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-InterpolationModes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "values-key-times",
+      "input": "inputs/values-key-times.svg",
+      "references": [
+        {
+          "path": "references/values-key-times.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "keyTimes map 0.625 progress to the middle of the second segment.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-KeyTimesAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2.5s"
+      ]
+    },
+    {
+      "id": "discrete",
+      "input": "inputs/discrete.svg",
+      "references": [
+        {
+          "path": "references/discrete.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Discrete animation holds each value for an equal share of the duration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-InterpolationModes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1.5s"
+      ]
+    },
+    {
+      "id": "paced",
+      "input": "inputs/paced.svg",
+      "references": [
+        {
+          "path": "references/paced.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Paced animation moves at constant speed over the total distance.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-InterpolationModes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "spline",
+      "input": "inputs/spline.svg",
+      "references": [
+        {
+          "path": "references/spline.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "keySplines 0 0 1 0 is symmetric in t at x = 0.5, where y = 0.125.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-KeySplinesAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "freeze",
+      "input": "inputs/freeze.svg",
+      "references": [
+        {
+          "path": "references/freeze.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "fill=freeze keeps the last value after the active duration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-FillAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "5s"
+      ]
+    },
+    {
+      "id": "remove",
+      "input": "inputs/remove.svg",
+      "references": [
+        {
+          "path": "references/remove.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "fill=remove restores the base value after the active duration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-FillAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "5s"
+      ]
+    },
+    {
+      "id": "repeat-count",
+      "input": "inputs/repeat-count.svg",
+      "references": [
+        {
+          "path": "references/repeat-count.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The second iteration restarts the simple duration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-RepeatCountAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "3s"
+      ]
+    },
+    {
+      "id": "accumulate-sum",
+      "input": "inputs/accumulate-sum.svg",
+      "references": [
+        {
+          "path": "references/accumulate-sum.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "accumulate=sum adds the end value once per completed iteration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-AccumulateAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "3s"
+      ]
+    },
+    {
+      "id": "by-additive",
+      "input": "inputs/by-additive.svg",
+      "references": [
+        {
+          "path": "references/by-additive.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A by animation is additive over the base value.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-FromToByAndValues",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2s"
+      ]
+    },
+    {
+      "id": "additive-sum",
+      "input": "inputs/additive-sum.svg",
+      "references": [
+        {
+          "path": "references/additive-sum.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "additive=sum adds the animation value to the underlying value.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-AdditiveAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "to-animation",
+      "input": "inputs/to-animation.svg",
+      "references": [
+        {
+          "path": "references/to-animation.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A to animation interpolates from the underlying value.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-ToAnimation",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "end-cuts-interval",
+      "input": "inputs/end-cuts-interval.svg",
+      "references": [
+        {
+          "path": "references/end-cuts-interval.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "end ends the active duration before the simple duration completes.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-ComputingActiveDur",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2s"
+      ]
+    },
+    {
+      "id": "syncbase-begin",
+      "input": "inputs/syncbase-begin.svg",
+      "references": [
+        {
+          "path": "references/syncbase-begin.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A syncbase begin follows the end of another animation plus an offset.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-SyncbaseValues",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2.5s"
+      ]
+    },
+    {
+      "id": "syncbase-before",
+      "input": "inputs/syncbase-before.svg",
+      "references": [
+        {
+          "path": "references/syncbase-before.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The syncbase-timed animation has not begun yet.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-SyncbaseValues",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1.5s"
+      ]
+    },
+    {
+      "id": "animate-color",
+      "input": "inputs/animate-color.svg",
+      "references": [
+        {
+          "path": "references/animate-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Colours interpolate per channel.",
+      "spec": "https://www.w3.org/TR/SVG11/animate.html#AnimateColorElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "animate-fill-property",
+      "input": "inputs/animate-fill-property.svg",
+      "references": [
+        {
+          "path": "references/animate-fill-property.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "animate on a presentation property animates the computed fill.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "overrides-style",
+      "input": "inputs/overrides-style.svg",
+      "references": [
+        {
+          "path": "references/overrides-style.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Animated property values override normal author declarations.",
+      "spec": "https://www.w3.org/TR/css-cascade-4/#cascade-origin",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0s"
+      ]
+    },
+    {
+      "id": "href-target",
+      "input": "inputs/href-target.svg",
+      "references": [
+        {
+          "path": "references/href-target.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "href selects the target element.",
+      "spec": "https://svgwg.org/specs/animations/#HrefAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0s"
+      ]
+    },
+    {
+      "id": "xlink-href-target",
+      "input": "inputs/xlink-href-target.svg",
+      "references": [
+        {
+          "path": "references/xlink-href-target.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xlink:href selects the target element.",
+      "spec": "https://svgwg.org/specs/animations/#HrefAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0s"
+      ]
+    },
+    {
+      "id": "transform-translate",
+      "input": "inputs/transform-translate.svg",
+      "references": [
+        {
+          "path": "references/transform-translate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "animateTransform interpolates the transform parameters.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateTransformElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "transform-additive-sum",
+      "input": "inputs/transform-additive-sum.svg",
+      "references": [
+        {
+          "path": "references/transform-additive-sum.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "additive=sum post-multiplies the animated transform.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateTransformElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "transform-scale",
+      "input": "inputs/transform-scale.svg",
+      "references": [
+        {
+          "path": "references/transform-scale.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A scale with one value scales both axes.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateTransformElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "path-data",
+      "input": "inputs/path-data.svg",
+      "references": [
+        {
+          "path": "references/path-data.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Path data with matching commands interpolates per number.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#DProperty",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "points",
+      "input": "inputs/points.svg",
+      "references": [
+        {
+          "path": "references/points.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Point lists interpolate per number.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/shapes.html#PolygonElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "invalid-key-times-ignored",
+      "input": "inputs/invalid-key-times-ignored.svg",
+      "references": [
+        {
+          "path": "references/invalid-key-times-ignored.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "keyTimes not ending at 1 for linear animation is an error, so the animation has no effect.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-KeyTimesAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "later-begin-wins",
+      "input": "inputs/later-begin-wins.svg",
+      "references": [
+        {
+          "path": "references/later-begin-wins.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The animation that began later has higher priority in the sandwich.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-AnimationSandwichModel",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2s"
+      ]
+    },
+    {
+      "id": "motion-path-paced",
+      "input": "inputs/motion-path-paced.svg",
+      "references": [
+        {
+          "path": "references/motion-path-paced.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "animateMotion is paced along its path by default.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateMotionElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "motion-path-vertices-linear",
+      "input": "inputs/motion-path-vertices-linear.svg",
+      "references": [
+        {
+          "path": "references/motion-path-vertices-linear.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With linear calcMode each path segment takes an equal share of the duration.",
+      "spec": "https://www.w3.org/TR/SVG11/animate.html#AnimateMotionElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "motion-values",
+      "input": "inputs/motion-values.svg",
+      "references": [
+        {
+          "path": "references/motion-values.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "values define a polyline of points.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateMotionElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1.5s"
+      ]
+    },
+    {
+      "id": "motion-from-to",
+      "input": "inputs/motion-from-to.svg",
+      "references": [
+        {
+          "path": "references/motion-from-to.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "from and to define a two-point motion.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateMotionElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "motion-mpath",
+      "input": "inputs/motion-mpath.svg",
+      "references": [
+        {
+          "path": "references/motion-mpath.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An mpath child overrides the path attribute.",
+      "spec": "https://svgwg.org/specs/animations/#MPathElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "motion-key-points",
+      "input": "inputs/motion-key-points.svg",
+      "references": [
+        {
+          "path": "references/motion-key-points.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "keyPoints map keyTimes to fractions of the path length.",
+      "spec": "https://svgwg.org/specs/animations/#KeyPointsAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "motion-rotate-auto",
+      "input": "inputs/motion-rotate-auto.svg",
+      "references": [
+        {
+          "path": "references/motion-rotate-auto.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "rotate=auto turns the element to the path direction.",
+      "spec": "https://svgwg.org/specs/animations/#RotateAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "motion-rotate-angle",
+      "input": "inputs/motion-rotate-angle.svg",
+      "references": [
+        {
+          "path": "references/motion-rotate-angle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A rotate angle applies a fixed rotation.",
+      "spec": "https://svgwg.org/specs/animations/#RotateAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "motion-before-transform",
+      "input": "inputs/motion-before-transform.svg",
+      "references": [
+        {
+          "path": "references/motion-before-transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The motion transform applies in front of the transform attribute.",
+      "spec": "https://svgwg.org/specs/animations/#AnimateMotionElement",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "motion-accumulate",
+      "input": "inputs/motion-accumulate.svg",
+      "references": [
+        {
+          "path": "references/motion-accumulate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "accumulate=sum adds the path end once per completed iteration.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-AccumulateAttribute",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2.5s"
+      ]
+    },
+    {
+      "id": "motion-by-additive",
+      "input": "inputs/motion-by-additive.svg",
+      "references": [
+        {
+          "path": "references/motion-by-additive.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A by motion adds to the motion below it in the sandwich.",
+      "spec": "https://www.w3.org/TR/SMIL3/smil-animation.html#animationNS-FromToByAndValues",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2s"
+      ]
+    },
+    {
+      "id": "css-from-to-linear",
+      "input": "inputs/css-from-to-linear.svg",
+      "references": [
+        {
+          "path": "references/css-from-to-linear.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A CSS animation interpolates its keyframes at the sampled time.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#keyframes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-static-mode",
+      "input": "inputs/css-static-mode.svg",
+      "references": [
+        {
+          "path": "references/css-static-mode.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Static mode does not run CSS animations.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes",
+      "tolerance": {}
+    },
+    {
+      "id": "css-fill-color",
+      "input": "inputs/css-fill-color.svg",
+      "references": [
+        {
+          "path": "references/css-fill-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Colours interpolate per channel.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#keyframes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-transform",
+      "input": "inputs/css-transform.svg",
+      "references": [
+        {
+          "path": "references/css-transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Transform functions with matching shapes interpolate their arguments.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#keyframes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-steps",
+      "input": "inputs/css-steps.svg",
+      "references": [
+        {
+          "path": "references/css-steps.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "steps(4, end) holds each quarter at its starting value.",
+      "spec": "https://www.w3.org/TR/css-easing-1/#step-easing-functions",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2.5s"
+      ]
+    },
+    {
+      "id": "css-keyframe-timing",
+      "input": "inputs/css-keyframe-timing.svg",
+      "references": [
+        {
+          "path": "references/css-keyframe-timing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "animation-timing-function in a keyframe times the segment after it.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#timing-functions",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.75s"
+      ]
+    },
+    {
+      "id": "css-percentages",
+      "input": "inputs/css-percentages.svg",
+      "references": [
+        {
+          "path": "references/css-percentages.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Percentage keyframes divide the duration.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#keyframes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1.5s"
+      ]
+    },
+    {
+      "id": "css-delay-before",
+      "input": "inputs/css-delay-before.svg",
+      "references": [
+        {
+          "path": "references/css-delay-before.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Before its delay an animation without backwards fill has no effect.",
+      "spec": "https://www.w3.org/TR/web-animations-1/#animation-effect-phases-and-states",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "css-delay-backwards",
+      "input": "inputs/css-delay-backwards.svg",
+      "references": [
+        {
+          "path": "references/css-delay-backwards.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Backwards fill applies the first keyframe during the delay.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-fill-mode",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    },
+    {
+      "id": "css-after-none",
+      "input": "inputs/css-after-none.svg",
+      "references": [
+        {
+          "path": "references/css-after-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "After the active duration an animation without forwards fill has no effect.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-fill-mode",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "5s"
+      ]
+    },
+    {
+      "id": "css-forwards",
+      "input": "inputs/css-forwards.svg",
+      "references": [
+        {
+          "path": "references/css-forwards.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Forwards fill keeps the last keyframe.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-fill-mode",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "5s"
+      ]
+    },
+    {
+      "id": "css-alternate",
+      "input": "inputs/css-alternate.svg",
+      "references": [
+        {
+          "path": "references/css-alternate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "alternate plays odd iterations backwards.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-direction",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1.25s"
+      ]
+    },
+    {
+      "id": "css-reverse",
+      "input": "inputs/css-reverse.svg",
+      "references": [
+        {
+          "path": "references/css-reverse.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "reverse plays every iteration backwards.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-direction",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.25s"
+      ]
+    },
+    {
+      "id": "css-infinite",
+      "input": "inputs/css-infinite.svg",
+      "references": [
+        {
+          "path": "references/css-infinite.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "infinite iterations repeat the keyframes.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-iteration-count",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "2.25s"
+      ]
+    },
+    {
+      "id": "css-paused",
+      "input": "inputs/css-paused.svg",
+      "references": [
+        {
+          "path": "references/css-paused.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A paused animation stays at its start.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-play-state",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "5s"
+      ]
+    },
+    {
+      "id": "css-longhands",
+      "input": "inputs/css-longhands.svg",
+      "references": [
+        {
+          "path": "references/css-longhands.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The longhands describe the same animation as the shorthand.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-name",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-missing-from",
+      "input": "inputs/css-missing-from.svg",
+      "references": [
+        {
+          "path": "references/css-missing-from.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A missing 0% keyframe uses the underlying value.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#keyframes",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-later-animation-wins",
+      "input": "inputs/css-later-animation-wins.svg",
+      "references": [
+        {
+          "path": "references/css-later-animation-wins.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A later animation in the list overrides an earlier one.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-name",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-overrides-author",
+      "input": "inputs/css-overrides-author.svg",
+      "references": [
+        {
+          "path": "references/css-overrides-author.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Animation values override normal author declarations.",
+      "spec": "https://www.w3.org/TR/css-cascade-4/#cascade-origin",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-smil-wins",
+      "input": "inputs/css-smil-wins.svg",
+      "references": [
+        {
+          "path": "references/css-smil-wins.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SMIL animations apply above CSS animations.",
+      "spec": "https://svgwg.org/specs/animations/#AnimationsInCSS",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "css-unknown-name",
+      "input": "inputs/css-unknown-name.svg",
+      "references": [
+        {
+          "path": "references/css-unknown-name.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A name without @keyframes runs no animation.",
+      "spec": "https://www.w3.org/TR/css-animations-1/#animation-name",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "1s"
+      ]
+    },
+    {
+      "id": "motion-mpath-css-d",
+      "input": "inputs/motion-mpath-css-d.svg",
+      "references": [
+        {
+          "path": "references/motion-mpath-css-d.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The path an mpath names is that element's computed d, so a d property from a style attribute or a style sheet is the motion path, also for a path in defs.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#TheDProperty",
+      "tolerance": {},
+      "arguments": [
+        "--time",
+        "0.5s"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1384 @@
+//! LIMITATION-7: local WHATWG URL/IDNA support; silk-lang/silk#2578 tracks the stdlib gap.
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.effect { Effect }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.usize
+import silk.num.u8
+import silk.num.u64
+import url_idna
+import url_idna_punycode { IdnaError }
+
+pub enum UrlError {
+  InvalidUrl,
+  InvalidPercentEncoding,
+  InputLimit
+}
+
+const MAX_INPUT: usize = 16777216
+
+const MAX_OUTPUT: usize = 50331648
+
+const ABSENT: usize = usize.MAX
+
+// Component offsets always refer to this owned serialization. An absent query/fragment
+// differs from a present empty one. pathStart excludes the serializer's optional '/.'.
+pub struct Url {
+  data: Bytes,
+  schemeEnd: usize,
+  hostStart: usize,
+  hostEnd: usize,
+  pathStart: usize,
+  pathEnd: usize,
+  queryAt: usize,
+  fragmentAt: usize,
+  hasHost: bool,
+  opaque: bool,
+}
+
+impl Url {
+  pub fn bytes(self: &Self) -> &[u8] {
+    return Bytes.asSlice(&self.data)
+  }
+
+  pub effect fn clone(self: &Self) -> Url
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let mut data = Bytes.make()
+    run Bytes.append(&mut data, Url.bytes(self))
+    return Url {
+      data: move data,
+      schemeEnd: self.schemeEnd,
+      hostStart: self.hostStart,
+      hostEnd: self.hostEnd,
+      pathStart: self.pathStart,
+      pathEnd: self.pathEnd,
+      queryAt: self.queryAt,
+      fragmentAt: self.fragmentAt,
+      hasHost: self.hasHost,
+      opaque: self.opaque,
+    }
+  }
+
+  pub fn scheme(self: &Self) -> &[u8] {
+    return view(Url.bytes(self), 0, self.schemeEnd)
+  }
+
+  pub fn host(self: &Self) -> &[u8] {
+    return view(Url.bytes(self), self.hostStart, self.hostEnd)
+  }
+
+  /// The normalized nondefault port. Parsing has already validated its decimal
+  /// representation and 0..65535 range; absent and default ports return None.
+  pub fn port(self: &Self) -> Option<usize> {
+    if !self.hasHost || self.hostEnd == self.pathStart {
+      return Option<usize>.None
+    }
+    let data = Url.bytes(self)
+    let mut at = self.hostEnd + 1
+    let mut number: usize = 0
+    while at < self.pathStart {
+      number = number * 10 + u8.toUsize(data[at] - 48)
+      at = at + 1
+    }
+    return Option<usize>.some(number)
+  }
+
+  pub fn path(self: &Self) -> &[u8] {
+    return view(Url.bytes(self), self.pathStart, self.pathEnd)
+  }
+
+  pub fn isOpaque(self: &Self) -> bool {
+    return self.opaque
+  }
+
+  pub fn fragment(self: &Self) -> Option<&[u8]> {
+    if self.fragmentAt == ABSENT {
+      return Option<&[u8]>.None
+    }
+    return Option<&[u8]>.Some {
+      value: view(Url.bytes(self), self.fragmentAt + 1, Bytes.length(&self.data))
+    }
+  }
+
+  pub fn query(self: &Self) -> Option<&[u8]> {
+    if self.queryAt == ABSENT {
+      return Option<&[u8]>.None
+    }
+    let mut end = Bytes.length(&self.data)
+    if self.fragmentAt != ABSENT {
+      end = self.fragmentAt
+    }
+    return Option<&[u8]>.Some { value: view(Url.bytes(self), self.queryAt + 1, end) }
+  }
+
+  pub fn withoutFragment(self: &Self) -> &[u8] {
+    if self.fragmentAt == ABSENT {
+      return Url.bytes(self)
+    }
+    return view(Url.bytes(self), 0, self.fragmentAt)
+  }
+
+  pub effect fn parseAbsolute(input: &[u8]) -> Url
+    ! UrlError | OutOfMemoryError
+    ? &mut Allocator {
+    // LIMITATION-9 / silk-lang/silk#2580: an empty variant supplies no lifetime operand.
+    return run parse(input, Option<&'static Url>.None)
+  }
+
+  pub effect fn resolve(base: &Url, input: &[u8]) -> Url
+    ! UrlError | OutOfMemoryError
+    ? &mut Allocator {
+    return run parse(input, Option<&Url>.Some { value: base })
+  }
+
+  // Host paths are bytes, not URL input. In particular '%' and backslash are data.
+  pub effect fn fromFilePath(path: &[u8]) -> Url
+    ! UrlError | OutOfMemoryError
+    ? &mut Allocator {
+    if path.length > MAX_INPUT {
+      fail UrlError.InputLimit
+    }
+    if path.length == 0 || path[0] != 47 {
+      fail UrlError.InvalidUrl
+    }
+    let mut result = empty()
+    run append(&mut result.data, b"file://")
+    result.schemeEnd = 4
+    result.hostStart = 7
+    result.hostEnd = 7
+    result.pathStart = 7
+    result.hasHost = true
+    let mut start: usize = 1
+    let mut index: usize = 0
+    while index < path.length {
+      let byte = path[index]
+      if byte == 0 {
+        fail UrlError.InvalidUrl
+      }
+      if byte == 47 && index > 0 {
+        let segment = view(path, start, index)
+        if equal(segment, b".") || equal(segment, b"..") {
+          fail UrlError.InvalidUrl
+        }
+        start = index + 1
+      }
+      if byte == 37 || byte == 92 || byte == 124 || encodeByte(byte, Encode.Path) {
+        run escaped(&mut result.data, byte)
+      } else {
+        run single(&mut result.data, byte)
+      }
+      index = index + 1
+    }
+    let finalSegment = view(path, start, path.length)
+    if equal(finalSegment, b".") || equal(finalSegment, b"..") {
+      fail UrlError.InvalidUrl
+    }
+    result.pathEnd = Bytes.length(&result.data)
+    return move result
+  }
+
+  pub effect fn decodedPath(self: &Self) -> Bytes
+    ! UrlError | OutOfMemoryError
+    ? &mut Allocator {
+    return run decodeUrlPercent(Url.path(self))
+  }
+
+  pub effect fn decodedFragment(self: &Self) -> Option<Bytes>
+    ! UrlError | OutOfMemoryError
+    ? &mut Allocator {
+    if self.fragmentAt == ABSENT {
+      return Option<Bytes>.None
+    }
+    let decoded = run decodeUrlPercent(
+      view(Url.bytes(self), self.fragmentAt + 1, Bytes.length(&self.data)),
+    )
+    return Option<Bytes>.Some { value: move decoded }
+  }
+}
+
+// Resource decoding is deliberately strict. URL parsing itself preserves malformed
+// percent spellings where the URL Standard reports only a validation error.
+pub effect fn percentDecode(input: &[u8]) -> Bytes
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if input.length > MAX_OUTPUT {
+    fail UrlError.InputLimit
+  }
+  let mut index: usize = 0
+  while index < input.length {
+    if input[index] == 37 {
+      if input.length - index < 3 || hex(input[index + 1]) > 15 || hex(input[index + 2]) > 15 {
+        fail UrlError.InvalidPercentEncoding
+      }
+      index = index + 3
+    } else {
+      index = index + 1
+    }
+  }
+  return run decodeUrlPercent(input)
+}
+
+// URL Standard #percent-decode copies a '%' that is not followed by two hex digits.
+// Resource providers separately validate their restricted data/file input grammar.
+effect fn decodeUrlPercent(input: &[u8]) -> Bytes
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if input.length > MAX_OUTPUT {
+    fail UrlError.InputLimit
+  }
+  let mut result = Bytes.make()
+  let mut index: usize = 0
+  let mut start: usize = 0
+  while index < input.length {
+    if input[index] == 37 && input.length - index >= 3 && hex(input[index + 1]) < 16
+      && hex(input[index + 2]) < 16 {
+      run append(&mut result, view(input, start, index))
+      run single(&mut result, usize.toU8(hex(input[index + 1]) * 16 + hex(input[index + 2])))
+      index = index + 3
+      start = index
+    } else {
+      index = index + 1
+    }
+  }
+  run append(&mut result, view(input, start, input.length))
+  return move result
+}
+
+fn empty() -> Url {
+  return Url {
+    data: Bytes.make(),
+    schemeEnd: 0,
+    hostStart: 0,
+    hostEnd: 0,
+    pathStart: 0,
+    pathEnd: 0,
+    queryAt: ABSENT,
+    fragmentAt: ABSENT,
+    hasHost: false,
+    opaque: false,
+  }
+}
+
+fn view(data: &[u8], start: usize, end: usize) -> &[u8] {
+  return Slice.view<u8>(data, start, end - start)
+}
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn lower(byte: u8) -> u8 {
+  if byte >= 65 && byte <= 90 {
+    return byte + 32
+  }
+  return byte
+}
+
+fn foldedEqual(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if lower(a[index]) != lower(b[index]) {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn alpha(byte: u8) -> bool {
+  return (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+}
+
+fn digit(byte: u8) -> bool {
+  return byte >= 48 && byte <= 57
+}
+
+fn hex(byte: u8) -> usize {
+  if digit(byte) {
+    return u8.toUsize(byte - 48)
+  }
+  let value = lower(byte)
+  if value >= 97 && value <= 102 {
+    return u8.toUsize(value - 97) + 10
+  }
+  return 16
+}
+
+fn validUtf8(data: &[u8]) -> bool {
+  return match move String.fromUtf8(data) {
+    Result<string, InvalidUtf8>.Success { value } => true
+    _ => false
+  }
+}
+
+fn special(scheme: &[u8]) -> bool {
+  return foldedEqual(scheme, b"file") || foldedEqual(scheme, b"ftp") || foldedEqual(scheme, b"http")
+    || foldedEqual(scheme, b"https")
+    || foldedEqual(scheme, b"ws")
+    || foldedEqual(scheme, b"wss")
+}
+
+fn defaultPort(scheme: &[u8]) -> usize {
+  if equal(scheme, b"http") || equal(scheme, b"ws") {
+    return 80
+  }
+  if equal(scheme, b"https") || equal(scheme, b"wss") {
+    return 443
+  }
+  if equal(scheme, b"ftp") {
+    return 21
+  }
+  return ABSENT
+}
+
+fn separator(byte: u8, isSpecial: bool) -> bool {
+  return byte == 47 || (isSpecial && byte == 92)
+}
+
+fn drive(segment: &[u8]) -> bool {
+  return segment.length == 2 && alpha(segment[0]) && (segment[1] == 58 || segment[1] == 124)
+}
+
+fn startsDrive(data: &[u8]) -> bool {
+  if data.length < 2 || !drive(view(data, 0, 2)) {
+    return false
+  }
+  return data.length == 2 || separator(data[2], true) || data[2] == 63 || data[2] == 35
+}
+
+fn schemeLength(data: &[u8]) -> usize {
+  if data.length == 0 || !alpha(data[0]) {
+    return ABSENT
+  }
+  let mut index: usize = 1
+  while index < data.length {
+    let byte = data[index]
+    if byte == 58 {
+      return index
+    }
+    if !alpha(byte) && !digit(byte) && byte != 43 && byte != 45 && byte != 46 {
+      return ABSENT
+    }
+    index = index + 1
+  }
+  return ABSENT
+}
+
+effect fn append(out: &mut Bytes, data: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if data.length > MAX_OUTPUT - Bytes.length(&out.*) {
+    fail UrlError.InputLimit
+  }
+  run Bytes.append(&mut out.*, data)
+}
+
+effect fn single(out: &mut Bytes, value: u8) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  run append(&mut out.*, &[value])
+}
+
+effect fn escaped(out: &mut Bytes, value: u8) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let digits = b"0123456789ABCDEF"
+  run append(&mut out.*, &[37, digits[u8.toUsize(value) / 16], digits[u8.toUsize(value) % 16]])
+}
+
+enum Encode {
+  Opaque,
+  Path,
+  Query,
+  SpecialQuery,
+  Fragment,
+  UserInfo
+}
+
+fn encodeByte(byte: u8, mode: Encode) -> bool {
+  if byte < 32 || byte > 126 {
+    return true
+  }
+  if mode == Encode.Opaque {
+    return false
+  }
+  if byte == 32 || byte == 34 || byte == 60 || byte == 62 {
+    return true
+  }
+  if mode == Encode.Fragment {
+    return byte == 96
+  }
+  if byte == 35 {
+    return true
+  }
+  if mode == Encode.Query {
+    return false
+  }
+  if mode == Encode.SpecialQuery {
+    return byte == 39
+  }
+  if byte == 63 || byte == 94 || byte == 96 || byte == 123 || byte == 125 {
+    return true
+  }
+  if mode == Encode.Path {
+    return false
+  }
+  return byte == 47 || byte == 58 || byte == 59 || byte == 61 || byte == 64
+    || (byte >= 91 && byte <= 93)
+    || byte == 124
+}
+
+effect fn encoded(out: &mut Bytes, data: &[u8], mode: Encode) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  let mut start: usize = 0
+  while index < data.length {
+    if encodeByte(data[index], mode) {
+      run append(&mut out.*, view(data, start, index))
+      run escaped(&mut out.*, data[index])
+      start = index + 1
+    }
+    index = index + 1
+  }
+  run append(&mut out.*, view(data, start, data.length))
+}
+
+effect fn decimal(out: &mut Bytes, number: usize) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut buffer: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let mut index: usize = 20
+  let mut value = number
+  while true {
+    index = index - 1
+    buffer[index] = usize.toU8(value % 10) + 48
+    value = value / 10
+    if value == 0 {
+      break
+    }
+  }
+  run append(&mut out.*, view(&buffer, index, 20))
+}
+
+effect fn parse(input: &[u8], base: Option<&Url>) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if input.length > MAX_INPUT {
+    fail UrlError.InputLimit
+  }
+  if !validUtf8(input) {
+    fail UrlError.InvalidUrl
+  }
+  let mut start: usize = 0
+  let mut end = input.length
+  while start < end && input[start] <= 32 {
+    start = start + 1
+  }
+  while end > start && input[end - 1] <= 32 {
+    end = end - 1
+  }
+  let trimmed = view(input, start, end)
+  let mut index: usize = 0
+  while index < trimmed.length {
+    if trimmed[index] == 9 || trimmed[index] == 10 || trimmed[index] == 13 {
+      break
+    }
+    index = index + 1
+  }
+  if index == trimmed.length {
+    return run parseClean(trimmed, base)
+  }
+  let mut clean = Bytes.make()
+  let mut chunk: usize = 0
+  while index < trimmed.length {
+    if trimmed[index] == 9 || trimmed[index] == 10 || trimmed[index] == 13 {
+      run append(&mut clean, view(trimmed, chunk, index))
+      chunk = index + 1
+    }
+    index = index + 1
+  }
+  run append(&mut clean, view(trimmed, chunk, trimmed.length))
+  return run parseClean(Bytes.asSlice(&clean), base)
+}
+
+effect fn parseClean(input: &[u8], base: Option<&Url>) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let end = schemeLength(input)
+  if end == ABSENT {
+    return match &base {
+      Option<&Url>.Some { value } => run parseRelative(value, input)
+      _ => {
+        fail UrlError.InvalidUrl
+      }
+    }
+  }
+  let scheme = view(input, 0, end)
+  let suffix = view(input, end + 1, input.length)
+  let isFile = foldedEqual(scheme, b"file")
+  let isSpecial = special(scheme)
+  match &base {
+    Option<&Url>.Some { value } => {
+      if isSpecial && foldedEqual(scheme, Url.scheme(value)) {
+        if isFile {
+          return run parseFile(suffix, Option<&Url>.Some { value: value })
+        }
+        if suffix.length < 2 || suffix[0] != 47 || suffix[1] != 47 {
+          return run parseRelative(value, suffix)
+        }
+      }
+    }
+    _ => {}
+  }
+  if isFile {
+    // LIMITATION-9 / silk-lang/silk#2580: an empty variant supplies no lifetime operand.
+    return run parseFile(suffix, Option<&'static Url>.None)
+  }
+  let mut result = empty()
+  let mut index: usize = 0
+  while index < scheme.length {
+    run single(&mut result.data, lower(scheme[index]))
+    index = index + 1
+  }
+  result.schemeEnd = scheme.length
+  run single(&mut result.data, 58)
+  index = 0
+  if isSpecial {
+    while index < suffix.length && separator(suffix[index], true) {
+      index = index + 1
+    }
+    index = run authority(&mut result, suffix, index, true, false)
+    return run pathAndSuffix(move result, suffix, index, true, false, true)
+  }
+  if suffix.length >= 2 && suffix[0] == 47 && suffix[1] == 47 {
+    index = run authority(&mut result, suffix, 2, false, false)
+    return run pathAndSuffix(move result, suffix, index, false, false, false)
+  }
+  result.hostStart = Bytes.length(&result.data)
+  result.hostEnd = result.hostStart
+  result.pathStart = result.hostStart
+  if suffix.length > 0 && suffix[0] == 47 {
+    return run pathAndSuffix(move result, suffix, 0, false, false, false)
+  }
+  result.opaque = true
+  while index < suffix.length && suffix[index] != 63 && suffix[index] != 35 {
+    index = index + 1
+  }
+  let path = view(suffix, 0, index)
+  if path.length > 0 && path[path.length - 1] == 32 && index < suffix.length {
+    run encoded(&mut result.data, view(path, 0, path.length - 1), Encode.Opaque)
+    run append(&mut result.data, b"%20")
+  } else {
+    run encoded(&mut result.data, path, Encode.Opaque)
+  }
+  result.pathEnd = Bytes.length(&result.data)
+  run finishSuffix(&mut result, suffix, index, false)
+  return move result
+}
+
+effect fn copyPrefix(base: &Url, end: usize) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = empty()
+  run append(&mut result.data, view(Url.bytes(base), 0, end))
+  result.schemeEnd = base.schemeEnd
+  result.hostStart = base.hostStart
+  result.hostEnd = base.hostEnd
+  result.hasHost = base.hasHost
+  result.opaque = base.opaque
+  result.pathStart = base.pathStart
+  result.pathEnd = base.pathEnd
+  return move result
+}
+
+effect fn parseRelative(base: &Url, input: &[u8]) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let isFile = equal(Url.scheme(base), b"file")
+  if isFile {
+    return run parseFile(input, Option<&Url>.Some { value: base })
+  }
+  let isSpecial = special(Url.scheme(base))
+  if base.opaque && (input.length == 0 || input[0] != 35) {
+    fail UrlError.InvalidUrl
+  }
+  if input.length == 0 || input[0] == 63 || input[0] == 35 {
+    let mut end = Url.withoutFragment(base).length
+    if input.length > 0 && input[0] == 63 {
+      end = base.pathEnd
+    }
+    let mut result = run copyPrefix(base, end)
+    if end > base.pathEnd {
+      result.queryAt = base.queryAt
+    }
+    run finishSuffix(&mut result, input, 0, isSpecial)
+    return move result
+  }
+  if separator(input[0], isSpecial) {
+    if input.length >= 2 && separator(input[1], isSpecial) {
+      let mut result = run copyPrefix(base, base.schemeEnd + 1)
+      let mut index: usize = 2
+      if isSpecial {
+        while index < input.length && separator(input[index], true) {
+          index = index + 1
+        }
+      }
+      index = run authority(&mut result, input, index, isSpecial, false)
+      return run pathAndSuffix(move result, input, index, isSpecial, false, isSpecial)
+    }
+    let prefix = authorityEnd(base)
+    let mut result = run copyPrefix(base, prefix)
+    result.pathStart = prefix
+    return run pathAndSuffix(move result, input, 0, isSpecial, false, false)
+  }
+  let mut result = run copyPrefix(base, base.pathEnd)
+  shorten(&mut result, false)
+  return run pathAndSuffix(move result, input, 0, isSpecial, false, true)
+}
+
+fn authorityEnd(base: &Url) -> usize {
+  if base.hasHost {
+    return base.pathStart
+  }
+  return base.schemeEnd + 1
+}
+
+effect fn parseFile(input: &[u8], base: Option<&Url>) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = empty()
+  run append(&mut result.data, b"file://")
+  result.schemeEnd = 4
+  result.hostStart = 7
+  result.hostEnd = 7
+  result.pathStart = 7
+  result.hasHost = true
+  if input.length >= 2 && separator(input[0], true) && separator(input[1], true) {
+    let mut end: usize = 2
+    while end < input.length && !separator(input[end], true) && input[end] != 63
+      && input[end] != 35 {
+      end = end + 1
+    }
+    if drive(view(input, 2, end)) {
+      return run pathAndSuffix(move result, input, 2, true, true, true)
+    }
+
+    // authority() supplies the slashes; drop the empty authority first.
+    Bytes.truncate(&mut result.data, 5)
+    let cursor = run authority(&mut result, input, 2, true, true)
+    return run pathAndSuffix(move result, input, cursor, true, true, true)
+  }
+  match &base {
+    Option<&Url>.Some { value } => {
+      if input.length == 0 || input[0] == 63 || input[0] == 35 {
+        let mut end = Url.withoutFragment(value).length
+        if input.length > 0 && input[0] == 63 {
+          end = value.pathEnd
+        }
+        let mut copied = run copyPrefix(value, end)
+        if end > value.pathEnd {
+          copied.queryAt = value.queryAt
+        }
+        run finishSuffix(&mut copied, input, 0, true)
+        return move copied
+      }
+      run append(&mut result.data, Url.host(value))
+      result.hostEnd = Bytes.length(&result.data)
+      result.pathStart = result.hostEnd
+      if separator(input[0], true) {
+        let afterSlash = view(input, 1, input.length)
+        let basePath = Url.path(value)
+        if !startsDrive(afterSlash) && basePath.length >= 3 && drive(view(basePath, 1, 3)) {
+          run append(&mut result.data, view(basePath, 0, 3))
+        }
+        return run pathAndSuffix(move result, input, 0, true, true, true)
+      }
+      if !startsDrive(input) {
+        run append(&mut result.data, Url.path(value))
+        shorten(&mut result, true)
+      }
+    }
+    _ => {}
+  }
+  return run pathAndSuffix(move result, input, 0, true, true, true)
+}
+
+effect fn authority(
+  result: &mut Url,
+  input: &[u8],
+  start: usize,
+  isSpecial: bool,
+  isFile: bool,
+) -> usize
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut end = start
+  let mut at = ABSENT
+  while end < input.length && !separator(input[end], isSpecial) && input[end] != 63
+    && input[end] != 35 {
+    if input[end] == 64 {
+      at = end
+    }
+    end = end + 1
+  }
+  run append(&mut result.data, b"//")
+  result.hasHost = true
+  result.opaque = false
+  let mut hostStart = start
+  if at != ABSENT {
+    if isFile {
+      fail UrlError.InvalidUrl
+    }
+    hostStart = at + 1
+    if hostStart == end {
+      fail UrlError.InvalidUrl
+    }
+    let mut colon = start
+    while colon < at && input[colon] != 58 {
+      colon = colon + 1
+    }
+    let user = view(input, start, colon)
+    let mut passwordStart = at
+    if colon < at {
+      passwordStart = colon + 1
+    }
+    let password = view(input, passwordStart, at)
+    if user.length > 0 || password.length > 0 {
+      run encoded(&mut result.data, user, Encode.UserInfo)
+      if password.length > 0 {
+        run single(&mut result.data, 58)
+        run encoded(&mut result.data, password, Encode.UserInfo)
+      }
+      run single(&mut result.data, 64)
+    }
+  }
+  let mut portAt = ABSENT
+  let mut cursor = hostStart
+  let mut bracket = false
+  while cursor < end {
+    if input[cursor] == 91 {
+      bracket = true
+    }
+    if input[cursor] == 93 {
+      bracket = false
+    }
+    if input[cursor] == 58 && !bracket {
+      portAt = cursor
+      break
+    }
+    cursor = cursor + 1
+  }
+  let mut hostEnd = end
+  if portAt != ABSENT {
+    hostEnd = portAt
+  }
+  let host = view(input, hostStart, hostEnd)
+  if isFile && portAt != ABSENT {
+    fail UrlError.InvalidUrl
+  }
+  if host.length == 0 && ((isSpecial && !isFile) || at != ABSENT || portAt != ABSENT) {
+    fail UrlError.InvalidUrl
+  }
+  result.hostStart = Bytes.length(&result.data)
+  if host.length > 0 {
+    run appendHost(&mut result.data, host, isSpecial)
+  }
+  result.hostEnd = Bytes.length(&result.data)
+  if isFile
+    && equal(view(Bytes.asSlice(&result.data), result.hostStart, result.hostEnd), b"localhost") {
+    Bytes.truncate(&mut result.data, result.hostStart)
+    result.hostEnd = result.hostStart
+  }
+  if portAt != ABSENT && portAt + 1 < end {
+    let mut number: usize = 0
+    cursor = portAt + 1
+    while cursor < end {
+      if !digit(input[cursor]) {
+        fail UrlError.InvalidUrl
+      }
+      let unit = u8.toUsize(input[cursor] - 48)
+      if number > (65535 - unit) / 10 {
+        fail UrlError.InvalidUrl
+      }
+      number = number * 10 + unit
+      cursor = cursor + 1
+    }
+    if number != defaultPort(Url.scheme(&result.*)) {
+      run single(&mut result.data, 58)
+      run decimal(&mut result.data, number)
+    }
+  }
+  result.pathStart = Bytes.length(&result.data)
+  return end
+}
+
+fn dots(segment: &[u8]) -> usize {
+  let mut count: usize = 0
+  let mut index: usize = 0
+  while index < segment.length {
+    if segment[index] == 46 {
+      index = index + 1
+    } else if segment.length - index >= 3 && segment[index] == 37 && segment[index + 1] == 50
+      && lower(segment[index + 2]) == 101 {
+      index = index + 3
+    } else {
+      return 0
+    }
+    count = count + 1
+    if count > 2 {
+      return 0
+    }
+  }
+  return count
+}
+
+fn shorten(result: &mut Url, isFile: bool) -> () {
+  let length = Bytes.length(&result.data)
+  if length <= result.pathStart {
+    return
+  }
+  let path = view(Bytes.asSlice(&result.data), result.pathStart, length)
+  if isFile && path.length == 3 && drive(view(path, 1, 3)) {
+    return
+  }
+  let mut end = length
+  while end > result.pathStart && Bytes.asSlice(&result.data)[end - 1] != 47 {
+    end = end - 1
+  }
+  if end > result.pathStart {
+    end = end - 1
+  }
+  Bytes.truncate(&mut result.data, end)
+}
+
+effect fn pathAndSuffix(
+  initial: Url,
+  input: &[u8],
+  offset: usize,
+  isSpecial: bool,
+  isFile: bool,
+  requirePath: bool,
+) -> Url
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = move initial
+  let mut end = offset
+  while end < input.length && input[end] != 63 && input[end] != 35 {
+    end = end + 1
+  }
+  let mut start = offset
+  if start < end && separator(input[start], isSpecial) {
+    start = start + 1
+  }
+  if end > offset || requirePath {
+    let mut cursor = start
+    while true {
+      if cursor == end || separator(input[cursor], isSpecial) {
+        let segment = view(input, start, cursor)
+        let dotCount = dots(segment)
+        if dotCount == 2 {
+          shorten(&mut result, isFile)
+        }
+        if dotCount == 0 || cursor == end {
+          run single(&mut result.data, 47)
+          if dotCount == 0 {
+            if isFile && Bytes.length(&result.data) == result.pathStart + 1 && drive(segment) {
+              run single(&mut result.data, segment[0])
+              run single(&mut result.data, 58)
+            } else {
+              run encoded(&mut result.data, segment, Encode.Path)
+            }
+          }
+        }
+        if cursor == end {
+          break
+        }
+        start = cursor + 1
+      }
+      cursor = cursor + 1
+    }
+  }
+  result.pathEnd = Bytes.length(&result.data)
+
+  // A hostless hierarchical path starting '//' needs '/.' to preserve reparsing.
+  // Reuse the same allocation and remove a base's guard when shortening no longer
+  // requires it. This guard is serialization, never a path component.
+  if !result.hasHost {
+    let needsGuard = result.pathEnd - result.pathStart >= 2
+      && Bytes.asSlice(&result.data)[result.pathStart] == 47
+      && Bytes.asSlice(&result.data)[result.pathStart + 1] == 47
+    let hasGuard = result.pathStart != result.schemeEnd + 1
+    if needsGuard && !hasGuard {
+      run append(&mut result.data, b"\0\0")
+      insertGuard(Bytes.asMutSlice(&mut result.data), result.pathStart, result.pathEnd)
+      result.pathStart = result.pathStart + 2
+      result.pathEnd = result.pathEnd + 2
+    } else if !needsGuard && hasGuard {
+      removeGuard(Bytes.asMutSlice(&mut result.data), result.pathStart, result.pathEnd)
+      result.pathStart = result.pathStart - 2
+      result.pathEnd = result.pathEnd - 2
+      Bytes.truncate(&mut result.data, result.pathEnd)
+    }
+  }
+  run finishSuffix(&mut result, input, end, isSpecial)
+  return move result
+}
+
+fn insertGuard(data: &mut [u8], start: usize, end: usize) -> () {
+  let mut cursor = end
+  while cursor > start {
+    cursor = cursor - 1
+    data[cursor + 2] = data[cursor]
+  }
+  data[start] = 47
+  data[start + 1] = 46
+}
+
+fn removeGuard(data: &mut [u8], start: usize, end: usize) -> () {
+  let mut cursor = start
+  while cursor < end {
+    data[cursor - 2] = data[cursor]
+    cursor = cursor + 1
+  }
+}
+
+effect fn finishSuffix(result: &mut Url, input: &[u8], start: usize, isSpecial: bool) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut cursor = start
+  if cursor < input.length && input[cursor] == 63 {
+    result.queryAt = Bytes.length(&result.data)
+    run single(&mut result.data, 63)
+    let queryStart = cursor + 1
+    cursor = queryStart
+    while cursor < input.length && input[cursor] != 35 {
+      cursor = cursor + 1
+    }
+    let mut mode = Encode.Query
+    if isSpecial {
+      mode = Encode.SpecialQuery
+    }
+    run encoded(&mut result.data, view(input, queryStart, cursor), mode)
+  }
+  if cursor < input.length && input[cursor] == 35 {
+    result.fragmentAt = Bytes.length(&result.data)
+    run single(&mut result.data, 35)
+    run encoded(&mut result.data, view(input, cursor + 1, input.length), Encode.Fragment)
+  }
+}
+
+fn forbiddenHost(byte: u8) -> bool {
+  return byte == 0 || byte == 9 || byte == 10 || byte == 13 || byte == 32 || byte == 35
+    || byte == 47
+    || byte == 58
+    || byte == 60
+    || byte == 62
+    || byte == 63
+    || byte == 64
+    || byte == 91
+    || byte == 92
+    || byte == 93
+    || byte == 94
+    || byte == 124
+}
+
+effect fn appendHost(out: &mut Bytes, input: &[u8], isSpecial: bool) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if input[0] == 91 {
+    if input.length < 2 || input[input.length - 1] != 93 {
+      fail UrlError.InvalidUrl
+    }
+    return run appendIpv6(&mut out.*, view(input, 1, input.length - 1))
+  }
+  if !isSpecial {
+    let mut index: usize = 0
+    while index < input.length {
+      if forbiddenHost(input[index]) {
+        fail UrlError.InvalidUrl
+      }
+      index = index + 1
+    }
+    return run encoded(&mut out.*, input, Encode.Opaque)
+  }
+
+  // A malformed '%' in a special host cannot survive forbidden-domain validation.
+  let mut cursor: usize = 0
+  let mut percent = false
+  while cursor < input.length {
+    if input[cursor] == 37 {
+      if input.length - cursor < 3 || hex(input[cursor + 1]) > 15 || hex(input[cursor + 2]) > 15 {
+        fail UrlError.InvalidUrl
+      }
+      percent = true
+      cursor = cursor + 3
+    } else {
+      cursor = cursor + 1
+    }
+  }
+  if percent {
+    let decoded = run percentDecode(input)
+    return run appendDomain(&mut out.*, Bytes.asSlice(&decoded))
+  }
+  return run appendDomain(&mut out.*, input)
+}
+
+effect fn appendDomain(out: &mut Bytes, input: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  while index < input.length && input[index] < 128 {
+    index = index + 1
+  }
+
+  // The pinned non-strict domain parser lowercases ASCII independently of UTS46's
+  // validation result. In particular, invalid ASCII A-labels are not rejected here.
+  if index == input.length {
+    return run appendAsciiDomain(&mut out.*, input)
+  }
+  if !validUtf8(input) {
+    fail UrlError.InvalidUrl
+  }
+  let normalized = run Effect.catch<IdnaError>(url_idna.domainToAscii(input), idnaLimit)
+  match &normalized {
+    Option<Bytes>.Some { value } => {
+      return run appendAsciiDomain(&mut out.*, Bytes.asSlice(&value))
+    }
+    _ => {
+      fail UrlError.InvalidUrl
+    }
+  }
+}
+
+effect fn idnaLimit(error: IdnaError) -> Option<Bytes>
+  ! UrlError {
+  drop error
+  fail UrlError.InputLimit
+}
+
+effect fn appendAsciiDomain(out: &mut Bytes, domain: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  if domain.length == 0 {
+    fail UrlError.InvalidUrl
+  }
+  let mut index: usize = 0
+  while index < domain.length {
+    if domain[index] <= 32 || domain[index] >= 127 || domain[index] == 37
+      || forbiddenHost(domain[index]) {
+      fail UrlError.InvalidUrl
+    }
+    index = index + 1
+  }
+  if endsInNumber(domain) {
+    return run appendIpv4(&mut out.*, domain)
+  }
+  index = 0
+  let mut start: usize = 0
+  while index < domain.length {
+    if lower(domain[index]) != domain[index] {
+      run append(&mut out.*, view(domain, start, index))
+      run single(&mut out.*, lower(domain[index]))
+      start = index + 1
+    }
+    index = index + 1
+  }
+  run append(&mut out.*, view(domain, start, domain.length))
+}
+
+fn ipv4Number(input: &[u8]) -> Option<u64> {
+  if input.length == 0 {
+    return Option<u64>.None
+  }
+  let mut radix: u64 = 10
+  let mut index: usize = 0
+  if input.length >= 2 && input[0] == 48 {
+    radix = 8
+    index = 1
+    if lower(input[1]) == 120 {
+      radix = 16
+      index = 2
+    }
+  }
+  let mut value: u64 = 0
+  while index < input.length {
+    let unit = usize.toU64(hex(input[index]))
+    if unit >= radix || value > (4294967295 - unit) / radix {
+      return Option<u64>.None
+    }
+    value = value * radix + unit
+    index = index + 1
+  }
+  return Option<u64>.Some { value: value }
+}
+
+fn endsInNumber(input: &[u8]) -> bool {
+  let mut end = input.length
+  if end > 0 && input[end - 1] == 46 {
+    end = end - 1
+  }
+  let mut start = end
+  while start > 0 && input[start - 1] != 46 {
+    start = start - 1
+  }
+  if start == end {
+    return false
+  }
+  let mut index = start
+  let mut digitsOnly = true
+  while index < end {
+    if !digit(input[index]) {
+      digitsOnly = false
+    }
+    index = index + 1
+  }
+  if digitsOnly {
+    return true
+  }
+
+  // This test is syntactic: an arbitrarily large hex suffix is still a number,
+  // and must be rejected by IPv4 parsing rather than accepted as a domain.
+  if end - start >= 2 && input[start] == 48 && lower(input[start + 1]) == 120 {
+    index = start + 2
+    while index < end {
+      if hex(input[index]) > 15 {
+        return false
+      }
+      index = index + 1
+    }
+    return true
+  }
+  return false
+}
+
+effect fn appendIpv4(out: &mut Bytes, input: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut end = input.length
+  if end > 0 && input[end - 1] == 46 {
+    end = end - 1
+  }
+  let mut numbers: [u64; 4] = [0, 0, 0, 0]
+  let mut count: usize = 0
+  let mut start: usize = 0
+  let mut index: usize = 0
+  while index <= end {
+    if index == end || input[index] == 46 {
+      if count == 4 {
+        fail UrlError.InvalidUrl
+      }
+      numbers[count] = match move ipv4Number(view(input, start, index)) {
+        Option<u64>.Some { value } => value
+        _ => {
+          fail UrlError.InvalidUrl
+        }
+      }
+      count = count + 1
+      start = index + 1
+    }
+    index = index + 1
+  }
+  let mut maximum: u64 = 256
+  index = count
+  while index < 4 {
+    maximum = maximum * 256
+    index = index + 1
+  }
+  if numbers[count - 1] >= maximum {
+    fail UrlError.InvalidUrl
+  }
+  let mut address = numbers[count - 1]
+  let mut factor: u64 = 16777216
+  index = 0
+  while index + 1 < count {
+    if numbers[index] > 255 {
+      fail UrlError.InvalidUrl
+    }
+    address = address + numbers[index] * factor
+    factor = factor / 256
+    index = index + 1
+  }
+  factor = 16777216
+  index = 0
+  while index < 4 {
+    if index > 0 {
+      run single(&mut out.*, 46)
+    }
+    run decimal(&mut out.*, u64.toUsize((address / factor) % 256))
+    factor = factor / 256
+    index = index + 1
+  }
+}
+
+effect fn appendIpv6(out: &mut Bytes, input: &[u8]) -> ()
+  ! UrlError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut pieces: [usize; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+  let mut count: usize = 0
+  let mut compression = ABSENT
+  let mut index: usize = 0
+  if input.length == 0 {
+    fail UrlError.InvalidUrl
+  }
+  if input[0] == 58 {
+    if input.length < 2 || input[1] != 58 {
+      fail UrlError.InvalidUrl
+    }
+    compression = 0
+    index = 2
+  }
+  while index < input.length {
+    if count == 8 {
+      fail UrlError.InvalidUrl
+    }
+    let start = index
+    let mut number: usize = 0
+    let mut length: usize = 0
+    while index < input.length && hex(input[index]) < 16 {
+      if length == 4 {
+        fail UrlError.InvalidUrl
+      }
+      number = number * 16 + hex(input[index])
+      length = length + 1
+      index = index + 1
+    }
+    if index < input.length && input[index] == 46 {
+      if count > 6 {
+        fail UrlError.InvalidUrl
+      }
+      index = start
+      let mut octets: [usize; 4] = [0, 0, 0, 0]
+      let mut octet: usize = 0
+      while octet < 4 {
+        let first = index
+        let mut value: usize = 0
+        while index < input.length && digit(input[index]) {
+          if index > first && input[first] == 48 {
+            fail UrlError.InvalidUrl
+          }
+          value = value * 10 + u8.toUsize(input[index] - 48)
+          if value > 255 {
+            fail UrlError.InvalidUrl
+          }
+          index = index + 1
+        }
+        if first == index {
+          fail UrlError.InvalidUrl
+        }
+        octets[octet] = value
+        octet = octet + 1
+        if octet < 4 {
+          if index == input.length || input[index] != 46 {
+            fail UrlError.InvalidUrl
+          }
+          index = index + 1
+        }
+      }
+      if index != input.length {
+        fail UrlError.InvalidUrl
+      }
+      pieces[count] = octets[0] * 256 + octets[1]
+      pieces[count + 1] = octets[2] * 256 + octets[3]
+      count = count + 2
+      break
+    }
+    if length == 0 {
+      fail UrlError.InvalidUrl
+    }
+    pieces[count] = number
+    count = count + 1
+    if index == input.length {
+      break
+    }
+    if input[index] != 58 {
+      fail UrlError.InvalidUrl
+    }
+    index = index + 1
+    if index == input.length {
+      fail UrlError.InvalidUrl
+    }
+    if input[index] == 58 {
+      if compression != ABSENT {
+        fail UrlError.InvalidUrl
+      }
+      compression = count
+      index = index + 1
+    }
+  }
+  if compression != ABSENT {
+    if count >= 8 {
+      fail UrlError.InvalidUrl
+    }
+    let missing = 8 - count
+    let mut cursor = count
+    while cursor > compression {
+      cursor = cursor - 1
+      pieces[cursor + missing] = pieces[cursor]
+      pieces[cursor] = 0
+    }
+  } else if count != 8 {
+    fail UrlError.InvalidUrl
+  }
+  let mut best = ABSENT
+  let mut bestLength: usize = 1
+  index = 0
+  while index < 8 {
+    if pieces[index] != 0 {
+      index = index + 1
+    } else {
+      let start = index
+      while index < 8 && pieces[index] == 0 {
+        index = index + 1
+      }
+      if index - start > bestLength {
+        best = start
+        bestLength = index - start
+      }
+    }
+  }
+  run single(&mut out.*, 91)
+  index = 0
+  while index < 8 {
+    if index == best {
+      run append(&mut out.*, b"::")
+      index = index + bestLength
+    } else {
+      if index > 0 && (best == ABSENT || index != best + bestLength) {
+        run single(&mut out.*, 58)
+      }
+      let mut value = pieces[index]
+      let digits = b"0123456789abcdef"
+      let mut buffer: [u8; 4] = [0, 0, 0, 0]
+      let mut cursor: usize = 4
+      while true {
+        cursor = cursor - 1
+        buffer[cursor] = digits[value % 16]
+        value = value / 16
+        if value == 0 {
+          break
+        }
+      }
+      run append(&mut out.*, view(&buffer, cursor, 4))
+      index = index + 1
+    }
+  }
+  run single(&mut out.*, 93)
+}

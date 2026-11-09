@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <!-- SVG2 CR2018 pservers §14.4: paint coordinates follow each retained copy. -->
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="-8" y1="0" x2="4" y2="0">
+      <stop offset=".5" stop-color="red"/><stop offset=".5" stop-color="blue"/>
+    </linearGradient>
+    <pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4" overflow="visible">
+      <rect x="-8" width="12" height="4" fill="url(#g)"/>
+    </pattern>
+  </defs>
+  <rect width="32" height="16" fill="url(#p)"/>
+</svg>

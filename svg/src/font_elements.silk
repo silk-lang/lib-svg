@@ -1,0 +1,692 @@
+//! SVG 1.1 fonts (ch. 20): each `font` element with a `font-face` child becomes a face of
+//! the family that `font-face` names, available to the document's text like an @font-face
+//! face (#FontFaceElement). The glyphs are compiled into OpenType data by
+//! `svg_fonts.opentype`.
+import silk.text.string { String }
+import svg_fonts.database { Fonts, Range, FaceStyle, Alternate }
+import svg_fonts.opentype {
+  compile,
+  Command,
+  Direction,
+  Form,
+  FontMetrics,
+  Glyph,
+  Kerning,
+  ALTERNATES
+}
+import svg_geometry.geometry { Point, Segment }
+import svg_geometry.arcs { ArcIter }
+import svg_geometry.svg
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+fn equal(left: &[u8], right: &[u8]) -> bool {
+  if left.length != right.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < left.length {
+    if left[index] != right[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn element(document: &XmlDocument, node: XmlNodeId, name: &[u8]) -> bool {
+  return XmlDocument.nodes(document)[node.index].kind == XmlNodeKind.Element
+    && equal(String.utf8Bytes(XmlDocument.localName(document, node)), name)
+    && equal(
+      String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+      b"http://www.w3.org/2000/svg",
+    )
+}
+
+fn attribute<'d>(document: &'d XmlDocument, node: XmlNodeId, name: string) -> Option<&'d [u8]> {
+  return (XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes))
+}
+
+fn number(document: &XmlDocument, node: XmlNodeId, name: string) -> Option<f64> {
+  return match attribute(document, node, name) {
+    Option<&[u8]>.Some { value } => svg.number(trim(value))
+    _ => Option<f64>.None
+  }
+}
+
+fn or(value: Option<f64>, fallback: f64) -> f64 {
+  return match value {
+    Option<f64>.Some { value: given } => given
+    _ => fallback
+  }
+}
+
+fn space(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 12
+}
+
+fn trim(bytes: &[u8]) -> &[u8] {
+  let mut start: usize = 0
+  let mut end = bytes.length
+  while start < end && space(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && space(bytes[end - 1]) {
+    end = end - 1
+  }
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+// Code points of UTF-8 `bytes`; the XML parser has checked the encoding.
+effect fn codepoints(bytes: &[u8], out: &mut List<u32>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut at: usize = 0
+  while at < bytes.length {
+    let lead = bytes[at]
+    let mut cp = u8.toU32(lead)
+    let mut length: usize = 1
+    if lead >= 0xf0 && at + 3 < bytes.length {
+      cp = (u8.toU32(lead) % 8) * 262144 + (u8.toU32(bytes[at + 1]) % 64) * 4096
+        + (u8.toU32(bytes[at + 2]) % 64) * 64
+        + u8.toU32(bytes[at + 3]) % 64
+      length = 4
+    } else if lead >= 0xe0 && at + 2 < bytes.length {
+      cp = (u8.toU32(lead) % 16) * 4096 + (u8.toU32(bytes[at + 1]) % 64) * 64
+        + u8.toU32(bytes[at + 2]) % 64
+      length = 3
+    } else if lead >= 0xc0 && at + 1 < bytes.length {
+      cp = (u8.toU32(lead) % 32) * 64 + u8.toU32(bytes[at + 1]) % 64
+      length = 2
+    }
+    run out.append(cp)
+    at = at + length
+  }
+}
+
+// --- Character sets (u1, u2, unicode-range) ------------------------------------------------
+
+struct Span {
+  low: u32,
+  high: u32,
+}
+
+impl Copy for Span {}
+
+fn hex(byte: u8) -> Option<u32> {
+  if byte >= 48 && byte <= 57 {
+    return Option<u32>.Some { value: u8.toU32(byte) - 48 }
+  }
+  if byte >= 65 && byte <= 70 {
+    return Option<u32>.Some { value: u8.toU32(byte) - 55 }
+  }
+  if byte >= 97 && byte <= 102 {
+    return Option<u32>.Some { value: u8.toU32(byte) - 87 }
+  }
+  return Option<u32>.None
+}
+
+// A <urange> (CSS 2 #descdef-unicode-range): U+XXXX, U+XXXX-YYYY, or U+XX?? with wildcards.
+fn urange(item: &[u8]) -> Option<Span> {
+  if item.length < 3 || (item[0] != 85 && item[0] != 117) || item[1] != 43 {
+    return Option<Span>.None
+  }
+  let mut low: u32 = 0
+  let mut high: u32 = 0
+  let mut at: usize = 2
+  let mut digits: usize = 0
+  while at < item.length && item[at] != 45 && digits < 6 {
+    if item[at] == 63 {
+      low = low * 16
+      high = high * 16 + 15
+    } else {
+      let digit = match hex(item[at]) {
+        Option<u32>.Some { value } => value
+        _ => {
+          return Option<Span>.None
+        }
+      }
+      low = low * 16 + digit
+      high = high * 16 + digit
+    }
+    at = at + 1
+    digits = digits + 1
+  }
+  if digits == 0 {
+    return Option<Span>.None
+  }
+  if at < item.length && item[at] == 45 {
+    at = at + 1
+    high = 0
+    let mut more: usize = 0
+    while at < item.length && more < 6 {
+      let digit = match hex(item[at]) {
+        Option<u32>.Some { value } => value
+        _ => {
+          return Option<Span>.None
+        }
+      }
+      high = high * 16 + digit
+      at = at + 1
+      more = more + 1
+    }
+    if more == 0 {
+      return Option<Span>.None
+    }
+  }
+  if at != item.length || low > high {
+    return Option<Span>.None
+  }
+  return Option<Span>.Some { value: Span { low: low, high: high } }
+}
+
+// Comma-separated characters and ranges; an item that is neither is skipped.
+effect fn characterSet(bytes: &[u8], out: &mut List<Span>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut start: usize = 0
+  while start <= bytes.length {
+    let mut end = start
+    while end < bytes.length && bytes[end] != 44 {
+      end = end + 1
+    }
+    let item = trim(Slice.view<u8>(bytes, start, end - start))
+    if let Option<Span>.Some { value } = urange(item) {
+      run out.append(value)
+    } else {
+      let mut points = List<u32>.make()
+      run codepoints(item, &mut points)
+      if points.length() == 1 {
+        let cp = points.asSlice()[0]
+        run out.append(Span { low: cp, high: cp })
+      }
+    }
+    start = end + 1
+  }
+}
+
+fn within(spans: &[Span], cp: u32) -> bool {
+  let mut k: usize = 0
+  while k < spans.length {
+    if cp >= spans[k].low && cp <= spans[k].high {
+      return true
+    }
+    k = k + 1
+  }
+  return false
+}
+
+// Whether `names`, a comma-separated list, contains `wanted`.
+fn listed(names: &[u8], wanted: &[u8]) -> bool {
+  let mut start: usize = 0
+  while start <= names.length {
+    let mut end = start
+    while end < names.length && names[end] != 44 {
+      end = end + 1
+    }
+    let item = trim(Slice.view<u8>(names, start, end - start))
+    if item.length > 0 && equal(item, wanted) {
+      return true
+    }
+    start = end + 1
+  }
+  return false
+}
+
+// --- Glyphs ---------------------------------------------------------------------------------
+
+// The glyph outline from path data, moved so the font's horizontal origin is at 0, 0.
+effect fn outline(data: &[u8], originX: f64, originY: f64, out: &mut List<Command>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let parsed = run svg.parsePath(data)
+  let segments = parsed.path.segments()
+  let mut current = Point.new(0.0, 0.0)
+  let mut start = current
+  let mut index: usize = 0
+  while index < segments.length {
+    let segment = segments[index]
+    match segment {
+      Segment.MoveTo { to } => {
+        run out.append(Command.MoveTo { x: to.x - originX, y: to.y - originY })
+        current = to
+        start = to
+      }
+      Segment.Close => {
+        run out.append(Command.Close)
+        current = start
+      }
+      Segment.ArcTo { arc } => {
+        let mut arcs = ArcIter.make(current, arc, 0.01)
+        let mut from = current
+        while let Option<Segment>.Some { value: piece } = arcs.next() {
+          from = run curve(piece, from, originX, originY, &mut out.*)
+        }
+        current = from
+      }
+      _ => {
+        current = run curve(segment, current, originX, originY, &mut out.*)
+      }
+    }
+    index = index + 1
+  }
+}
+
+// One line or curve from `from`, as a line or cubic; returns its end.
+effect fn curve(
+  segment: Segment,
+  from: Point,
+  originX: f64,
+  originY: f64,
+  out: &mut List<Command>,
+) -> Point
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  match segment {
+    Segment.LineTo { to } => {
+      run out.append(Command.LineTo { x: to.x - originX, y: to.y - originY })
+      return to
+    }
+    Segment.QuadraticTo { control, to } => {
+      // Degree elevation is exact.
+      let x1 = from.x + 2.0 / 3.0 * (control.x - from.x)
+      let y1 = from.y + 2.0 / 3.0 * (control.y - from.y)
+      let x2 = to.x + 2.0 / 3.0 * (control.x - to.x)
+      let y2 = to.y + 2.0 / 3.0 * (control.y - to.y)
+      run out.append(
+        Command.CubicTo {
+          x1: x1 - originX,
+          y1: y1 - originY,
+          x2: x2 - originX,
+          y2: y2 - originY,
+          x: to.x - originX,
+          y: to.y - originY,
+        },
+      )
+      return to
+    }
+    Segment.CubicTo { control1, control2, to } => {
+      run out.append(
+        Command.CubicTo {
+          x1: control1.x - originX,
+          y1: control1.y - originY,
+          x2: control2.x - originX,
+          y2: control2.y - originY,
+          x: to.x - originX,
+          y: to.y - originY,
+        },
+      )
+      return to
+    }
+    _ => {
+      return from
+    }
+  }
+}
+
+struct Defaults {
+  advance: f64,
+  verticalAdvance: f64,
+  verticalOrigin: f64,
+  originX: f64,
+  originY: f64,
+}
+
+effect fn glyph(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  defaults: &Defaults,
+  ranges: &[Span],
+) -> Glyph
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut unicode = List<u32>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, node, "unicode") {
+    run codepoints(value, &mut unicode)
+  }
+  let mut usable = attribute(document, node, "lang").isNone()
+  let points = unicode.asSlice()
+  let mut k: usize = 0
+  while k < points.length {
+    if !within(ranges, points[k]) {
+      usable = false
+    }
+    k = k + 1
+  }
+  let form = match attribute(document, node, "arabic-form") {
+    Option<&[u8]>.Some { value } => if equal(trim(value), b"initial") {
+      Form.Initial
+    } else if equal(trim(value), b"medial") {
+      Form.Medial
+    } else if equal(trim(value), b"terminal") {
+      Form.Terminal
+    } else if equal(trim(value), b"isolated") {
+      Form.Isolated
+    } else {
+      Form.Any
+    }
+    _ => Form.Any
+  }
+  let direction = match attribute(document, node, "orientation") {
+    Option<&[u8]>.Some { value } => if equal(trim(value), b"h") {
+      Direction.Horizontal
+    } else if equal(trim(value), b"v") {
+      Direction.Vertical
+    } else {
+      Direction.Any
+    }
+    _ => Direction.Any
+  }
+  let mut commands = List<Command>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, node, "d") {
+    run outline(value, defaults.originX, defaults.originY, &mut commands)
+  }
+  return Glyph {
+    unicode: move unicode,
+    advance: f64.max(0.0, or(number(document, node, "horiz-adv-x"), defaults.advance)),
+    verticalAdvance: or(number(document, node, "vert-adv-y"), defaults.verticalAdvance),
+    verticalOrigin: or(number(document, node, "vert-origin-y"), defaults.verticalOrigin),
+    form: form,
+    direction: direction,
+    usable: usable,
+    outline: move commands,
+  }
+}
+
+// The glyphs an hkern side names by characters (`u1`/`u2`) or glyph names (`g1`/`g2`).
+effect fn side(
+  document: &XmlDocument,
+  kern: XmlNodeId,
+  characters: string,
+  names: string,
+  nodes: &[XmlNodeId],
+  glyphs: &[Glyph],
+  out: &mut List<usize>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut set = List<Span>.make()
+  if let Option<&[u8]>.Some { value } = attribute(document, kern, characters) {
+    run characterSet(value, &mut set)
+  }
+  let wanted = match attribute(document, kern, names) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+  let mut index: usize = 0
+  while index < glyphs.length {
+    let points = List<u32>.asSlice(&glyphs[index].unicode)
+    let mut chosen = points.length == 1 && within(set.asSlice(), points[0])
+    if !chosen && wanted.length > 0 {
+      if let Option<&[u8]>.Some { value } = attribute(document, nodes[index], "glyph-name") {
+        let mut start: usize = 0
+        while start <= value.length && !chosen {
+          let mut end = start
+          while end < value.length && value[end] != 44 {
+            end = end + 1
+          }
+          let name = trim(Slice.view<u8>(value, start, end - start))
+          chosen = name.length > 0 && listed(wanted, name)
+          start = end + 1
+        }
+      }
+    }
+    if chosen {
+      run out.append(index)
+    }
+    index = index + 1
+  }
+}
+
+// --- Faces -----------------------------------------------------------------------------------
+
+// A font-family descriptor value without its quotes.
+fn familyName(value: &[u8]) -> &[u8] {
+  let name = trim(value)
+  if name.length >= 2 && (name[0] == 39 || name[0] == 34) && name[name.length - 1] == name[0] {
+    return trim(Slice.view<u8>(name, 1, name.length - 1 - 1))
+  }
+  return name
+}
+
+fn weightValue(item: &[u8]) -> Option<f64> {
+  if equal(item, b"normal") {
+    return Option<f64>.Some { value: 400.0 }
+  }
+  if equal(item, b"bold") {
+    return Option<f64>.Some { value: 700.0 }
+  }
+  return svg.number(item)
+}
+
+// `all` or a list of weights, as the range they span; absent means `all`.
+fn weights(value: Option<&[u8]>) -> Range {
+  let all = Range { min: 1.0, max: 1000.0 }
+  let bytes = match value {
+    Option<&[u8]>.Some { value: given } => trim(given)
+    _ => {
+      return all
+    }
+  }
+  let mut low = f64.INFINITY
+  let mut high = -f64.INFINITY
+  let mut start: usize = 0
+  while start <= bytes.length {
+    let mut end = start
+    while end < bytes.length && bytes[end] != 44 {
+      end = end + 1
+    }
+    let item = trim(Slice.view<u8>(bytes, start, end - start))
+    if equal(item, b"all") {
+      return all
+    }
+    if let Option<f64>.Some { value: weight } = weightValue(item) {
+      low = f64.min(low, weight)
+      high = f64.max(high, weight)
+    }
+    start = end + 1
+  }
+  if low > high {
+    return all
+  }
+  return Range { min: low, max: high }
+}
+
+// A single style keyword; `all`, lists and absence keep the face's own upright style.
+fn styleOf(value: Option<&[u8]>) -> Option<FaceStyle> {
+  if let Option<&[u8]>.Some { value: given } = value {
+    let item = trim(given)
+    if equal(item, b"italic") {
+      return Option<FaceStyle>.Some { value: FaceStyle.Italic }
+    }
+    if equal(item, b"oblique") {
+      return Option<FaceStyle>.Some { value: FaceStyle.Oblique { min: 14.0, max: 14.0 } }
+    }
+    if equal(item, b"normal") {
+      return Option<FaceStyle>.Some { value: FaceStyle.Normal }
+    }
+  }
+  return Option<FaceStyle>.None
+}
+
+effect fn addFont(fonts: &mut Fonts<'_>, document: &XmlDocument, font: XmlNodeId) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut face = Option<XmlNodeId>.None
+  let mut missing = Option<XmlNodeId>.None
+  let mut nodes = List<XmlNodeId>.make()
+  let mut kerns = List<XmlNodeId>.make()
+  let mut child = XmlDocument.firstChild(document, font)
+  while let Option<XmlNodeId>.Some { value } = child {
+    if element(document, value, b"font-face") && face.isNone() {
+      face = Option<XmlNodeId>.Some { value: value }
+    } else if element(document, value, b"missing-glyph") && missing.isNone() {
+      missing = Option<XmlNodeId>.Some { value: value }
+    } else if element(document, value, b"glyph") {
+      run nodes.append(value)
+    } else if element(document, value, b"hkern") {
+      run kerns.append(value)
+    }
+    child = XmlDocument.nextSibling(document, value)
+  }
+  let described = match face {
+    Option<XmlNodeId>.Some { value } => value
+    _ => {
+      return
+    }
+  }
+  let family = match attribute(document, described, "font-family") {
+    Option<&[u8]>.Some { value } => familyName(value)
+    _ => b""
+  }
+  if family.length == 0 {
+    return
+  }
+  let upem = or(number(document, described, "units-per-em"), 1000.0)
+  if !(upem > 0.0) {
+    return
+  }
+
+  // ascent and vert-origin-y default to each other (1.1 #FontFaceElementAscentAttribute,
+  // #FontElementVertOriginYAttribute); with neither given, the em box sits on the baseline.
+  let givenOrigin = number(document, font, "vert-origin-y")
+  let ascent = match number(document, described, "ascent") {
+    Option<f64>.Some { value } => value
+    _ => upem - or(givenOrigin, 0.0)
+  }
+  let descent = match number(document, described, "descent") {
+    Option<f64>.Some { value } => value
+    _ => or(givenOrigin, 0.0)
+  }
+  let advance = or(number(document, font, "horiz-adv-x"), 0.0)
+  let defaults = Defaults {
+    advance: advance,
+    verticalAdvance: or(number(document, font, "vert-adv-y"), upem),
+    verticalOrigin: or(givenOrigin, ascent),
+    originX: or(number(document, font, "horiz-origin-x"), 0.0),
+    originY: or(number(document, font, "horiz-origin-y"), 0.0),
+  }
+  let mut ranges = List<Span>.make()
+  match attribute(document, described, "unicode-range") {
+    Option<&[u8]>.Some { value } => run characterSet(value, &mut ranges)
+    _ => run ranges.append(Span { low: 0, high: 0x10ffff })
+  }
+  let mut glyphs = List<Glyph>.make()
+  let all = nodes.asSlice()
+  let mut index: usize = 0
+  while index < all.length {
+    run glyphs.append(run glyph(document, all[index], &defaults, ranges.asSlice()))
+    index = index + 1
+  }
+  let fallback = match missing {
+    Option<XmlNodeId>.Some { value } => run glyph(document, value, &defaults, ranges.asSlice())
+    _ => Glyph {
+      unicode: List<u32>.make(),
+      advance: advance,
+      verticalAdvance: defaults.verticalAdvance,
+      verticalOrigin: defaults.verticalOrigin,
+      form: Form.Any,
+      direction: Direction.Any,
+      usable: true,
+      outline: List<Command>.make(),
+    }
+  }
+  let mut kernings = List<Kerning>.make()
+  let pairs = kerns.asSlice()
+  index = 0
+  while index < pairs.length {
+    let mut first = List<usize>.make()
+    let mut second = List<usize>.make()
+    run side(document, pairs[index], "u1", "g1", all, glyphs.asSlice(), &mut first)
+    run side(document, pairs[index], "u2", "g2", all, glyphs.asSlice(), &mut second)
+    if let Option<f64>.Some { value } = number(document, pairs[index], "k") {
+      run kernings.append(Kerning { first: move first, second: move second, value: value })
+    }
+    index = index + 1
+  }
+  let metrics = FontMetrics {
+    unitsPerEm: upem,
+    ascent: ascent,
+    descent: descent,
+    xHeight: or(number(document, described, "x-height"), 0.0),
+    capHeight: or(number(document, described, "cap-height"), 0.0),
+    underlinePosition: or(number(document, described, "underline-position"), 0.0),
+    underlineThickness: or(number(document, described, "underline-thickness"), 0.0),
+    strikethroughPosition: or(number(document, described, "strikethrough-position"), 0.0),
+    strikethroughThickness: or(number(document, described, "strikethrough-thickness"), 0.0),
+    weight: 400.0,
+    verticalAdvance: defaults.verticalAdvance,
+    verticalOrigin: defaults.verticalOrigin,
+  }
+  let data = run compile(family, metrics, &fallback, glyphs.asSlice(), kernings.asSlice())
+  let faceIndex = fonts.faceCount()
+  let added = run fonts.local.addFace(
+    move data,
+    0,
+    family,
+    Option<Range>.Some { value: weights(attribute(document, described, "font-weight")) },
+    Option<Range>.None,
+    styleOf(attribute(document, described, "font-style")),
+  )
+  if !added {
+    return
+  }
+
+  // Each glyph's private character, unless a glyph of the font stands for that character.
+  let mut private = List<u32>.make()
+  let defined = glyphs.asSlice()
+  index = 0
+  while index < defined.length {
+    let points = List<u32>.asSlice(&defined[index].unicode)
+    if points.length == 1 && points[0] >= ALTERNATES {
+      run private.append(points[0])
+    }
+    index = index + 1
+  }
+  index = 0
+  while index < all.length && index < 0xfffe {
+    let character = ALTERNATES + usize.toU32(index)
+    if !contains(private.asSlice(), character) {
+      run fonts.alternates.append(
+        Alternate { node: all[index].index, face: faceIndex, character: character },
+      )
+    }
+    index = index + 1
+  }
+}
+
+fn contains(values: &[u32], wanted: u32) -> bool {
+  let mut k: usize = 0
+  while k < values.length {
+    if values[k] == wanted {
+      return true
+    }
+    k = k + 1
+  }
+  return false
+}
+
+/// Adds every SVG font of `document` to the document's fonts, in document order.
+pub effect fn addFontElements(fonts: &mut Fonts<'_>, document: &XmlDocument) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = XmlDocument.nodes(document).length
+  let mut index: usize = 0
+  while index < count {
+    let node = XmlNodeId { index: index }
+    if element(document, node, b"font") {
+      run addFont(&mut fonts.*, document, node)
+    }
+    index = index + 1
+  }
+}

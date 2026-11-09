@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <filter id="g" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100" ><feComponentTransfer><feFuncR type="linear" slope="0.5"/><feFuncG type="linear" slope="0.5"/><feFuncB type="linear" slope="0.5"/></feComponentTransfer></filter><rect x="10" y="10" width="40" height="30" fill="rgb(200 120 40)" stroke="rgb(20 60 200 / 0.6)" stroke-width="6" style="filter:url(#g)"/>
+</svg>

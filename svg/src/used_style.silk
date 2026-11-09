@@ -1,0 +1,269 @@
+//! Project typed computed CSS into the paint fields consumed by retained shape commands.
+import scene { BlendMode, Style, Color, Paint, FillRule, LineCap, LineJoin, RenderError }
+import svg_css.dimensions { Context }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.values { Value, ValueId, Paint as CssPaint, Fallback, PaintLayer }
+import svg_css.values
+import svg_css.properties { Property }
+import svg_css.effect_values { EffectValue }
+import svg_css.value_keywords { Keyword }
+import svg_css.colors { Color as CssColor, Identity }
+import svg_css.colors
+import svg_geometry.math
+import used_transforms
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+
+struct DashKey {
+  value: usize,
+  basis: f64,
+  index: usize
+}
+
+pub struct DashCache {
+  keys: List<DashKey>
+}
+
+impl DashCache {
+  pub fn make() -> DashCache {
+    return DashCache { keys: List<DashKey>.make() }
+  }
+}
+
+@inlineAlways
+effect fn entry(engine: &Engine<'_>, style: StyleId, property: Property) -> ValueId
+  ! RenderError {
+  return match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => value.value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn number(engine: &Engine<'_>, style: StyleId, property: Property, basis: f64) -> f64
+  ! RenderError {
+  return match &engine.number(style, property, basis) {
+    Option<f64>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+@inlineAlways
+pub effect fn keyword(engine: &Engine<'_>, style: StyleId, property: Property) -> Keyword
+  ! RenderError {
+  let id = run entry(engine, style, property)
+  return match &engine.values.get(id).* {
+    Value.Keyword { keyword: value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn blendMode(engine: &Engine<'_>, style: StyleId) -> BlendMode
+  ! RenderError {
+  return match &(run keyword(engine, style, Property.MixBlendMode)) {
+    Keyword.Normal => BlendMode.Normal
+    Keyword.Multiply => BlendMode.Multiply
+    Keyword.Screen => BlendMode.Screen
+    Keyword.Overlay => BlendMode.Overlay
+    Keyword.Darken => BlendMode.Darken
+    Keyword.Lighten => BlendMode.Lighten
+    Keyword.ColorDodge => BlendMode.ColorDodge
+    Keyword.ColorBurn => BlendMode.ColorBurn
+    Keyword.HardLight => BlendMode.HardLight
+    Keyword.SoftLight => BlendMode.SoftLight
+    Keyword.Difference => BlendMode.Difference
+    Keyword.Exclusion => BlendMode.Exclusion
+    Keyword.Hue => BlendMode.Hue
+    Keyword.Saturation => BlendMode.Saturation
+    Keyword.Color => BlendMode.Color
+    Keyword.Luminosity => BlendMode.Luminosity
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+fn color(value: CssColor) -> Color {
+  let rgba = colors.toSrgb(value)
+  return Color { r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a }
+}
+
+fn solid(value: CssColor) -> Paint {
+  return match &value.identity {
+    Identity.CurrentColor => Paint.CurrentColor
+    _ => Paint.Solid { color: color(value) }
+  }
+}
+
+effect fn paintOrder(engine: &Engine<'_>, style: StyleId) -> [PaintLayer; 3]
+  ! RenderError {
+  let id = run entry(engine, style, Property.PaintOrder)
+  return match &engine.values.get(id).* {
+    Value.PaintOrder { order } => order
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn paint(engine: &Engine<'_>, style: StyleId, property: Property) -> Paint
+  ! RenderError {
+  let id = run entry(engine, style, property)
+  return match &engine.values.get(id).* {
+    Value.Paint { paint: value } => match &value {
+      CssPaint.None => Paint.None
+      CssPaint.Color { color: absolute } => solid(absolute)
+      CssPaint.IccColor { color: absolute, icc } => solid(absolute)
+      CssPaint.Server { url, fallback } => match &fallback {
+        Fallback.Color { color: absolute } => solid(absolute)
+        Fallback.IccColor { color: absolute, icc } => solid(absolute)
+        _ => Paint.None
+      }
+
+      CssPaint.ContextFill => Paint.ContextFill
+      CssPaint.ContextStroke => Paint.ContextStroke
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+effect fn dashIndex(
+  engine: &Engine<'_>,
+  style: StyleId,
+  basis: f64,
+  cache: &mut DashCache,
+  pool: &mut List<List<f64>>,
+) -> usize
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let id = run entry(engine, style, Property.StrokeDasharray)
+  let mut i: usize = 0
+  while i < cache.keys.length() {
+    let key = &cache.keys.asSlice()[i]
+    if key.value == id.index && key.basis == basis {
+      return key.index
+    }
+    i = i + 1
+  }
+  let count = values.dashCount(&engine.values, id)
+  let mut dashes = run List<f64>.makeWithCapacity(count)
+  let mut nonzero = false
+  i = 0
+  while i < count {
+    let value = match &values.usedDash(&engine.values, id, i, basis) {
+      Option<f64>.Some { value } => value
+      _ => {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    if value > 0.0 {
+      nonzero = true
+    }
+    run dashes.append(value)
+    i = i + 1
+  }
+  let mut index: usize = 0
+  if nonzero {
+    index = pool.length()
+    run pool.append(move dashes)
+  }
+  run cache.keys.append(DashKey { value: id.index, basis: basis, index: index })
+  return index
+}
+
+// A non-none computed clip creates a stacking context even for an invalid URL.
+// https://www.w3.org/TR/css-masking-1/#the-clip-path
+fn clips(engine: &Engine<'_>, style: StyleId) -> bool {
+  return match &engine.get(style, Property.ClipPath) {
+    Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
+      Value.Effect { value } => match &value {
+        EffectValue.ClipPath { source } => true
+        _ => false
+      }
+      _ => false
+    }
+    _ => false
+  }
+}
+
+pub effect fn project(
+  engine: &Engine<'_>,
+  style: StyleId,
+  width: f64,
+  height: f64,
+  cache: &mut DashCache,
+  dashes: &mut List<List<f64>>,
+) -> Style
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let basis = math.hypot(width, height) / 1.4142135623730951
+  let colorId = run entry(engine, style, Property.Color)
+  let foreground = match &engine.values.get(colorId).* {
+    Value.Color { color: value } => color(value)
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let cap = run keyword(engine, style, Property.StrokeLinecap)
+  let join = run keyword(engine, style, Property.StrokeLinejoin)
+  let hint = run keyword(engine, style, Property.ShapeRendering)
+  let fontSize = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value.fontSize
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return Style {
+    color: foreground,
+    fill: run paint(engine, style, Property.Fill),
+    stroke: run paint(engine, style, Property.Stroke),
+    fillOpacity: run number(engine, style, Property.FillOpacity, 1.0),
+    strokeOpacity: run number(engine, style, Property.StrokeOpacity, 1.0),
+    opacity: run number(engine, style, Property.Opacity, 1.0),
+    blendMode: run blendMode(engine, style),
+    isolated: (run keyword(engine, style, Property.Isolation)) == Keyword.Isolate
+      || used_transforms.isolates(engine, style)
+      || clips(engine, style),
+    strokeWidth: run number(engine, style, Property.StrokeWidth, basis),
+    miterLimit: run number(engine, style, Property.StrokeMiterlimit, 1.0),
+    lineCap: if cap == Keyword.Round {
+      LineCap.Round
+    } else if cap == Keyword.Square {
+      LineCap.Square
+    } else {
+      LineCap.Butt
+    },
+    lineJoin: if join == Keyword.Round {
+      LineJoin.Round
+    } else if join == Keyword.Bevel {
+      LineJoin.Bevel
+    } else if join == Keyword.MiterClip {
+      LineJoin.MiterClip
+    } else if join == Keyword.Arcs {
+      LineJoin.Arcs
+    } else {
+      LineJoin.Miter
+    },
+    fillRule: if (run keyword(engine, style, Property.FillRule)) == Keyword.Evenodd {
+      FillRule.EvenOdd
+    } else {
+      FillRule.Nonzero
+    },
+    dashIndex: run dashIndex(engine, style, basis, &mut cache.*, &mut dashes.*),
+    dashOffset: run number(engine, style, Property.StrokeDashoffset, basis),
+    fontSize: fontSize,
+    visible: (run keyword(engine, style, Property.Visibility)) == Keyword.Visible,
+    displayed: (run keyword(engine, style, Property.Display)) != Keyword.None,
+    crispEdges: hint == Keyword.CrispEdges || hint == Keyword.OptimizeSpeed,
+    linearRgb: (run keyword(engine, style, Property.ColorInterpolation)) == Keyword.LinearRGB,
+    paintOrder: run paintOrder(engine, style),
+  }
+}

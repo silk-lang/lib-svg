@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="28">
+<defs><hatch id="h" pitch="0.25" x="0.05">
+  <hatchpath offset="3" stroke="#a020a0" stroke-width="2"/>
+</hatch></defs>
+<rect x="0" y="4" width="40" height="20" fill="url(#h)"/>
+</svg>

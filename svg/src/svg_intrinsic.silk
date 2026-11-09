@@ -1,0 +1,74 @@
+//! SVG2 #IntrinsicSizing: computed definite root dimensions precede the viewBox ratio.
+pub import used_images { NaturalSize }
+import svg_css.values { Store, Value, ValueId }
+import svg_css.values
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.properties { Property }
+import svg_css.dimensions
+import svg_geometry.geometry { Rect, isValidRect }
+import silk.core.option { Option }
+import silk.num.f64
+
+/// A computed length supplies an intrinsic dimension only without percentages.
+/// Zero remains a definite dimension; it disables the image at used sizing time.
+pub fn dimension(store: &Store<'_>, value: ValueId) -> Option<f64> {
+  match &store.get(value).* {
+    Value.Numeric { expression, range: _, basis: _ } => {
+      if dimensions.containsPercentage(&store.numerics, expression) {
+        return Option<f64>.None
+      }
+    }
+    _ => {
+      return Option<f64>.None
+    }
+  }
+  return match &values.usedNumber(store, value, 0.0) {
+    Option<f64>.Some { value: number } => if f64.isFinite(number) && number >= 0.0 {
+      Option<f64>.some(number)
+    } else {
+      Option<f64>.None
+    }
+    _ => Option<f64>.None
+  }
+}
+
+fn property(engine: &Engine<'_>, style: StyleId, name: Property) -> Option<f64> {
+  return match &engine.get(style, name) {
+    Option<ComputedValue>.Some { value } => dimension(&engine.values, value.value)
+    _ => Option<f64>.None
+  }
+}
+
+/// The caller supplies the selected SVG View's viewBox, or the root viewBox when
+/// no view overrides it. Definite width and height take precedence over both.
+pub fn natural(width: Option<f64>, height: Option<f64>, box: Option<Rect>) -> NaturalSize {
+  if let Option<f64>.Some { value: w } = &width {
+    if let Option<f64>.Some { value: h } = &height {
+      let ratio = if w > 0.0 && h > 0.0 && f64.isFinite(w / h) {
+        Option<f64>.some(w / h)
+      } else {
+        Option<f64>.None
+      }
+      return NaturalSize { width: width, height: height, ratio: ratio }
+    }
+  }
+  let ratio = match &box {
+    Option<Rect>.Some { value } => if isValidRect(value) && value.width() > 0.0
+      && value.height() > 0.0
+      && f64.isFinite(value.width() / value.height()) {
+      Option<f64>.some(value.width() / value.height())
+    } else {
+      Option<f64>.None
+    }
+    _ => Option<f64>.None
+  }
+  return NaturalSize { width: width, height: height, ratio: ratio }
+}
+
+pub fn measure(engine: &Engine<'_>, style: StyleId, box: Option<Rect>) -> NaturalSize {
+  return natural(
+    property(engine, style, Property.Width),
+    property(engine, style, Property.Height),
+    box,
+  )
+}

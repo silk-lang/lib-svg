@@ -1,0 +1,577 @@
+//! Used viewport values; pinned SVG2 and additive SVG1.1 anchors precede each case.
+import silk.text.string { String }
+import used_viewports { Viewport, Metadata, Clip }
+import used_viewports
+import document_styles { StyledDocument }
+import document_styles
+import stylesheets { Catalog }
+import resources { Resolver, DataOnly, Limits as ResourceLimits }
+import url { Url, UrlError }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlError }
+import svg_css.computed { HostContext, StyleId, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue }
+import svg_css.media_features { Environment }
+import svg_geometry.geometry { Rect, Transform, isEmptyRect }
+import silk.core.option { Option }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn fixture(document: &XmlDocument) -> StyledDocument<'_>
+  ! CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = run Catalog.make()
+  let tokens = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(999.0, 777.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  return run document_styles.build(
+    document,
+    move catalog,
+    &host,
+    &Environment.headless(999.0, 777.0),
+    run Url.parseAbsolute(b"https://example.test/viewports.svg"),
+    &Limits.make(),
+  )
+}
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+  return Rect { xMin: x, yMin: y, xMax: x + w, yMax: y + h }
+}
+
+fn same(a: Rect, b: Rect) -> bool {
+  return a.xMin == b.xMin && a.yMin == b.yMin && a.xMax == b.xMax && a.yMax == b.yMax
+}
+
+effect fn selected(data: &[u8], instance: bool) -> Viewport
+  ! XmlError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  return run selectedIn(data, instance, rect(30.0, 40.0, 200.0, 100.0))
+}
+
+effect fn selectedIn(data: &[u8], instance: bool, parent: Rect) -> Viewport
+  ! XmlError | CssError | UrlError | ComputedError | RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let document = run XmlDocument.parse(data)
+  let mut styled = run fixture(&document)
+  let mut node = XmlNodeId { index: 0 }
+  let mut host = Option<StyleId>.None
+  let mut i: usize = 0
+  while i < XmlDocument.nodes(&document).length {
+    let candidate = XmlNodeId { index: i }
+    match &(XmlDocument.attribute(&document, candidate, "", "id")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => {
+        if equal(value, b"target") {
+          node = candidate
+        }
+        if instance && equal(value, b"host") {
+          host = styled.nodeStyle(candidate)
+        }
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  let style = match &styled.nodeStyle(node) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let metadata = match &run used_viewports.parseMetadata(
+    &document,
+    node,
+    &mut styled.catalog.engine.values.numerics,
+    &Limits.make(),
+  ) {
+    Option<Metadata>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return run used_viewports.nested(&metadata, &mut styled.catalog.engine, style, parent, host)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#EstablishingANewSVGViewport
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ComputingAViewportsTransform
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#AutoClipAtViewportNotViewBox
+test effect fn percentagesUseNearestViewportAndClipPhysicalRegion() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let v = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' x='999' width='999' viewBox='10 20 40 20' style='x:25%;y:10%;width:50%;height:50%;overflow:hidden'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    same(v.user, rect(10.0, 20.0, 40.0, 20.0)),
+    "viewBox remains the child percentage reference extent",
+  )
+  run Testing.expect(
+    v.mapping.xx == 2.5 && v.mapping.yy == 2.5 && v.mapping.dx == 25.0 && v.mapping.dy == -40.0,
+    "computed CSS, not XML dimensions or initial host metrics",
+  )
+  run Testing.expect(
+    match &v.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(50.0, 10.0, 100.0, 50.0))
+      _ => false
+    },
+    "clip is physical viewport before CSS transform",
+  )
+  let meet = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' width='100' height='50' viewBox='10 20 40 40' preserveAspectRatio='xMaxYMin meet' style='overflow:hidden;transform:rotate(45deg)'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    meet.mapping.xx == 1.25 && meet.mapping.dx == 37.5 && meet.mapping.dy == -25.0,
+    "shared typed PAR aligns the viewBox independently of CSS transforms",
+  )
+  run Testing.expect(
+    match &meet.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(0.0, 0.0, 100.0, 50.0))
+      _ => false
+    },
+    "meet letterboxing never shrinks the physical clip to the viewBox",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseLayout
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/geometry.html#Sizing
+test effect fn instanceOverridesAndAutoAreUsedValuesOnly() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let data = b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host' style='width:75%;height:auto'/><svg id='target' style='width:40px;height:30px'/></svg>"
+  let v = run selected(data, true)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let ordinary = run selected(data, false)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let auto = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' viewBox='5 6 10 20'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    v.physical.width() == 150.0 && v.physical.height() == 30.0 && ordinary.physical.width() == 40.0,
+    "only direct instance root receives non-auto host override",
+  )
+  run Testing.expect(
+    auto.physical.width() == 200.0 && auto.physical.height() == 100.0,
+    "nested auto dimensions are 100%, not intrinsic viewBox ratio",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SymbolElementRefXAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SymbolElementRefYAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#MarkerElementRefXAttribute
+test effect fn symbolMissingReferenceDiffersFromZeroAndKeywordsUsePercentages() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let missing = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host'/><symbol id='target' viewBox='10 20 40 20' style='width:80px;height:40px;overflow:hidden'/></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let zero = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host'/><symbol id='target' refX='0' refY='0' viewBox='10 20 40 20' style='width:80px;height:40px;overflow:hidden'/></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let keyword = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host'/><symbol id='target' refX='center' refY='bottom' viewBox='10 20 40 20' style='width:80px;height:40px'/></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let percent = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host'/><symbol id='target' refX='50%' refY='100%' viewBox='10 20 40 20' style='width:80px;height:40px'/></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let length = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host'/><symbol id='target' refX='calc(1em + 4px)' refY='1in' viewBox='10 20 40 20' style='font-size:16px;width:80px;height:40px'/></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    missing.mapping.dx == -20.0 && missing.mapping.dy == -40.0 && zero.mapping.dx == 0.0
+      && zero.mapping.dy == 0.0,
+    "missing reference preserves viewport origin, explicit zero anchors content origin",
+  )
+  run Testing.expect(
+    same(zero.physical, rect(20.0, 40.0, 80.0, 40.0)),
+    "reference shift moves physical clip with symbol viewport",
+  )
+  run Testing.expect(
+    keyword.mapping.dx == -40.0 && keyword.mapping.dy == -40.0
+      && keyword.mapping.dx == percent.mapping.dx
+      && keyword.mapping.dy == percent.mapping.dy,
+    "keywords mean percentages of extents without adding viewBox minima",
+  )
+  run Testing.expect(
+    length.mapping.dx == -40.0 && length.mapping.dy == -192.0,
+    "reference lengths use computed font metrics and CSS absolute units",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty
+test effect fn overflowAndLegacyClipPreserveEmptyVersusAbsent() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let visible = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow:visible'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let auto = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow:auto'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let scroll = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow:scroll'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let clipped = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' x='10' y='20' width='100' height='50' viewBox='0 0 50 25' style='overflow:visible;clip:rect(2px,20px,10px,3px)'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let empty = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow:visible;clip:rect(20px,10px,10px,20px)'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &visible.clip {
+      Option<Clip>.None => true
+      _ => false
+    }
+      && match &auto.clip {
+        Option<Clip>.None => true
+        _ => false
+      },
+    "visible and non-scrolling auto have no overflow clip",
+  )
+  run Testing.expect(
+    match &scroll.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(0.0, 0.0, 200.0, 100.0))
+      _ => false
+    },
+    "scroll clips even without scrolling UI",
+  )
+  run Testing.expect(
+    match &clipped.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(16.0, 24.0, 34.0, 16.0))
+      _ => false
+    },
+    "legacy clip uses child user coordinates mapped to parent",
+  )
+  run Testing.expect(
+    match &empty.clip {
+      Option<Clip>.Some { value } => value.x && value.y && isEmptyRect(value.rectangle)
+      _ => false
+    },
+    "reversed legacy clip is explicitly empty, not absent",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/render.html#OverflowAndClipProperties
+// https://www.w3.org/TR/2011/REC-SVG11-20110816/masking.html#ClipProperty
+// Consume Engine's computed longhands, including its visible -> auto coupling.
+// SVG's non-scrolling auto rule still leaves that axis unconstrained.
+test effect fn asymmetricOverflowPreservesUnboundedAxisAndIntersectsLegacyClipPerAxis() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let horizontal = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow-x:hidden;overflow-y:visible'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let vertical = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow-x:auto;overflow-y:scroll'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let horizontalLegacy = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow-x:hidden;overflow-y:visible;clip:rect(-10px,250px,150px,-20px)'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let verticalLegacy = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' style='overflow-x:auto;overflow-y:scroll;clip:rect(-10px,250px,150px,-20px)'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let empty = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' width='0' style='overflow-x:hidden;overflow-y:visible'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &horizontal.clip {
+      Option<Clip>.Some { value } => value.x && !value.y
+        && same(value.rectangle, rect(0.0, 0.0, 200.0, 100.0))
+      _ => false
+    },
+    "hidden/visible computed axes constrain only x",
+  )
+  run Testing.expect(
+    match &vertical.clip {
+      Option<Clip>.Some { value } => !value.x && value.y
+        && same(value.rectangle, rect(0.0, 0.0, 200.0, 100.0))
+      _ => false
+    },
+    "auto/scroll constrains only y without a scrolling mechanism",
+  )
+  run Testing.expect(
+    match &horizontalLegacy.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(0.0, -10.0, 200.0, 160.0))
+      _ => false
+    },
+    "legacy clip constrains both axes but physical overflow intersects only x",
+  )
+  run Testing.expect(
+    match &verticalLegacy.clip {
+      Option<Clip>.Some { value } => value.x && value.y
+        && same(value.rectangle, rect(-20.0, 0.0, 270.0, 100.0))
+      _ => false
+    },
+    "legacy clip retains x outside physical bounds when only y overflows",
+  )
+  run Testing.expect(
+    match &empty.clip {
+      Option<Clip>.Some { value } => value.x && !value.y && value.rectangle.width() == 0.0
+      _ => false
+    },
+    "zero-width axis clip is explicit rather than absent",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ViewBoxAttribute
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/geometry.html#Sizing
+test effect fn zeroDisablesAndNegativeDimensionsAreUnspecified() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let zero = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' width='0'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let boxZero = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' viewBox='10 20 0 30'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let negative = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><svg id='target' width='-5' viewBox='10 20 -5 30'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    zero.disabled && boxZero.disabled && !negative.disabled && negative.user.width() == 200.0,
+    "zero suppresses rendering; invalid negative declarations and viewBox do not",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#EstablishingANewSVGViewport
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/geometry.html#Sizing
+test effect fn foreignObjectCreatesContainingBlockNotSvgViewport() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let foreign = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><use id='host' width='999'/><foreignObject id='target' viewBox='1 2 3 4' style='x:10%;y:20%;width:50%;height:25%;overflow:hidden'><svg/></foreignObject></svg>",
+    true,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let auto = run selected(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><foreignObject id='target'/></svg>",
+    false,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let child = run selectedIn(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><foreignObject><svg id='target' style='width:50%;height:100%'/></foreignObject></svg>",
+    false,
+    foreign.user,
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    child.establishesSvgViewport && child.user.width() == 50.0 && child.user.height() == 25.0,
+    "nested svg starts a new fragment sized against foreignObject containing block",
+  )
+  run Testing.expect(
+    !foreign.establishesSvgViewport && same(foreign.user, rect(0.0, 0.0, 100.0, 25.0))
+      && foreign.mapping.dx == 20.0
+      && foreign.mapping.dy == 20.0,
+    "foreignObject geometry creates local containing block and ignores use size override/viewBox",
+  )
+  run Testing.expect(auto.disabled, "foreignObject auto dimensions are zero, not shrink-to-fit")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseLayout
+test effect fn useSupplementalTranslationIsRightOfCssTransform() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  run supplemental()
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn supplemental() -> ()
+  ! XmlError
+    | CssError
+    | UrlError
+    | ComputedError
+    | RenderError
+    | OutOfMemoryError
+    | AssertionError<'static>
+  ? &mut Resolver | &mut Allocator {
+  let document = run XmlDocument.parse(
+    b"<svg xmlns='http://www.w3.org/2000/svg' style='x:25%;y:50%'/>",
+  )
+  let styled = run fixture(&document)
+  let mut i: usize = 0
+  while i < XmlDocument.nodes(&document).length {
+    let node = XmlNodeId { index: i }
+    match &styled.nodeStyle(node) {
+      Option<StyleId>.Some { value } => {
+        let translation = run used_viewports.useTranslation(
+          &styled.catalog.engine,
+          value,
+          rect(30.0, 40.0, 200.0, 100.0),
+        )
+        let full = Transform.scale(2.0, 3.0) * translation
+        run Testing.expect(
+          full.dx == 100.0 && full.dy == 150.0,
+          "use supplemental translation is in local user space, appended right",
+        )
+        return
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  fail RenderError.InvalidGeometry
+}

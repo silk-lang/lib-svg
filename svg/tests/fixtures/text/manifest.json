@@ -1,0 +1,1267 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "shaped-run",
+      "input": "inputs/shaped-run.svg",
+      "references": [
+        {
+          "path": "references/shaped-run.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A run is shaped (kerned) and placed from the text position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "tspan-fill",
+      "input": "inputs/tspan-fill.svg",
+      "references": [
+        {
+          "path": "references/tspan-fill.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A tspan's characters use its own fill and continue the text position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextElement",
+      "tolerance": {}
+    },
+    {
+      "id": "white-space-collapse",
+      "input": "inputs/white-space-collapse.svg",
+      "references": [
+        {
+          "path": "references/white-space-collapse.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Collapsible spaces and segment breaks collapse to one space; line-start and line-end spaces are removed.",
+      "spec": "https://www.w3.org/TR/css-text-4/#white-space-phase-1",
+      "tolerance": {}
+    },
+    {
+      "id": "xml-space-preserve",
+      "input": "inputs/xml-space-preserve.svg",
+      "references": [
+        {
+          "path": "references/xml-space-preserve.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xml:space=preserve maps to white-space-collapse: preserve-spaces.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#WhiteSpace",
+      "tolerance": {}
+    },
+    {
+      "id": "position-lists",
+      "input": "inputs/position-lists.svg",
+      "references": [
+        {
+          "path": "references/position-lists.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "x and y lists position each addressable character; dx and dy shift from there.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "position-nested",
+      "input": "inputs/position-nested.svg",
+      "references": [
+        {
+          "path": "references/position-nested.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A tspan's values replace the text element's for its characters; the text's later values still apply.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "display-none-unaddressable",
+      "input": "inputs/display-none-unaddressable.svg",
+      "references": [
+        {
+          "path": "references/display-none-unaddressable.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Characters in a display:none tspan are not addressable, so the x list skips them.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TermAddressableCharacter",
+      "tolerance": {}
+    },
+    {
+      "id": "anchor-middle",
+      "input": "inputs/anchor-middle.svg",
+      "references": [
+        {
+          "path": "references/anchor-middle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "text-anchor: middle centers the chunk's advance on its start position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextAnchoringProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "anchor-end",
+      "input": "inputs/anchor-end.svg",
+      "references": [
+        {
+          "path": "references/anchor-end.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "text-anchor: end ends the chunk's advance on its start position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextAnchoringProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "combining-mark",
+      "input": "inputs/combining-mark.svg",
+      "references": [
+        {
+          "path": "references/combining-mark.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A combining mark is positioned by GPOS mark attachment relative to its base.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "family-fallback",
+      "input": "inputs/family-fallback.svg",
+      "references": [
+        {
+          "path": "references/family-fallback.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A character the first family lacks comes from the next family in the list.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#cluster-matching",
+      "tolerance": {}
+    },
+    {
+      "id": "unknown-child-span",
+      "input": "inputs/unknown-child-span.svg",
+      "references": [
+        {
+          "path": "references/unknown-child-span.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An unknown element's text renders as a span; a rect child of text renders nothing.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextElement",
+      "tolerance": {}
+    },
+    {
+      "id": "bounding-box-cells",
+      "input": "inputs/bounding-box-cells.svg",
+      "references": [
+        {
+          "path": "references/bounding-box-cells.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An objectBoundingBox gradient on text spans the glyph cells, not the outlines.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextBoundingBox",
+      "tolerance": {}
+    },
+    {
+      "id": "letter-spacing",
+      "input": "inputs/letter-spacing.svg",
+      "references": [
+        {
+          "path": "references/letter-spacing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Letter spacing adds half its amount on each side of each typographic character, none at the line start or end.",
+      "spec": "https://www.w3.org/TR/css-text-3/#letter-spacing-property",
+      "tolerance": {}
+    },
+    {
+      "id": "word-spacing",
+      "input": "inputs/word-spacing.svg",
+      "references": [
+        {
+          "path": "references/word-spacing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Word spacing adds to the advance of each word separator.",
+      "spec": "https://www.w3.org/TR/css-text-3/#word-spacing-property",
+      "tolerance": {}
+    },
+    {
+      "id": "text-length-spacing",
+      "input": "inputs/text-length-spacing.svg",
+      "references": [
+        {
+          "path": "references/text-length-spacing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "textLength with lengthAdjust=spacing spreads the difference between typographic characters.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextElementTextLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-length-glyphs",
+      "input": "inputs/text-length-glyphs.svg",
+      "references": [
+        {
+          "path": "references/text-length-glyphs.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "textLength with lengthAdjust=spacingAndGlyphs stretches positions and glyphs horizontally.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextElementTextLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "dominant-baseline-central",
+      "input": "inputs/dominant-baseline-central.svg",
+      "references": [
+        {
+          "path": "references/dominant-baseline-central.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "dominant-baseline: central puts that baseline on the text position.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#dominant-baseline-property",
+      "tolerance": {}
+    },
+    {
+      "id": "dominant-baseline-middle",
+      "input": "inputs/dominant-baseline-middle.svg",
+      "references": [
+        {
+          "path": "references/dominant-baseline-middle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "dominant-baseline: middle puts that baseline on the text position.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#dominant-baseline-property",
+      "tolerance": {}
+    },
+    {
+      "id": "dominant-baseline-hanging",
+      "input": "inputs/dominant-baseline-hanging.svg",
+      "references": [
+        {
+          "path": "references/dominant-baseline-hanging.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "dominant-baseline: hanging puts that baseline on the text position.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#dominant-baseline-property",
+      "tolerance": {}
+    },
+    {
+      "id": "dominant-baseline-text-top",
+      "input": "inputs/dominant-baseline-text-top.svg",
+      "references": [
+        {
+          "path": "references/dominant-baseline-text-top.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "dominant-baseline: text-top puts that baseline on the text position.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#dominant-baseline-property",
+      "tolerance": {}
+    },
+    {
+      "id": "baseline-shift-super",
+      "input": "inputs/baseline-shift-super.svg",
+      "references": [
+        {
+          "path": "references/baseline-shift-super.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "baseline-shift: super moves the tspan's baseline from its parent's by the parent font's OS/2 offset.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#baseline-shift-property",
+      "tolerance": {}
+    },
+    {
+      "id": "baseline-shift-sub",
+      "input": "inputs/baseline-shift-sub.svg",
+      "references": [
+        {
+          "path": "references/baseline-shift-sub.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "baseline-shift: sub moves the tspan's baseline from its parent's by the parent font's OS/2 offset.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#baseline-shift-property",
+      "tolerance": {}
+    },
+    {
+      "id": "baseline-shift-length",
+      "input": "inputs/baseline-shift-length.svg",
+      "references": [
+        {
+          "path": "references/baseline-shift-length.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "baseline-shift: 12 moves the tspan's baseline from its parent's; positive lengths raise.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#baseline-shift-property",
+      "tolerance": {}
+    },
+    {
+      "id": "dominant-baseline-nested",
+      "input": "inputs/dominant-baseline-nested.svg",
+      "references": [
+        {
+          "path": "references/dominant-baseline-nested.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A child aligns its baseline of the parent's dominant type with the parent's, using its own font size.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#baseline-alignment",
+      "tolerance": {}
+    },
+    {
+      "id": "alignment-baseline-central",
+      "input": "inputs/alignment-baseline-central.svg",
+      "references": [
+        {
+          "path": "references/alignment-baseline-central.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "alignment-baseline: central aligns the child's central baseline with the parent's.",
+      "spec": "https://www.w3.org/TR/css-inline-3/#alignment-baseline-property",
+      "tolerance": {}
+    },
+    {
+      "id": "direction-rtl",
+      "input": "inputs/direction-rtl.svg",
+      "references": [
+        {
+          "path": "references/direction-rtl.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With direction: rtl, Arabic is shaped right to left and text-anchor: start puts the right end on the text position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#DirectionProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "direction-rtl-anchor-end",
+      "input": "inputs/direction-rtl-anchor-end.svg",
+      "references": [
+        {
+          "path": "references/direction-rtl-anchor-end.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With direction: rtl, text-anchor: end puts the left end on the text position.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextAnchoringProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "text-length-rtl",
+      "input": "inputs/text-length-rtl.svg",
+      "references": [
+        {
+          "path": "references/text-length-rtl.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "In right-to-left text, textLength spacing moves each later typographic character left.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextElementTextLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "bidi-mixed",
+      "input": "inputs/bidi-mixed.svg",
+      "references": [
+        {
+          "path": "references/bidi-mixed.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "In a left-to-right paragraph, an Arabic word between Latin words is reordered as one right-to-left run.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutIntroduction",
+      "tolerance": {}
+    },
+    {
+      "id": "unicode-bidi-override",
+      "input": "inputs/unicode-bidi-override.svg",
+      "references": [
+        {
+          "path": "references/unicode-bidi-override.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "unicode-bidi: bidi-override with direction: rtl lays the tspan's characters out right to left.",
+      "spec": "https://www.w3.org/TR/css-writing-modes-3/#unicode-bidi",
+      "tolerance": {}
+    },
+    {
+      "id": "synthetic-bold",
+      "input": "inputs/synthetic-bold.svg",
+      "references": [
+        {
+          "path": "references/synthetic-bold.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A bold request matched to a lighter face is emboldened (outlines offset by 1/24 em, advances widened).",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-synthesis-weight",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-lines",
+      "input": "inputs/text-path-lines.svg",
+      "references": [
+        {
+          "path": "references/text-path-lines.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each typographic character's midpoint is placed along the referenced path and the glyph turns to the tangent there.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-attribute-offset",
+      "input": "inputs/text-path-attribute-offset.svg",
+      "references": [
+        {
+          "path": "references/text-path-attribute-offset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The path attribute supplies the path; startOffset moves the start along it.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElementPathAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-percent-middle",
+      "input": "inputs/text-path-percent-middle.svg",
+      "references": [
+        {
+          "path": "references/text-path-percent-middle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A percentage startOffset is a fraction of the path length; text-anchor: middle centers the text there.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElementStartOffsetAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-overflow",
+      "input": "inputs/text-path-overflow.svg",
+      "references": [
+        {
+          "path": "references/text-path-overflow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Characters whose midpoints fall past the end of an open path are not rendered.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-after",
+      "input": "inputs/text-path-after.svg",
+      "references": [
+        {
+          "path": "references/text-path-after.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Characters after a textPath continue from the end of the path.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-side-right",
+      "input": "inputs/text-path-side-right.svg",
+      "references": [
+        {
+          "path": "references/text-path-side-right.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "side=right reverses the path, putting the text on its other side.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElementSideAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-transform",
+      "input": "inputs/text-path-transform.svg",
+      "references": [
+        {
+          "path": "references/text-path-transform.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The referenced element's transform applies as a supplemental transformation in the text's user space.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElement",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-closed-wrap",
+      "input": "inputs/text-path-closed-wrap.svg",
+      "references": [
+        {
+          "path": "references/text-path-closed-wrap.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "On a single closed subpath, text continues past the end onto the start of the path, for one circuit.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElementStartOffsetAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-path-invalid-href",
+      "input": "inputs/text-path-invalid-href.svg",
+      "references": [
+        {
+          "path": "references/text-path-invalid-href.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A textPath whose href names no path or basic shape renders none of its content.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#TextPathElementHrefAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "text-clip-path",
+      "input": "inputs/text-clip-path.svg",
+      "references": [
+        {
+          "path": "references/text-clip-path.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A text element and its tspans inside clipPath contribute their glyph outlines to the clipping path.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#ClipPathElement",
+      "tolerance": {}
+    },
+    {
+      "id": "text-decoration-underline-overline",
+      "input": "inputs/text-decoration-underline-overline.svg",
+      "references": [
+        {
+          "path": "references/text-decoration-underline-overline.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Underline and overline use the font's post underline and ascent and paint beneath the glyphs.",
+      "spec": "https://www.w3.org/TR/css-text-decor-3/#line-decoration",
+      "tolerance": {}
+    },
+    {
+      "id": "text-decoration-line-through-descendants",
+      "input": "inputs/text-decoration-line-through-descendants.svg",
+      "references": [
+        {
+          "path": "references/text-decoration-line-through-descendants.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A line-through spans descendants' glyphs in the decorating element's paint, above all of its content.",
+      "spec": "https://www.w3.org/TR/css-text-decor-3/#painting-order",
+      "tolerance": {}
+    },
+    {
+      "id": "text-decoration-tspan",
+      "input": "inputs/text-decoration-tspan.svg",
+      "references": [
+        {
+          "path": "references/text-decoration-tspan.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A tspan's own underline covers only its characters and uses its own fill.",
+      "spec": "https://www.w3.org/TR/css-text-decor-3/#line-decoration",
+      "tolerance": {}
+    },
+    {
+      "id": "font-kerning-none",
+      "input": "inputs/font-kerning-none.svg",
+      "references": [
+        {
+          "path": "references/font-kerning-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-kerning: none turns the kern feature off.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-variant-caps-small-caps",
+      "input": "inputs/font-variant-caps-small-caps.svg",
+      "references": [
+        {
+          "path": "references/font-variant-caps-small-caps.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-variant-caps: small-caps enables smcp.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-variant-numeric-oldstyle",
+      "input": "inputs/font-variant-numeric-oldstyle.svg",
+      "references": [
+        {
+          "path": "references/font-variant-numeric-oldstyle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-variant-numeric: oldstyle-nums enables onum.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-variant-shorthand",
+      "input": "inputs/font-variant-shorthand.svg",
+      "references": [
+        {
+          "path": "references/font-variant-shorthand.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The font-variant shorthand sets its longhands' features.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-feature-settings",
+      "input": "inputs/font-feature-settings.svg",
+      "references": [
+        {
+          "path": "references/font-feature-settings.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-feature-settings enables and disables features by tag.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-feature-settings-precedence",
+      "input": "inputs/font-feature-settings-precedence.svg",
+      "references": [
+        {
+          "path": "references/font-feature-settings-precedence.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-feature-settings comes after font-variant-* and overrides it.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "kerning-length",
+      "input": "inputs/kerning-length.svg",
+      "references": [
+        {
+          "path": "references/kerning-length.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG 1.1 kerning with a length turns off automatic kerning.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-feature-resolution",
+      "tolerance": {}
+    },
+    {
+      "id": "font-variation-settings",
+      "input": "inputs/font-variation-settings.svg",
+      "references": [
+        {
+          "path": "references/font-variation-settings.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-variation-settings 'wght' 700 renders as the instance font-weight 700 selects.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-variation-settings-def",
+      "tolerance": {}
+    },
+    {
+      "id": "font-variation-settings-precedence",
+      "input": "inputs/font-variation-settings-precedence.svg",
+      "references": [
+        {
+          "path": "references/font-variation-settings-precedence.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-variation-settings overrides the axis value font-weight sets.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-variation-settings-def",
+      "tolerance": {}
+    },
+    {
+      "id": "font-size-adjust",
+      "input": "inputs/font-size-adjust.svg",
+      "references": [
+        {
+          "path": "references/font-size-adjust.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-size-adjust sets the used size from the first available font's x-height.",
+      "spec": "https://www.w3.org/TR/css-fonts-5/#font-size-adjust-prop",
+      "tolerance": {}
+    },
+    {
+      "id": "font-face-data-url",
+      "input": "inputs/font-face-data-url.svg",
+      "references": [
+        {
+          "path": "references/font-face-data-url.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An @font-face rule with a data: URL source defines a family text can use.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-face-rule",
+      "tolerance": {}
+    },
+    {
+      "id": "font-face-hides-installed",
+      "input": "inputs/font-face-hides-installed.svg",
+      "references": [
+        {
+          "path": "references/font-face-hides-installed.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A family an @font-face rule defines hides installed faces of the same name; unreadable sources are skipped.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-face-rule",
+      "tolerance": {}
+    },
+    {
+      "id": "font-face-descriptors",
+      "input": "inputs/font-face-descriptors.svg",
+      "references": [
+        {
+          "path": "references/font-face-descriptors.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-weight descriptors place each @font-face face in font matching.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-face-rule",
+      "tolerance": {}
+    },
+    {
+      "id": "font-face-local",
+      "input": "inputs/font-face-local.svg",
+      "references": [
+        {
+          "path": "references/font-face-local.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "local() names an installed face by its full or PostScript name.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-face-rule",
+      "tolerance": {}
+    },
+    {
+      "id": "inline-size-wrap",
+      "input": "inputs/inline-size-wrap.svg",
+      "references": [
+        {
+          "path": "references/inline-size-wrap.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "inline-size wraps at spaces; lines start at the first x, one line box lower; tspan x and y are ignored.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#InlineSize",
+      "tolerance": {}
+    },
+    {
+      "id": "inline-size-middle",
+      "input": "inputs/inline-size-middle.svg",
+      "references": [
+        {
+          "path": "references/inline-size-middle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With text-anchor: middle each line is centred on the first x (SPECIFICATIONS.md).",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#InlineSize",
+      "tolerance": {}
+    },
+    {
+      "id": "inline-size-line-height",
+      "input": "inputs/inline-size-line-height.svg",
+      "references": [
+        {
+          "path": "references/inline-size-line-height.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each line box spans its spans' inline boxes and the strut, with half-leading from line-height.",
+      "spec": "https://www.w3.org/TR/CSS21/visudet.html#line-height",
+      "tolerance": {}
+    },
+    {
+      "id": "inline-size-rtl",
+      "input": "inputs/inline-size-rtl.svg",
+      "references": [
+        {
+          "path": "references/inline-size-rtl.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Right-to-left text starts each line at the first x, which is the right edge.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#InlineSize",
+      "tolerance": {}
+    },
+    {
+      "id": "inline-size-pre-line",
+      "input": "inputs/inline-size-pre-line.svg",
+      "references": [
+        {
+          "path": "references/inline-size-pre-line.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A preserved segment break forces a line; text-wrap-mode: nowrap keeps the rest unbroken.",
+      "spec": "https://www.w3.org/TR/css-text-4/#white-space-property",
+      "tolerance": {}
+    },
+    {
+      "id": "vertical-mixed",
+      "input": "inputs/vertical-mixed.svg",
+      "references": [
+        {
+          "path": "references/vertical-mixed.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SVG 1.1 writing-mode tb is vertical-rl: kana, kanji and CJK punctuation stand upright with their vertical forms, Latin turns sideways.",
+      "spec": "https://www.w3.org/TR/css-writing-modes-3/#vertical-layout",
+      "tolerance": {}
+    },
+    {
+      "id": "vertical-upright",
+      "input": "inputs/vertical-upright.svg",
+      "references": [
+        {
+          "path": "references/vertical-upright.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "text-orientation: upright sets Latin upright too; text-anchor: middle centres the column on y.",
+      "spec": "https://www.w3.org/TR/css-writing-modes-3/#text-orientation",
+      "tolerance": {}
+    },
+    {
+      "id": "vertical-sideways",
+      "input": "inputs/vertical-sideways.svg",
+      "references": [
+        {
+          "path": "references/vertical-sideways.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "glyph-orientation-vertical: 90deg aliases text-orientation: sideways, turning kana too.",
+      "spec": "https://www.w3.org/TR/SVG2/text.html#GlyphOrientationVerticalProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "shape-inside-rect",
+      "input": "inputs/shape-inside-rect.svg",
+      "references": [
+        {
+          "path": "references/shape-inside-rect.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "shape-inside: url(#rect) fills the rectangle from its top with strut-high lines; overflow is not rendered.",
+      "spec": "https://svgwg.org/svg2-draft/text.html#TextShapeInside",
+      "tolerance": {}
+    },
+    {
+      "id": "shape-subtract",
+      "input": "inputs/shape-subtract.svg",
+      "references": [
+        {
+          "path": "references/shape-subtract.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "shape-subtract removes a rectangle; lines beside it break into parts, each centred in its span by text-align.",
+      "spec": "https://svgwg.org/svg2-draft/text.html#TextShapeInside",
+      "tolerance": {}
+    },
+    {
+      "id": "shape-inside-align",
+      "input": "inputs/shape-inside-align.svg",
+      "references": [
+        {
+          "path": "references/shape-inside-align.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "In a shape-inside area text-align (center, right, end) places each line and text-anchor does not apply.",
+      "spec": "https://svgwg.org/svg2-draft/text.html#TextAnchoringProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "shape-margin",
+      "input": "inputs/shape-margin.svg",
+      "references": [
+        {
+          "path": "references/shape-margin.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "shape-margin grows a shape-subtract shape: the referenced element's for url(), the text element's for a basic shape. A strip with a 10px margin wraps like a strip 20px wider.",
+      "spec": "https://svgwg.org/svg2-draft/text.html#TextShapeMargin",
+      "tolerance": {}
+    },
+    {
+      "id": "shape-inside-polygon",
+      "input": "inputs/shape-inside-polygon.svg",
+      "references": [
+        {
+          "path": "references/shape-inside-polygon.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A polygon() basic shape narrows downward; each band uses its narrowest width, and a second shape takes the overflow.",
+      "spec": "https://svgwg.org/svg2-draft/text.html#TextShapeInside",
+      "tolerance": {}
+    },
+    {
+      "id": "tref",
+      "input": "inputs/tref.svg",
+      "references": [
+        {
+          "path": "references/tref.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "tref renders all character data of the referenced element, markup removed, with its own style and white space.",
+      "spec": "https://www.w3.org/TR/SVG11/text.html#TRefElement",
+      "tolerance": {}
+    },
+    {
+      "id": "tref-invalid",
+      "input": "inputs/tref-invalid.svg",
+      "references": [
+        {
+          "path": "references/tref-invalid.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A tref whose reference does not resolve contributes no characters.",
+      "spec": "https://www.w3.org/TR/SVG11/text.html#TRefElement",
+      "tolerance": {}
+    },
+    {
+      "id": "alt-glyph-fallback",
+      "input": "inputs/alt-glyph-fallback.svg",
+      "references": [
+        {
+          "path": "references/alt-glyph-fallback.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An altGlyph whose glyphs cannot be found renders its own character data like a tspan.",
+      "spec": "https://www.w3.org/TR/SVG11/text.html#AltGlyphElement",
+      "tolerance": {}
+    },
+    {
+      "id": "svg-font",
+      "input": "inputs/svg-font.svg",
+      "references": [
+        {
+          "path": "references/svg-font.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "glyph d outlines in font units, scaled by font-size / units-per-em, with per-glyph horiz-adv-x and an hkern pair.",
+      "spec": "https://www.w3.org/TR/SVG11/fonts.html#GlyphElement",
+      "tolerance": {}
+    },
+    {
+      "id": "svg-font-ligatures",
+      "input": "inputs/svg-font-ligatures.svg",
+      "references": [
+        {
+          "path": "references/svg-font-ligatures.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The first glyph in document order whose unicode matches wins: AB forms a ligature, BA never does because B comes first, and C, known only inside a ligature, draws the missing glyph.",
+      "spec": "https://www.w3.org/TR/SVG11/fonts.html#GlyphSelectionRules",
+      "tolerance": {}
+    },
+    {
+      "id": "svg-font-arabic-forms",
+      "input": "inputs/svg-font-arabic-forms.svg",
+      "references": [
+        {
+          "path": "references/svg-font-arabic-forms.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "arabic-form picks the initial, medial and terminal glyphs by joining; a glyph without it serves the isolated form.",
+      "spec": "https://www.w3.org/TR/SVG11/fonts.html#GlyphElementArabicFormAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "alt-glyph-reference",
+      "input": "inputs/alt-glyph-reference.svg",
+      "references": [
+        {
+          "path": "references/alt-glyph-reference.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An altGlyph naming a glyph of an SVG font renders that glyph in place of its characters.",
+      "spec": "https://www.w3.org/TR/SVG11/text.html#AltGlyphElement",
+      "tolerance": {}
+    },
+    {
+      "id": "alt-glyph-def",
+      "input": "inputs/alt-glyph-def.svg",
+      "references": [
+        {
+          "path": "references/alt-glyph-def.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An altGlyphDef uses its first altGlyphItem whose glyphRefs all resolve; the glyphs come from their SVG font whatever the text's font-family.",
+      "spec": "https://www.w3.org/TR/SVG11/text.html#AltGlyphElement",
+      "tolerance": {}
+    },
+    {
+      "id": "font-optical-sizing",
+      "input": "inputs/font-optical-sizing.svg",
+      "references": [
+        {
+          "path": "references/font-optical-sizing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "font-optical-sizing: auto sets the opsz axis to the used font size in CSS pixels; none keeps the default instance.",
+      "spec": "https://www.w3.org/TR/css-fonts-4/#font-optical-sizing-def",
+      "tolerance": {}
+    },
+    {
+      "id": "textpath-nested",
+      "input": "inputs/textpath-nested.svg",
+      "references": [
+        {
+          "path": "references/textpath-nested.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A textPath nested in another is not correctly parented, so its used display is none.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "textpath-invalid-then-text",
+      "input": "inputs/textpath-invalid-then-text.svg",
+      "references": [
+        {
+          "path": "references/textpath-invalid-then-text.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An invalid textPath reference gives an empty path whose characters are hidden; path_end keeps its initial (0, 0), so the characters after it keep their positions.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html#TextLayoutAlgorithm",
+      "tolerance": {}
+    },
+    {
+      "id": "tspan-effects-not-applied",
+      "input": "inputs/tspan-effects-not-applied.svg",
+      "references": [
+        {
+          "path": "references/tspan-effects-not-applied.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "clip-path, mask, filter, opacity and mix-blend-mode apply in SVG to container and graphics elements only, and transform has no effect on inline text elements, so a tspan ignores them.",
+      "spec": "https://www.w3.org/TR/css-masking-1/#the-clip-path",
+      "tolerance": {}
+    },
+    {
+      "id": "pre-line-forced-breaks",
+      "input": "inputs/pre-line-forced-breaks.svg",
+      "references": [
+        {
+          "path": "references/pre-line-forced-breaks.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With white-space: pre-line a preserved line feed is a forced line break that starts a new line box, without inline-size.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html#TextLayoutPreMultiline",
+      "tolerance": {}
+    },
+    {
+      "id": "textpath-pathlength-zero-offset",
+      "input": "inputs/textpath-pathlength-zero-offset.svg",
+      "references": [
+        {
+          "path": "references/textpath-pathlength-zero-offset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "pathLength=\"0\" scales distances by infinity: startOffset 0 stays at the start, a positive startOffset places no glyph on the path.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "a-inside-text",
+      "input": "inputs/a-inside-text.svg",
+      "references": [
+        {
+          "path": "references/a-inside-text.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An a element inside text is an inline span: its text lays out in the same line, it passes on its fill, and its href is kept but never followed.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#AElement",
+      "tolerance": {}
+    },
+    {
+      "id": "decoration-paint-order",
+      "input": "inputs/decoration-paint-order.svg",
+      "references": [
+        {
+          "path": "references/decoration-paint-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Underlines paint below the glyphs and line-throughs above them within each paint-order layer: all fills, then all strokes, or the reverse with paint-order: stroke. The reference draws the fill and stroke layers as separate text elements.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/text.html#TextDecorationProperties",
+      "tolerance": {}
+    },
+    {
+      "id": "svg-glyphs",
+      "input": "inputs/svg-glyphs.svg",
+      "references": [
+        {
+          "path": "references/svg-glyphs.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Glyphs with SVG glyph documents draw from them instead of their outlines: only the element glyphN with its ancestors' transforms, unclipped, with context-fill and context-stroke from the text, from gzip-compressed and plain documents. A glyph without one draws its outline.",
+      "spec": "https://learn.microsoft.com/en-us/typography/opentype/spec/svg#glyph-identifiers",
+      "tolerance": {}
+    },
+    {
+      "id": "svg-glyphs-rotate",
+      "input": "inputs/svg-glyphs-rotate.svg",
+      "references": [
+        {
+          "path": "references/svg-glyphs-rotate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An SVG glyph document follows the glyph's rotation, with y down from the baseline.",
+      "spec": "https://learn.microsoft.com/en-us/typography/opentype/spec/svg#glyph-identifiers",
+      "tolerance": {}
+    }
+  ]
+}

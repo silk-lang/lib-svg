@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" shape-rendering="crispEdges">
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute -->
+<g fill="none" stroke="black" stroke-width="2" stroke-dasharray="1 1">
+<circle cx="8" cy="8" r="4" pathLength="4"/>
+<circle cx="8" cy="24" r="4" transform="scale(2 1)" vector-effect="non-scaling-stroke" pathLength="4"/>
+</g>
+</svg>

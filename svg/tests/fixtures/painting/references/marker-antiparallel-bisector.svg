@@ -1,0 +1,1 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><marker id='m' markerWidth='20' markerHeight='20' refX='0' refY='5' orient='-90' markerUnits='userSpaceOnUse'><rect width='20' height='10' fill='green'/></marker><path d='M10,50 L50,50 L10,50' fill='none' stroke='none' marker-mid='url(#m)'/></svg>

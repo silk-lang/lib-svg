@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#RadialGradientNotes; An exterior focal point is not moved to the end circle; literal cone-ray membership leaves pixels outside the cone transparent. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+<defs><radialGradient id="cone" gradientUnits="userSpaceOnUse" cx="4" cy="6" r="2" fx="10" fy="6"><stop stop-color="red"/><stop offset="1" stop-color="red"/></radialGradient></defs><rect x="0" y="0" width="12" height="12" fill="url(#cone)"/>
+</svg>

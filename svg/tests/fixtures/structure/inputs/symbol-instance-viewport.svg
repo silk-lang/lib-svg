@@ -1,0 +1,7 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SymbolNotes -->
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseLayout -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+  <style>symbol { display: none !important }</style>
+  <symbol id="tile" viewBox="0 0 4 4"><rect width="4" height="4" fill="red"/></symbol>
+  <use href="#tile" x="2" y="2" width="8" height="8"/>
+</svg>

@@ -1,0 +1,2 @@
+<!-- Bounding width is 8, not the union with overflowing descendants: 8+16+8=32. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32"><rect x="32" y="8" width="4" height="4"/></svg>

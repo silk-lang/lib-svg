@@ -1,0 +1,350 @@
+//! CLI policy is defined in options.silk; SVG citations delimit viewport/processing scope.
+import options { Parsed, Action, ArgumentError }
+import options
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+import svg_core.resources { ProcessingMode }
+
+// Arguments exclude argv[0], just as options.parse expects.
+effect fn parse(args: &[string]) -> Result<Parsed, ArgumentError>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut owned = List<Bytes>.make()
+  let mut index: usize = 0
+  while index < args.length {
+    let bytes = run Bytes.copy(Intrinsic.stringUtf8Bytes(args[index]))
+    run List<Bytes>.append(&mut owned, move bytes)
+    index = index + 1
+  }
+  return options.parse(List<Bytes>.asSlice(&owned))
+}
+
+effect fn rejects(args: &[string], expected: ArgumentError) -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let result = run parse(args)
+  let rejected = match &result {
+    Result<Parsed, ArgumentError>.Failure { error } => error == expected
+    _ => false
+  }
+  run Testing.expect(rejected, "invalid invocation returns the specified argument error")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#InitialCoordinateSystem
+// CLI policy: dimensions are positive ASCII decimal u32; zoom is a positive finite complete decimal token.
+effect fn numberCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let maximum = run parse(&["in.svg", "-o", "out.png", "--width", "4294967295"])
+  let accepted = match &maximum {
+    Result<Parsed, ArgumentError>.Success { value } => value.width == 4294967295
+    _ => false
+  }
+  run Testing.expect(accepted, "u32 boundary parses; renderer enforces the pixel budget")
+  let badDimensions: &[string] = &[
+    "",
+    "0",
+    "-1",
+    "+1",
+    "1.5",
+    "1e2",
+    " 2",
+    "2 ",
+    "2px",
+    "4294967296",
+    "999999999999999999999999",
+  ]
+  let mut index: usize = 0
+  while index < badDimensions.length {
+    let bad = badDimensions[index]
+    run rejects(&["in.svg", "-o", "out.png", "--width", bad], ArgumentError.InvalidDimension)
+    run rejects(&["in.svg", "-o", "out.png", "--height", bad], ArgumentError.InvalidDimension)
+    run rejects(
+      &["in.svg", "-o", "out.png", "--viewport-width", bad],
+      ArgumentError.InvalidDimension,
+    )
+    run rejects(
+      &["in.svg", "-o", "out.png", "--viewport-height", bad],
+      ArgumentError.InvalidDimension,
+    )
+    index = index + 1
+  }
+  let viewport = run parse(
+    &["in.svg", "-o", "out.png", "--viewport-width", "480", "--viewport-height", "360"],
+  )
+  let viewportParsed = match &viewport {
+    Result<Parsed, ArgumentError>.Success { value } => value.viewportWidth == 480
+      && value.viewportHeight == 360
+      && value.width == 0
+    _ => false
+  }
+  run Testing.expect(viewportParsed, "viewport dimensions are separate from output pixels")
+  run rejects(
+    &["in.svg", "-o", "out.png", "--viewport-width", "1", "--viewport-width", "2"],
+    ArgumentError.DuplicateOption,
+  )
+  let badZooms: &[string] = &[
+    "",
+    "0",
+    "-0",
+    "-1",
+    "NaN",
+    "inf",
+    "Infinity",
+    "1e999",
+    "1e-999",
+    "1e",
+    "1px",
+    "1 2",
+    " 1",
+    "1 ",
+  ]
+  index = 0
+  while index < badZooms.length {
+    let bad = badZooms[index]
+    run rejects(&["in.svg", "-o", "out.png", "--zoom", bad], ArgumentError.InvalidZoom)
+    index = index + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes
+// CLI policy: unsupported capabilities must not be silently accepted or advertised.
+effect fn invocationCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let empty: [string; 0] = []
+  run rejects(&empty, ArgumentError.MissingInput)
+  run rejects(&["in.svg"], ArgumentError.MissingOutput)
+  run rejects(&["-o", "out.png"], ArgumentError.MissingInput)
+  let valued: &[string] = &[
+    "-o",
+    "--width",
+    "--height",
+    "--zoom",
+    "--mode",
+    "--fragment",
+    "--font-dir",
+    "--language",
+    "--time",
+  ]
+  let mut index: usize = 0
+  while index < valued.length {
+    let flag = valued[index]
+    run rejects(&["in.svg", flag], ArgumentError.MissingValue)
+    index = index + 1
+  }
+  let unsupported: &[string] = &[
+    "--time=1s",
+    "--font-dir=fonts",
+    "--bogus",
+    "--width=10",
+    "--mode=static",
+    "--fragment=target",
+    "-x",
+  ]
+  index = 0
+  while index < unsupported.length {
+    let flag = unsupported[index]
+    run rejects(&["in.svg", "-o", "out.png", flag], ArgumentError.UnknownOption)
+    index = index + 1
+  }
+  run rejects(&["in.svg", "another.svg", "-o", "out.png"], ArgumentError.ExtraInput)
+  run rejects(&["in.svg", "-o", "out.png", "-o", "other.png"], ArgumentError.DuplicateOption)
+  run rejects(
+    &["in.svg", "-o", "out.png", "--font-dir", "a", "--font-dir", "b"],
+    ArgumentError.DuplicateOption,
+  )
+  run rejects(
+    &["in.svg", "-o", "out.png", "--language", "en", "--language", "fr"],
+    ArgumentError.DuplicateOption,
+  )
+  run rejects(
+    &["in.svg", "-o", "out.png", "--width", "1", "--width", "2"],
+    ArgumentError.DuplicateOption,
+  )
+  run rejects(
+    &["in.svg", "-o", "out.png", "--height", "1", "--height", "2"],
+    ArgumentError.DuplicateOption,
+  )
+  run rejects(
+    &["in.svg", "-o", "out.png", "--zoom", "1", "--zoom", "2"],
+    ArgumentError.DuplicateOption,
+  )
+  run rejects(&["in.svg", "-o", "--width", "2"], ArgumentError.MissingValue)
+  run rejects(&["in.svg", "-o", "-"], ArgumentError.InvalidPath)
+  run rejects(&["-", "-o", "out.png"], ArgumentError.InvalidPath)
+  run rejects(&["", "-o", "out.png"], ArgumentError.InvalidPath)
+  let escaped = run parse(&["-o", "out.png", "--", "-input.svg"])
+  let valid = match &escaped {
+    Result<Parsed, ArgumentError>.Success { value } => value.input == 3
+    _ => false
+  }
+  run Testing.expect(valid, "double dash permits a dash-prefixed file name")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#static-mode
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#animated-mode
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-static-mode
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-animated-mode
+effect fn processingModeCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let defaults = run parse(&["in.svg", "-o", "out.png"])
+  let defaultMode = match &defaults {
+    Result<Parsed, ArgumentError>.Success { value } => value.mode == ProcessingMode.Static
+      && value.fragment == 3
+    _ => false
+  }
+  run Testing.expect(defaultMode, "static mode and no fragment override are defaults")
+  let names: &[string] = &["static", "animated", "secure-static", "secure-animated"]
+  let modes: &[ProcessingMode] = &[
+    ProcessingMode.Static,
+    ProcessingMode.Animated,
+    ProcessingMode.SecureStatic,
+    ProcessingMode.SecureAnimated,
+  ]
+  let mut index: usize = 0
+  while index < names.length {
+    let result = run parse(&["--mode", names[index], "in.svg", "-o", "out.png"])
+    let selected = match &result {
+      Result<Parsed, ArgumentError>.Success { value } => value.mode == modes[index]
+      _ => false
+    }
+    run Testing.expect(selected, "each mode selects its resource processing policy")
+    index = index + 1
+  }
+  let invalid: &[string] = &["", "Static", "secure", "dynamic", " static", "animated "]
+  index = 0
+  while index < invalid.length {
+    run rejects(&["in.svg", "-o", "out.png", "--mode", invalid[index]], ArgumentError.InvalidMode)
+    index = index + 1
+  }
+  run rejects(&["in.svg", "-o", "out.png", "--mode", "--fragment"], ArgumentError.MissingValue)
+  run rejects(
+    &["in.svg", "-o", "out.png", "--mode", "static", "--mode", "animated"],
+    ArgumentError.DuplicateOption,
+  )
+  let escaped = run parse(&["-o", "out.png", "--", "--mode"])
+  let isInput = match &escaped {
+    Result<Parsed, ArgumentError>.Success { value } => value.input == 3
+      && value.mode == ProcessingMode.Static
+    _ => false
+  }
+  run Testing.expect(isInput, "mode flag after end-options is an input path")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes
+// CLI policy: --time is a SMIL clock value and implies the animated mode; static modes reject it.
+effect fn timeCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let implied = run parse(&["in.svg", "-o", "out.png", "--time", "1.5s"])
+  let animated = match &implied {
+    Result<Parsed, ArgumentError>.Success { value } => value.mode == ProcessingMode.Animated
+      && value.time == 1.5
+    _ => false
+  }
+  run Testing.expect(animated, "a time selects the animated mode")
+  let secure = run parse(
+    &["--mode", "secure-animated", "--time", "00:02", "in.svg", "-o", "out.png"],
+  )
+  let kept = match &secure {
+    Result<Parsed, ArgumentError>.Success { value } => value.mode == ProcessingMode.SecureAnimated
+      && value.time == 2.0
+    _ => false
+  }
+  run Testing.expect(kept, "an animated mode keeps its policy and takes the time")
+  let invalid: &[string] = &["", "soon", "1 s", "2:30", "-1s"]
+  let mut index: usize = 0
+  while index < invalid.length {
+    run rejects(&["in.svg", "-o", "out.png", "--time", invalid[index]], ArgumentError.InvalidTime)
+    index = index + 1
+  }
+  run rejects(
+    &["in.svg", "-o", "out.png", "--mode", "static", "--time", "1s"],
+    ArgumentError.InvalidTime,
+  )
+  run rejects(
+    &["in.svg", "-o", "out.png", "--time", "1s", "--time", "2s"],
+    ArgumentError.DuplicateOption,
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#SVGFragmentIdentifiersDefinitions
+// CLI policy: strip one optional #; leave percent decoding to SVG fragment resolution.
+effect fn fragmentCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let fragments: &[string] = &["target", "a%2520b", "", "#", "#target", "##target", "#%23target"]
+  let offsets: [usize; 7] = [0, 0, 0, 1, 1, 1, 1]
+  let mut index: usize = 0
+  while index < fragments.length {
+    let result = run parse(&["--fragment", fragments[index], "in.svg", "-o", "out.png"])
+    let retained = match &result {
+      Result<Parsed, ArgumentError>.Success { value } => value.fragment == 1
+        && value.fragmentStart == offsets[index]
+      _ => false
+    }
+    run Testing.expect(retained, "fragment borrows original encoded bytes after at most one hash")
+    index = index + 1
+  }
+  run rejects(&["in.svg", "-o", "out.png", "--fragment", "--mode"], ArgumentError.MissingValue)
+  run rejects(
+    &["in.svg", "-o", "out.png", "--fragment", "", "--fragment", "target"],
+    ArgumentError.DuplicateOption,
+  )
+  let escaped = run parse(&["-o", "out.png", "--", "--fragment"])
+  let isInput = match &escaped {
+    Result<Parsed, ArgumentError>.Success { value } => value.input == 3 && value.fragment == 4
+    _ => false
+  }
+  run Testing.expect(isInput, "fragment flag after end-options is an input path")
+  let combined = run parse(
+    &["--fragment", "a%2520b", "--mode", "secure-animated", "in.svg", "-o", "out.png"],
+  )
+  let selected = match &combined {
+    Result<Parsed, ArgumentError>.Success { value } => value.fragment == 1
+      && value.fragmentStart == 0
+      && value.mode == ProcessingMode.SecureAnimated
+    _ => false
+  }
+  run Testing.expect(selected, "fragment and processing policy can be combined before input")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes
+// CLI policy: informational invocations stand alone, so unknown flags never disappear behind help.
+effect fn informationCases() -> ()
+  ! AssertionError<'static> | OutOfMemoryError
+  ? &mut Allocator {
+  let help = run parse(&["--help"])
+  let helpOnly = match &help {
+    Result<Parsed, ArgumentError>.Success { value } => value.action == Action.Help
+    _ => false
+  }
+  run Testing.expect(helpOnly, "help does not need file paths")
+  let version = run parse(&["--version"])
+  let versionOnly = match &version {
+    Result<Parsed, ArgumentError>.Success { value } => value.action == Action.Version
+    _ => false
+  }
+  run Testing.expect(versionOnly, "version does not need file paths")
+  run rejects(&["--help", "--bogus"], ArgumentError.InformationOnly)
+  run rejects(&["in.svg", "--version"], ArgumentError.InformationOnly)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#InitialCoordinateSystem
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#processing-modes
+test effect fn commandLinePolicy() -> ()
+  ! AssertionError<'static> | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run numberCases() |> Effect.provideMut<Allocator>(&mut allocator)
+  run invocationCases() |> Effect.provideMut<Allocator>(&mut allocator)
+  run processingModeCases() |> Effect.provideMut<Allocator>(&mut allocator)
+  run fragmentCases() |> Effect.provideMut<Allocator>(&mut allocator)
+  run timeCases() |> Effect.provideMut<Allocator>(&mut allocator)
+  run informationCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}

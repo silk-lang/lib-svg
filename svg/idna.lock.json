@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "unicode": "18.0.0",
+  "license": "Unicode-3.0",
+  "sources": {
+    "mapping": {
+      "url": "https://www.unicode.org/Public/18.0.0/idna/IdnaMappingTable.txt",
+      "resolved": "https://www.unicode.org/Public/18.0.0/idna/IdnaMappingTable.txt",
+      "sha256": "a03b1eb38032268c696406a83f0972d6a815acd2c8d4151d42ec0fda70ffced1"
+    },
+    "license": {
+      "url": "https://www.unicode.org/license.txt",
+      "resolved": "https://www.unicode.org/license.txt",
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+    }
+  }
+}

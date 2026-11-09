@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="12" shape-rendering="crispEdges"><path d="M4 4H12V8" fill="none" stroke="#444" stroke-width="1"/><rect x="4" y="4" width="2" height="2" fill="green"/><path d="M0 0H2L0 2Z" transform="translate(12 4) rotate(45)" fill="blue"/><rect x="12" y="8" width="4" height="2" fill="red"/></svg>

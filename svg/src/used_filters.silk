@@ -1,0 +1,1565 @@
+//! Filter Effects 1 `filter` elements resolved into filter programs: the filter region,
+//! primitive subregions, named results and primitive parameters in user space.
+import silk.text.string { String }
+import scene { RenderError }
+import structure { Graph, OccurrenceId }
+import document_styles { StyledGraph }
+import used_masks
+import svg_filters.execute { MAX_OCTAVES }
+import svg_filters.program {
+  Program,
+  Primitive,
+  Operation,
+  Input,
+  Function,
+  CompositeOperator,
+  ColorMatrixKind,
+  MorphologyOperator,
+  EdgeMode,
+  Channel,
+  LightSource,
+  Rgba
+}
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.values { Value }
+import svg_css.properties { Property }
+import svg_css.value_keywords { Keyword }
+import svg_css.colors
+import used_paints
+import svg_css.effect_values { EffectValue, Filter, FilterKind }
+import svg_css.dimensions
+import svg_css.dimensions { ExprId }
+import svg_css.tokens { Limits, CssError, equal }
+import svg_geometry.geometry { Rect, isEmptyRect, isValidRect, unitedRects }
+import svg_geometry.numeric { Cursor }
+import vector.layer as layers
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.ownership { Copy }
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u32
+import silk.num.usize
+
+fn svgNamespace() -> &'static [u8] {
+  return b"http://www.w3.org/2000/svg"
+}
+
+/// The most primitives one filter may hold; more fail the render as too large.
+const MAX_PRIMITIVES: usize = 1024
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  let bytes = match &(document.attribute(node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+  let mut start: usize = 0
+  let mut end = bytes.length
+  while start < end && whitespace(bytes[start]) {
+    start = start + 1
+  }
+  while end > start && whitespace(bytes[end - 1]) {
+    end = end - 1
+  }
+  return Slice.view<u8>(bytes, start, end - start)
+}
+
+fn whitespace(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+fn present(document: &XmlDocument, node: XmlNodeId, name: string) -> bool {
+  return match &(document.attribute(node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => true
+    _ => false
+  }
+}
+
+/// A whitespace- or comma-separated list of numbers; None when any item is invalid.
+effect fn numbers(bytes: &[u8]) -> Option<List<f64>>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut values = List<f64>.make()
+  let mut cursor = Cursor.make(bytes)
+  cursor.space()
+  while cursor.at < bytes.length {
+    match &cursor.number() {
+      Option<f64>.Some { value } => {
+        run values.append(value)
+      }
+      _ => {
+        return Option<List<f64>>.None
+      }
+    }
+    cursor.separator(true)
+  }
+  return Option<List<f64>>.some(move values)
+}
+
+/// A `<number>` attribute, or `initial` when absent or invalid.
+effect fn number(document: &XmlDocument, node: XmlNodeId, name: string, initial: f64) -> f64
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match &(run numbers(attribute(document, node, name))) {
+    Option<List<f64>>.Some { value } => if value.length() == 1 {
+      value.asSlice()[0]
+    } else {
+      initial
+    }
+    _ => initial
+  }
+}
+
+struct Pair {
+  x: f64,
+  y: f64,
+  valid: bool,
+}
+
+impl Copy for Pair {}
+
+/// A `<number-optional-number>` attribute; one number stands for both.
+effect fn pair(document: &XmlDocument, node: XmlNodeId, name: string, initial: f64) -> Pair
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if !present(document, node, name) {
+    return Pair { x: initial, y: initial, valid: true }
+  }
+  return match &(run numbers(attribute(document, node, name))) {
+    Option<List<f64>>.Some { value } => if value.length() == 1 {
+      Pair { x: value.asSlice()[0], y: value.asSlice()[0], valid: true }
+    } else if value.length() == 2 {
+      Pair { x: value.asSlice()[0], y: value.asSlice()[1], valid: true }
+    } else {
+      Pair { x: initial, y: initial, valid: false }
+    }
+    _ => Pair { x: initial, y: initial, valid: false }
+  }
+}
+
+/// Primitive lengths and subregions: user space, or fractions of the bounding box
+/// (#element-attrdef-filter-primitiveunits).
+struct Units {
+  objectBox: bool,
+  bounds: Rect,
+  viewport: Rect,
+  region: Rect,
+}
+
+impl Copy for Units {}
+
+impl Units {
+  fn x(self: &Self, value: f64) -> f64 {
+    return if self.objectBox {
+      value * self.bounds.width()
+    } else {
+      value
+    }
+  }
+
+  fn y(self: &Self, value: f64) -> f64 {
+    return if self.objectBox {
+      value * self.bounds.height()
+    } else {
+      value
+    }
+  }
+
+  fn pointX(self: &Self, value: f64) -> f64 {
+    return if self.objectBox {
+      self.bounds.xMin + value * self.bounds.width()
+    } else {
+      value
+    }
+  }
+
+  fn pointY(self: &Self, value: f64) -> f64 {
+    return if self.objectBox {
+      self.bounds.yMin + value * self.bounds.height()
+    } else {
+      value
+    }
+  }
+
+  fn z(self: &Self, value: f64) -> f64 {
+    if !self.objectBox {
+      return value
+    }
+    let w = self.bounds.width()
+    let h = self.bounds.height()
+    return value * f64.sqrt((w * w + h * h) / 2.0)
+  }
+}
+
+effect fn styleOf(styles: &StyledGraph<'_>, node: OccurrenceId) -> StyleId
+  ! RenderError {
+  return match &styles.nodeStyle(node) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+}
+
+effect fn color(
+  engine: &Engine<'_>,
+  style: StyleId,
+  colorProperty: Property,
+  opacityProperty: Property,
+) -> Rgba
+  ! RenderError {
+  let srgb = run colorOf(engine, style, colorProperty)
+  let opacity = match &engine.number(style, opacityProperty, 1.0) {
+    Option<f64>.Some { value } => f64.min(1.0, f64.max(0.0, value))
+    _ => 1.0
+  }
+  return Rgba { r: srgb.r, g: srgb.g, b: srgb.b, a: srgb.a * opacity }
+}
+
+effect fn colorOf(engine: &Engine<'_>, style: StyleId, property: Property) -> Rgba
+  ! RenderError {
+  let entry = match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let srgb = match &engine.values.get(entry.value).* {
+    Value.Color { color: value } => colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
+    Value.IccColor { color: value, icc } => {
+      colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return Rgba { r: srgb.r, g: srgb.g, b: srgb.b, a: srgb.a }
+}
+
+// https://www.w3.org/TR/filter-effects-1/#ColorInterpolationFiltersProperty: auto
+// may pick either space; it is linearRGB here, the property's other default.
+fn linearRgb(engine: &Engine<'_>, style: StyleId) -> bool {
+  return match &engine.get(style, Property.ColorInterpolationFilters) {
+    Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
+      Value.Keyword { keyword } => keyword != Keyword.SRGB
+      _ => true
+    }
+    _ => true
+  }
+}
+
+fn blendMode(name: &[u8]) -> u8 {
+  if equal(name, b"multiply") {
+    return layers.BLEND_MULTIPLY
+  } else if equal(name, b"screen") {
+    return layers.BLEND_SCREEN
+  } else if equal(name, b"overlay") {
+    return layers.BLEND_OVERLAY
+  } else if equal(name, b"darken") {
+    return layers.BLEND_DARKEN
+  } else if equal(name, b"lighten") {
+    return layers.BLEND_LIGHTEN
+  } else if equal(name, b"color-dodge") {
+    return layers.BLEND_COLOR_DODGE
+  } else if equal(name, b"color-burn") {
+    return layers.BLEND_COLOR_BURN
+  } else if equal(name, b"hard-light") {
+    return layers.BLEND_HARD_LIGHT
+  } else if equal(name, b"soft-light") {
+    return layers.BLEND_SOFT_LIGHT
+  } else if equal(name, b"difference") {
+    return layers.BLEND_DIFFERENCE
+  } else if equal(name, b"exclusion") {
+    return layers.BLEND_EXCLUSION
+  } else if equal(name, b"hue") {
+    return layers.BLEND_HUE
+  } else if equal(name, b"saturation") {
+    return layers.BLEND_SATURATION
+  } else if equal(name, b"color") {
+    return layers.BLEND_COLOR
+  } else if equal(name, b"luminosity") {
+    return layers.BLEND_LUMINOSITY
+  }
+  return layers.BLEND_NORMAL
+}
+
+fn compositeOperator(name: &[u8]) -> CompositeOperator {
+  if equal(name, b"in") {
+    return CompositeOperator.In
+  } else if equal(name, b"out") {
+    return CompositeOperator.Out
+  } else if equal(name, b"atop") {
+    return CompositeOperator.Atop
+  } else if equal(name, b"xor") {
+    return CompositeOperator.Xor
+  } else if equal(name, b"lighter") {
+    return CompositeOperator.Lighter
+  } else if equal(name, b"arithmetic") {
+    return CompositeOperator.Arithmetic
+  }
+  return CompositeOperator.Over
+}
+
+/// A primitive element already accepted into the program, for `result` lookups.
+struct Entry {
+  node: OccurrenceId,
+  subregion: Rect,
+}
+
+impl Copy for Entry {}
+
+/// What an `in`/`in2` value names, and whether that counts as a standard input for
+/// the default subregion (#FilterPrimitiveSubRegion).
+struct Named {
+  input: Input,
+  standard: bool,
+}
+
+impl Copy for Named {}
+
+/// The image layers that hold `FillPaint` and `StrokePaint`, made when first named.
+struct Paints {
+  fill: Option<usize>,
+  stroke: Option<usize>,
+}
+
+impl Copy for Paints {}
+
+fn holds(slot: Option<usize>, index: usize) -> bool {
+  return match &slot {
+    Option<usize>.Some { value } => value == index
+    _ => false
+  }
+}
+
+fn layer(slot: &mut Option<usize>, program: &mut Program) -> Input {
+  if let Option<usize>.Some { value } = &slot.* {
+    return Input.Image { index: value }
+  }
+  let index = program.images
+  program.images = index + 1
+  slot.* = Option<usize>.some(index)
+  return Input.Image { index: index }
+}
+
+// https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in
+fn named(
+  graph: &Graph,
+  entries: &[Entry],
+  program: &mut Program,
+  paints: &mut Paints,
+  value: &[u8],
+) -> Named {
+  if equal(value, b"SourceGraphic") {
+    return Named { input: Input.SourceGraphic, standard: true }
+  } else if equal(value, b"SourceAlpha") {
+    return Named { input: Input.SourceAlpha, standard: true }
+  } else if equal(value, b"BackgroundImage") || equal(value, b"BackgroundAlpha") {
+    program.background = true
+    return Named {
+      input: Input.Background { alpha: equal(value, b"BackgroundAlpha") },
+      standard: true,
+    }
+  } else if equal(value, b"FillPaint") {
+    return Named { input: layer(&mut paints.fill, &mut program.*), standard: true }
+  } else if equal(value, b"StrokePaint") {
+    return Named { input: layer(&mut paints.stroke, &mut program.*), standard: true }
+  }
+
+  // The closest preceding primitive with that result; missing names act as unspecified.
+  if value.length > 0 {
+    let mut i = entries.length
+    while i > 0 {
+      i = i - 1
+      let source = graph.occurrences.asSlice()[entries[i].node.index].source
+      if equal(attribute(graph.sourceDocument(source), source.node, "result"), value) {
+        return Named { input: Input.Result { index: i }, standard: false }
+      }
+    }
+  }
+  if entries.length == 0 {
+    return Named { input: Input.SourceGraphic, standard: true }
+  }
+  return Named { input: Input.Result { index: entries.length - 1 }, standard: false }
+}
+
+/// Default subregion bookkeeping: the union of referenced results, unless a standard
+/// input is referenced.
+struct Defaults {
+  covered: Option<Rect>,
+  standard: bool,
+}
+
+impl Copy for Defaults {}
+
+impl Defaults {
+  fn make() -> Defaults {
+    return Defaults { covered: Option<Rect>.None, standard: false }
+  }
+
+  fn add(self: &mut Self, name: Named, entries: &[Entry]) -> () {
+    if name.standard {
+      self.standard = true
+      return
+    }
+    if let Input.Result { index } = &name.input {
+      let subregion = entries[index].subregion
+      self.covered = match &self.covered {
+        Option<Rect>.Some { value } => unitedRects(value, subregion)
+        _ => Option<Rect>.some(subregion)
+      }
+    }
+  }
+
+  fn rect(self: &Self, region: Rect) -> Rect {
+    if self.standard {
+      return region
+    }
+    return match &self.covered {
+      Option<Rect>.Some { value } => value
+      _ => region
+    }
+  }
+}
+
+// https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion
+effect fn subregion(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  units: &Units,
+  initial: Rect,
+  limits: &Limits,
+) -> Rect
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let objectBox = units.objectBox
+  let basis = if objectBox {
+    Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  } else {
+    units.viewport
+  }
+  let mut x = initial.xMin
+  let mut y = initial.yMin
+  let mut width = initial.width()
+  let mut height = initial.height()
+  if present(document, node, "x") {
+    let value = run used_masks.coordinate(
+      document,
+      node,
+      "x",
+      &mut engine.*,
+      style,
+      basis.width(),
+      0.0,
+      limits,
+    )
+    x = if objectBox {
+      units.bounds.xMin + value * units.bounds.width()
+    } else {
+      value
+    }
+  }
+  if present(document, node, "y") {
+    let value = run used_masks.coordinate(
+      document,
+      node,
+      "y",
+      &mut engine.*,
+      style,
+      basis.height(),
+      0.0,
+      limits,
+    )
+    y = if objectBox {
+      units.bounds.yMin + value * units.bounds.height()
+    } else {
+      value
+    }
+  }
+  if present(document, node, "width") {
+    let value = run used_masks.coordinate(
+      document,
+      node,
+      "width",
+      &mut engine.*,
+      style,
+      basis.width(),
+      0.0,
+      limits,
+    )
+    width = units.x(value)
+  }
+  if present(document, node, "height") {
+    let value = run used_masks.coordinate(
+      document,
+      node,
+      "height",
+      &mut engine.*,
+      style,
+      basis.height(),
+      0.0,
+      limits,
+    )
+    height = units.y(value)
+  }
+  if !f64.isFinite(x) || !f64.isFinite(y) || !f64.isFinite(width) || !f64.isFinite(height) {
+    fail RenderError.InvalidGeometry
+  }
+
+  // A zero or negative size disables the primitive: an empty subregion.
+  if width <= 0.0 || height <= 0.0 {
+    return Rect { xMin: x, yMin: y, xMax: x, yMax: y }
+  }
+  return Rect { xMin: x, yMin: y, xMax: x + width, yMax: y + height }
+}
+
+fn children(graph: &Graph, node: OccurrenceId) -> Option<OccurrenceId> {
+  let occurrence = &graph.occurrences.asSlice()[node.index]
+  return match &occurrence.shadow {
+    Option<OccurrenceId>.Some { value } => Option<OccurrenceId>.some(value)
+    _ => occurrence.firstChild
+  }
+}
+
+fn isElement(graph: &Graph, node: OccurrenceId, name: &[u8]) -> bool {
+  let source = graph.occurrences.asSlice()[node.index].source
+  let document = graph.sourceDocument(source)
+  return equal(String.utf8Bytes(XmlDocument.namespaceUri(document, source.node)), svgNamespace())
+    && equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), name)
+}
+
+// https://www.w3.org/TR/filter-effects-1/#feComponentTransferElement
+effect fn transferFunction(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  program: &mut Program,
+) -> Function
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let kind = attribute(document, node, "type")
+  if equal(kind, b"table") || equal(kind, b"discrete") {
+    let values = match move run numbers(attribute(document, node, "tableValues")) {
+      Option<List<f64>>.Some { value } => move value
+      _ => List<f64>.make()
+    }
+    let first = program.numbers.length()
+    let count = values.length()
+    let mut i: usize = 0
+    while i < count {
+      run program.numbers.append(values.asSlice()[i])
+      i = i + 1
+    }
+    return if equal(kind, b"table") {
+      Function.Table { first: first, count: count }
+    } else {
+      Function.Discrete { first: first, count: count }
+    }
+  } else if equal(kind, b"linear") {
+    return Function.Linear {
+      slope: run number(document, node, "slope", 1.0),
+      intercept: run number(document, node, "intercept", 0.0),
+    }
+  } else if equal(kind, b"gamma") {
+    return Function.Gamma {
+      amplitude: run number(document, node, "amplitude", 1.0),
+      exponent: run number(document, node, "exponent", 1.0),
+      offset: run number(document, node, "offset", 0.0),
+    }
+  }
+  return Function.Identity
+}
+
+/// One primitive element's operation and inputs; None for elements that are not
+/// filter primitives, which take no part in the filter.
+effect fn primitive(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  entries: &[Entry],
+  program: &mut Program,
+  paints: &mut Paints,
+  units: &Units,
+  limits: &Limits,
+) -> Option<Primitive>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = graph.occurrences.asSlice()[node.index].source
+  let document = graph.sourceDocument(source)
+  let element = source.node
+  if !equal(String.utf8Bytes(XmlDocument.namespaceUri(document, element)), svgNamespace()) {
+    return Option<Primitive>.None
+  }
+  let name = String.utf8Bytes(XmlDocument.localName(document, element))
+  let style = run styleOf(&styles.*, node)
+  let engine = &mut styles.catalog.engine
+  let first = named(
+    graph,
+    entries,
+    &mut program.*,
+    &mut paints.*,
+    attribute(document, element, "in"),
+  )
+  let second = named(
+    graph,
+    entries,
+    &mut program.*,
+    &mut paints.*,
+    attribute(document, element, "in2"),
+  )
+  let mut defaults = Defaults.make()
+  let mut input = first.input
+  let mut input2 = Input.Transparent
+  let operation = if equal(name, b"feFlood") {
+    input = Input.Transparent
+    Operation.Flood {
+      color: run color(&engine.*, style, Property.FloodColor, Property.FloodOpacity),
+    }
+  } else if equal(name, b"feOffset") {
+    defaults.add(first, entries)
+    Operation.Offset {
+      dx: units.x(run number(document, element, "dx", 0.0)),
+      dy: units.y(run number(document, element, "dy", 0.0)),
+    }
+  } else if equal(name, b"feGaussianBlur") {
+    defaults.add(first, entries)
+    let deviation = run pair(document, element, "stdDeviation", 0.0)
+
+    // A negative or zero deviation in both directions disables the blur.
+    if !deviation.valid || deviation.x < 0.0 || deviation.y < 0.0
+      || (deviation.x == 0.0 && deviation.y == 0.0) {
+      Operation.Copy
+    } else {
+      Operation.Blur { x: units.x(deviation.x), y: units.y(deviation.y) }
+    }
+  } else if equal(name, b"feMerge") {
+    input = Input.Transparent
+    let start = program.inputs.length()
+    let mut child = children(graph, node)
+    while true {
+      let next = match &child {
+        Option<OccurrenceId>.Some { value } => value
+        _ => {
+          break
+        }
+      }
+      child = graph.occurrences.asSlice()[next.index].nextSibling
+      if isElement(graph, next, b"feMergeNode") {
+        let nodeSource = graph.occurrences.asSlice()[next.index].source
+        let mergeName = named(
+          graph,
+          entries,
+          &mut program.*,
+          &mut paints.*,
+          attribute(graph.sourceDocument(nodeSource), nodeSource.node, "in"),
+        )
+        defaults.add(mergeName, entries)
+        run program.inputs.append(mergeName.input)
+      }
+    }
+    Operation.Merge { first: start, count: program.inputs.length() - start }
+  } else if equal(name, b"feBlend") {
+    defaults.add(first, entries)
+    defaults.add(second, entries)
+    input2 = second.input
+    Operation.Blend {
+      mode: blendMode(attribute(document, element, "mode")),
+      composite: !present(document, element, "no-composite"),
+    }
+  } else if equal(name, b"feComposite") {
+    defaults.add(first, entries)
+    defaults.add(second, entries)
+    input2 = second.input
+    Operation.Composite {
+      operator: compositeOperator(attribute(document, element, "operator")),
+      k: [
+        run number(document, element, "k1", 0.0),
+        run number(document, element, "k2", 0.0),
+        run number(document, element, "k3", 0.0),
+        run number(document, element, "k4", 0.0),
+      ],
+    }
+  } else if equal(name, b"feColorMatrix") {
+    defaults.add(first, entries)
+    let kindName = attribute(document, element, "type")
+    let kind = if equal(kindName, b"saturate") {
+      ColorMatrixKind.Saturate
+    } else if equal(kindName, b"hueRotate") {
+      ColorMatrixKind.HueRotate
+    } else if equal(kindName, b"luminanceToAlpha") {
+      ColorMatrixKind.LuminanceToAlpha
+    } else {
+      ColorMatrixKind.Matrix
+    }
+    let values = match move run numbers(attribute(document, element, "values")) {
+      Option<List<f64>>.Some { value } => move value
+      _ => List<f64>.make()
+    }
+
+    // Lists of the wrong length fall back to the type's default (identity, 1 or 0).
+    let expected: usize = match kind {
+      ColorMatrixKind.Matrix => 20
+      ColorMatrixKind.LuminanceToAlpha => 0
+      _ => 1
+    }
+    let start = program.numbers.length()
+    let mut count: usize = 0
+    if values.length() == expected {
+      while count < expected {
+        run program.numbers.append(values.asSlice()[count])
+        count = count + 1
+      }
+    }
+    Operation.ColorMatrix { kind: kind, first: start, count: count }
+  } else if equal(name, b"feComponentTransfer") {
+    defaults.add(first, entries)
+    let mut functions = [Function.Identity, Function.Identity, Function.Identity, Function.Identity]
+    let mut child = children(graph, node)
+    while true {
+      let next = match &child {
+        Option<OccurrenceId>.Some { value } => value
+        _ => {
+          break
+        }
+      }
+      child = graph.occurrences.asSlice()[next.index].nextSibling
+      let channel: usize = if isElement(graph, next, b"feFuncR") {
+        0
+      } else if isElement(graph, next, b"feFuncG") {
+        1
+      } else if isElement(graph, next, b"feFuncB") {
+        2
+      } else if isElement(graph, next, b"feFuncA") {
+        3
+      } else {
+        4
+      }
+
+      // A later function element for the same channel replaces an earlier one.
+      if channel < 4 {
+        let functionSource = graph.occurrences.asSlice()[next.index].source
+        functions[channel] = run transferFunction(
+          graph.sourceDocument(functionSource),
+          functionSource.node,
+          &mut program.*,
+        )
+      }
+    }
+    Operation.ComponentTransfer { functions: functions }
+  } else if equal(name, b"feMorphology") {
+    defaults.add(first, entries)
+    let radius = run pair(document, element, "radius", 0.0)
+    if !radius.valid || radius.x <= 0.0 || radius.y <= 0.0 {
+      Operation.Copy
+    } else {
+      Operation.Morphology {
+        operator: if equal(attribute(document, element, "operator"), b"dilate") {
+          MorphologyOperator.Dilate
+        } else {
+          MorphologyOperator.Erode
+        },
+        x: units.x(radius.x),
+        y: units.y(radius.y),
+      }
+    }
+  } else if equal(name, b"feTile") {
+    // feTile's default subregion is the filter region, whatever it references.
+    defaults.standard = true
+    Operation.Tile
+  } else if equal(name, b"feDropShadow") {
+    defaults.add(first, entries)
+    let deviation = run pair(document, element, "stdDeviation", 2.0)
+    let x = if deviation.valid && deviation.x > 0.0 {
+      deviation.x
+    } else {
+      0.0
+    }
+    let y = if deviation.valid && deviation.y > 0.0 {
+      deviation.y
+    } else {
+      0.0
+    }
+    Operation.DropShadow {
+      dx: units.x(run number(document, element, "dx", 2.0)),
+      dy: units.y(run number(document, element, "dy", 2.0)),
+      x: units.x(x),
+      y: units.y(y),
+      color: run color(&engine.*, style, Property.FloodColor, Property.FloodOpacity),
+    }
+  } else if equal(name, b"feTurbulence") {
+    input = Input.Transparent
+    run turbulence(document, element, units)
+  } else if equal(name, b"feConvolveMatrix") {
+    defaults.add(first, entries)
+    run convolution(document, element, &mut program.*, units)
+  } else if equal(name, b"feDisplacementMap") {
+    defaults.add(first, entries)
+    defaults.add(second, entries)
+    input2 = second.input
+    let scale = run number(document, element, "scale", 0.0)
+    Operation.DisplacementMap {
+      scale: [units.x(scale), units.y(scale)],
+      x: channel(attribute(document, element, "xChannelSelector")),
+      y: channel(attribute(document, element, "yChannelSelector")),
+    }
+  } else if equal(name, b"feDiffuseLighting") || equal(name, b"feSpecularLighting") {
+    defaults.add(first, entries)
+    let specular = equal(name, b"feSpecularLighting")
+    match &(run lightSource(graph, node, units)) {
+      Option<LightSource>.Some { value } => Operation.Lighting {
+        specular: specular,
+        surfaceScale: run number(document, element, "surfaceScale", 1.0),
+        constant: run nonNegative(
+          document,
+          element,
+          if specular {
+            "specularConstant"
+          } else {
+            "diffuseConstant"
+          },
+        ),
+        exponent: run number(document, element, "specularExponent", 1.0),
+        color: run colorOf(&engine.*, style, Property.LightingColor),
+        light: value,
+        unit: run kernelUnit(document, element, units),
+      }
+      _ => {
+        // Without a light source there is no light: transparent black.
+        input = Input.Transparent
+        Operation.Flood { color: Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } }
+      }
+    }
+  } else if equal(name, b"feImage") {
+    // The caller renders the image layer (see [`FilterImage`]).
+    input = Input.Transparent
+    let index = program.images
+    program.images = index + 1
+    Operation.Image { index: index }
+  } else {
+    return Option<Primitive>.None
+  }
+  let area = run subregion(
+    document,
+    element,
+    &mut engine.*,
+    style,
+    units,
+    defaults.rect(units.region),
+    limits,
+  )
+  return Option<Primitive>.some(
+    Primitive {
+      operation: operation,
+      input: input,
+      input2: input2,
+      subregion: area,
+      linearRgb: linearRgb(&engine.*, style),
+    },
+  )
+}
+
+// https://www.w3.org/TR/filter-effects-1/#feTurbulenceElement
+effect fn turbulence(document: &XmlDocument, node: XmlNodeId, units: &Units) -> Operation
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let frequency = run pair(document, node, "baseFrequency", 0.0)
+  let octaves = run number(document, node, "numOctaves", 1.0)
+  let seed = run number(document, node, "seed", 0.0)
+
+  // Negative frequencies and octave counts are unsupported: no noise, transparent black.
+  // A `numOctaves` that is not an integer is invalid, which leaves the initial value.
+  if frequency.x < 0.0 || frequency.y < 0.0 || octaves < 0.0 {
+    return Operation.Flood { color: Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } }
+  }
+  let whole = if f64.trunc(octaves) == octaves {
+    octaves
+  } else {
+    1.0
+  }
+  return Operation.Turbulence {
+    frequency: [frequency.x, frequency.y],
+    octaves: f64.toU32(f64.min(whole, u32.toF64(MAX_OCTAVES))),
+    seed: seed,
+    fractal: equal(attribute(document, node, "type"), b"fractalNoise"),
+    stitch: equal(attribute(document, node, "stitchTiles"), b"stitch"),
+    origin: if units.objectBox {
+      [units.bounds.xMin, units.bounds.yMin]
+    } else {
+      [0.0, 0.0]
+    },
+    unit: if units.objectBox {
+      [units.bounds.width(), units.bounds.height()]
+    } else {
+      [1.0, 1.0]
+    },
+  }
+}
+
+// #element-attrdef-feconvolvematrix-kernelunitlength: in primitiveUnits; a negative or
+// zero value means the default, one pixel of the intermediate image (zeros here).
+effect fn kernelUnit(document: &XmlDocument, node: XmlNodeId, units: &Units) -> [f64; 2]
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let length = run pair(document, node, "kernelUnitLength", 0.0)
+  if !length.valid || !(length.x > 0.0) || !(length.y > 0.0) {
+    return [0.0, 0.0]
+  }
+  return [units.x(length.x), units.y(length.y)]
+}
+
+// https://www.w3.org/TR/filter-effects-1/#feConvolveMatrixElement: unfulfilled
+// preconditions (orders below 1, a kernel of the wrong length, a target outside the
+// kernel) make the primitive a pass through filter.
+effect fn convolution(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  program: &mut Program,
+  units: &Units,
+) -> Operation
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let order = run pair(document, node, "order", 3.0)
+  let columns = f64.trunc(order.x)
+  let rows = f64.trunc(order.y)
+  let values = match move run numbers(attribute(document, node, "kernelMatrix")) {
+    Option<List<f64>>.Some { value } => move value
+    _ => List<f64>.make()
+  }
+  if !order.valid || columns < 1.0 || rows < 1.0 || columns * rows != usize.toF64(values.length()) {
+    return Operation.Copy
+  }
+  let orderX = f64.toU32(columns)
+  let orderY = f64.toU32(rows)
+  let targetX = run number(document, node, "targetX", f64.floor(columns / 2.0))
+  let targetY = run number(document, node, "targetY", f64.floor(rows / 2.0))
+  if targetX < 0.0 || targetX >= columns || targetY < 0.0 || targetY >= rows
+    || f64.trunc(targetX) != targetX
+    || f64.trunc(targetY) != targetY {
+    return Operation.Copy
+  }
+  let first = program.numbers.length()
+  let mut sum = 0.0
+  let mut magnitude = 0.0
+  let mut i: usize = 0
+  while i < values.length() {
+    sum = sum + values.asSlice()[i]
+    magnitude = magnitude + f64.abs(values.asSlice()[i])
+    run program.numbers.append(values.asSlice()[i])
+    i = i + 1
+  }
+
+  // The spec's sum is of the written decimals. A float sum within the rounding error of
+  // parsing and adding them (one unit roundoff per term) cannot be told from zero, so
+  // kernels such as eight 0.1 entries and -0.8 count as zero-sum.
+  if f64.abs(sum) <= magnitude * usize.toF64(values.length() + 1) * 2.220446049250313e-16 {
+    sum = 0.0
+  }
+
+  // A zero divisor falls back to the kernel sum, and a zero sum to 1.
+  let mut divisor = run number(document, node, "divisor", 0.0)
+  if divisor == 0.0 {
+    divisor = sum
+  }
+  if divisor == 0.0 || !f64.isFinite(divisor) {
+    divisor = 1.0
+  }
+  let edge = attribute(document, node, "edgeMode")
+  return Operation.ConvolveMatrix {
+    orderX: orderX,
+    orderY: orderY,
+    first: first,
+    divisor: divisor,
+    bias: run number(document, node, "bias", 0.0),
+    targetX: f64.toU32(targetX),
+    targetY: f64.toU32(targetY),
+    edgeMode: if equal(edge, b"wrap") {
+      EdgeMode.Wrap
+    } else if equal(edge, b"none") {
+      EdgeMode.None
+    } else {
+      EdgeMode.Duplicate
+    },
+    preserveAlpha: equal(attribute(document, node, "preserveAlpha"), b"true"),
+    unit: run kernelUnit(document, node, units),
+  }
+}
+
+fn channel(name: &[u8]) -> Channel {
+  return if equal(name, b"R") {
+    Channel.R
+  } else if equal(name, b"G") {
+    Channel.G
+  } else if equal(name, b"B") {
+    Channel.B
+  } else {
+    Channel.A
+  }
+}
+
+/// A lighting constant: any non-negative number; negative values are invalid and leave
+/// the initial 1.
+effect fn nonNegative(document: &XmlDocument, node: XmlNodeId, name: string) -> f64
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let value = run number(document, node, name, 1.0)
+  return if value < 0.0 {
+    1.0
+  } else {
+    value
+  }
+}
+
+// https://www.w3.org/TR/filter-effects-1/#light-source: the first light source child.
+// Positions are in primitiveUnits; z of a bounding box scales by its normalized diagonal.
+effect fn lightSource(graph: &Graph, node: OccurrenceId, units: &Units) -> Option<LightSource>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut child = children(graph, node)
+  while true {
+    let next = match &child {
+      Option<OccurrenceId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    child = graph.occurrences.asSlice()[next.index].nextSibling
+    let source = graph.occurrences.asSlice()[next.index].source
+    let document = graph.sourceDocument(source)
+    let element = source.node
+    if isElement(graph, next, b"feDistantLight") {
+      return Option<LightSource>.some(
+        LightSource.Distant {
+          azimuth: run number(document, element, "azimuth", 0.0),
+          elevation: run number(document, element, "elevation", 0.0),
+        },
+      )
+    }
+    let point = isElement(graph, next, b"fePointLight")
+    if point || isElement(graph, next, b"feSpotLight") {
+      let position = [
+        units.pointX(run number(document, element, "x", 0.0)),
+        units.pointY(run number(document, element, "y", 0.0)),
+        units.z(run number(document, element, "z", 0.0)),
+      ]
+      if point {
+        return Option<LightSource>.some(LightSource.Point { position: position })
+      }
+      return Option<LightSource>.some(
+        LightSource.Spot {
+          position: position,
+          pointsAt: [
+            units.pointX(run number(document, element, "pointsAtX", 0.0)),
+            units.pointY(run number(document, element, "pointsAtY", 0.0)),
+            units.z(run number(document, element, "pointsAtZ", 0.0)),
+          ],
+          exponent: run number(document, element, "specularExponent", 1.0),
+          cone: if present(document, element, "limitingConeAngle") {
+            f64.abs(run number(document, element, "limitingConeAngle", 0.0))
+          } else {
+            -1.0
+          },
+        },
+      )
+    }
+  }
+  return Option<LightSource>.None
+}
+
+/// The element of `node`'s href template chain that specifies `name`, or `node` itself
+/// (SVG 1.1 filters.html#FilterElementHrefAttribute).
+fn owner(
+  graph: &Graph,
+  styles: &StyledGraph<'_>,
+  node: OccurrenceId,
+  name: string,
+) -> OccurrenceId {
+  let mut current = node
+  let mut remaining = graph.occurrences.length()
+  while remaining > 0 {
+    let source = graph.occurrences.asSlice()[current.index].source
+    if present(graph.sourceDocument(source), source.node, name) {
+      return current
+    }
+    match &styles.template(current) {
+      Option<OccurrenceId>.Some { value } => {
+        current = value
+      }
+      _ => {
+        return node
+      }
+    }
+    remaining = remaining - 1
+  }
+  return node
+}
+
+fn inherited<'a>(
+  graph: &'a Graph,
+  styles: &StyledGraph<'_>,
+  node: OccurrenceId,
+  name: string,
+) -> &'a [u8] {
+  let source = graph.occurrences.asSlice()[owner(graph, styles, node, name).index].source
+  return attribute(graph.sourceDocument(source), source.node, name)
+}
+
+effect fn length(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  name: string,
+  basis: f64,
+  initial: f64,
+  limits: &Limits,
+) -> f64
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let found = owner(graph, &styles.*, node, name)
+  let source = graph.occurrences.asSlice()[found.index].source
+  let style = run styleOf(&styles.*, found)
+  return run used_masks.coordinate(
+    graph.sourceDocument(source),
+    source.node,
+    name,
+    &mut styles.catalog.engine,
+    style,
+    basis,
+    initial,
+    limits,
+  )
+}
+
+/// The program of the `filter` element `node` applied to an element with bounding box
+/// `bounds` in a viewport `viewport`. None means the filtered element is not rendered:
+/// an empty filter region (#element-attrdef-filter-width, "Negative or zero values
+/// disable rendering of the element"), bounding-box units on an empty box, or a filter
+/// without primitives (#FilterPrimitiveTree).
+pub effect fn resolve(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  node: OccurrenceId,
+  viewport: Rect,
+  bounds: Rect,
+  limits: &Limits,
+  images: &mut List<FilterImage>,
+) -> Option<Program>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let objectRegion = !equal(inherited(graph, &styles.*, node, "filterUnits"), b"userSpaceOnUse")
+  let objectPrimitives = equal(
+    inherited(graph, &styles.*, node, "primitiveUnits"),
+    b"objectBoundingBox",
+  )
+  if !isValidRect(viewport) || !isValidRect(bounds) {
+    fail RenderError.InvalidGeometry
+  }
+  if (objectRegion || objectPrimitives) && isEmptyRect(bounds) {
+    return Option<Program>.None
+  }
+  let basis = if objectRegion {
+    Rect { xMin: 0.0, yMin: 0.0, xMax: 1.0, yMax: 1.0 }
+  } else {
+    viewport
+  }
+  let x = run length(graph, &mut styles.*, node, "x", basis.width(), -0.1 * basis.width(), limits)
+  let y = run length(graph, &mut styles.*, node, "y", basis.height(), -0.1 * basis.height(), limits)
+  let width = run length(
+    graph,
+    &mut styles.*,
+    node,
+    "width",
+    basis.width(),
+    1.2 * basis.width(),
+    limits,
+  )
+  let height = run length(
+    graph,
+    &mut styles.*,
+    node,
+    "height",
+    basis.height(),
+    1.2 * basis.height(),
+    limits,
+  )
+
+  // SVG 1.1 filters.html#FilterElementFilterResAttribute: whole pixels, truncated; zero
+  // disables rendering; negative values are errors, which leave the attribute unset.
+  let mut resolution = [0.0, 0.0]
+  let res = owner(graph, &styles.*, node, "filterRes")
+  let resSource = graph.occurrences.asSlice()[res.index].source
+  if present(graph.sourceDocument(resSource), resSource.node, "filterRes") {
+    let pixels = run pair(graph.sourceDocument(resSource), resSource.node, "filterRes", 0.0)
+    if pixels.valid && pixels.x >= 0.0 && pixels.y >= 0.0 {
+      let columns = f64.trunc(pixels.x)
+      let rows = f64.trunc(pixels.y)
+      if columns == 0.0 || rows == 0.0 {
+        return Option<Program>.None
+      }
+      resolution = [columns, rows]
+    }
+  }
+  if width <= 0.0 || height <= 0.0 {
+    return Option<Program>.None
+  }
+  let region = if objectRegion {
+    Rect {
+      xMin: bounds.xMin + x * bounds.width(),
+      yMin: bounds.yMin + y * bounds.height(),
+      xMax: bounds.xMin + (x + width) * bounds.width(),
+      yMax: bounds.yMin + (y + height) * bounds.height(),
+    }
+  } else {
+    Rect { xMin: x, yMin: y, xMax: x + width, yMax: y + height }
+  }
+  if !isValidRect(region) || isEmptyRect(region) {
+    return Option<Program>.None
+  }
+  let units = Units {
+    objectBox: objectPrimitives,
+    bounds: bounds,
+    viewport: viewport,
+    region: region,
+  }
+  let mut program = Program.make(region)
+  program.resolution = resolution
+  let mut entries = List<Entry>.make()
+  let mut paints = Paints { fill: Option<usize>.None, stroke: Option<usize>.None }
+  let mut child = children(graph, node)
+  while true {
+    let next = match &child {
+      Option<OccurrenceId>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    child = graph.occurrences.asSlice()[next.index].nextSibling
+    let before = program.images
+    let found = run primitive(
+      graph,
+      &mut styles.*,
+      next,
+      entries.asSlice(),
+      &mut program,
+      &mut paints,
+      &units,
+      limits,
+    )
+
+    // One request per layer index, in order: paints as first named, then the feImage.
+    let mut index = before
+    while index < program.images {
+      let kind = if holds(paints.fill, index) {
+        LayerKind.Fill
+      } else if holds(paints.stroke, index) {
+        LayerKind.Stroke
+      } else {
+        LayerKind.Reference
+      }
+      let subregion = match &found {
+        Option<Primitive>.Some { value } => value.subregion
+        _ => region
+      }
+      run images.append(
+        FilterImage {
+          node: next,
+          kind: kind,
+          subregion: if kind == LayerKind.Reference {
+            subregion
+          } else {
+            region
+          },
+          objectBox: objectPrimitives,
+          bounds: bounds,
+        },
+      )
+      index = index + 1
+    }
+    if let Option<Primitive>.Some { value } = &found {
+      if entries.length() >= MAX_PRIMITIVES {
+        fail RenderError.TooLarge
+      }
+      run entries.append(Entry { node: next, subregion: value.subregion })
+      run program.primitives.append(value)
+    }
+  }
+  if program.primitives.length() == 0 {
+    return Option<Program>.None
+  }
+  return Option<Program>.some(move program)
+}
+
+/// SVG 1.1 #EnableBackgroundProperty (FE1 Appendix A): Some for `new`, with its region in
+/// the element's user space when given. A negative width or height is an error, which
+/// leaves `accumulate`.
+pub fn newBackground(engine: &Engine<'_>, style: StyleId) -> Option<Option<Rect>> {
+  if let Option<ComputedValue>.Some { value } = &engine.get(style, Property.EnableBackground) {
+    if let Value.Effect { value: found } = &engine.values.get(value.value).* {
+      if let EffectValue.Background { fresh, region } = &found {
+        if !fresh {
+          return Option<Option<Rect>>.None
+        }
+        if let Option<[ExprId; 4]>.Some { value: edges } = &region {
+          let numbers = &engine.values.numerics
+          let x = dimensions.evaluate(numbers, edges[0], 0.0)
+          let y = dimensions.evaluate(numbers, edges[1], 0.0)
+          let width = dimensions.evaluate(numbers, edges[2], 0.0)
+          let height = dimensions.evaluate(numbers, edges[3], 0.0)
+          if !(width >= 0.0) || !(height >= 0.0) {
+            return Option<Option<Rect>>.None
+          }
+          return Option<Option<Rect>>.some(
+            Option<Rect>.some(Rect { xMin: x, yMin: y, xMax: x + width, yMax: y + height }),
+          )
+        }
+        return Option<Option<Rect>>.some(Option<Rect>.None)
+      }
+    }
+  }
+  return Option<Option<Rect>>.None
+}
+
+/// What an image layer holds.
+pub enum LayerKind {
+  /// An `feImage` rendering.
+  Reference,
+  /// #attr-valuedef-in-fillpaint: the filtered element's fill over the filter region.
+  Fill,
+  /// #attr-valuedef-in-strokepaint: its stroke over the filter region.
+  Stroke,
+}
+
+/// An image layer for the caller to render, in the program's image order: the
+/// `feImage` occurrence (its href's shadow, or its image asset), and its subregion in the
+/// filtered element's user space. With `objectBox`, the referenced element renders in
+/// `bounds`' units (#feImageElement: the user coordinate system follows primitiveUnits).
+pub struct FilterImage {
+  pub node: OccurrenceId,
+  pub kind: LayerKind,
+  pub subregion: Rect,
+  pub objectBox: bool,
+  pub bounds: Rect,
+}
+
+impl Copy for FilterImage {}
+
+pub struct Shorthand {
+  pub program: Option<Program>,
+  /// The area the content covers after this function: the next function's region.
+  pub area: Rect,
+}
+
+effect fn matrix(program: &mut Program, values: [f64; 20]) -> Operation
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let first = program.numbers.length()
+  let mut i: usize = 0
+  while i < 20 {
+    run program.numbers.append(values[i])
+    i = i + 1
+  }
+  return Operation.ColorMatrix { kind: ColorMatrixKind.Matrix, first: first, count: 20 }
+}
+
+effect fn listed(program: &mut Program, kind: ColorMatrixKind, value: f64) -> Operation
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let first = program.numbers.length()
+  run program.numbers.append(value)
+  return Operation.ColorMatrix { kind: kind, first: first, count: 1 }
+}
+
+effect fn table(program: &mut Program, low: f64, high: f64) -> Function
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let first = program.numbers.length()
+  run program.numbers.append(low)
+  run program.numbers.append(high)
+  return Function.Table { first: first, count: 2 }
+}
+
+// Blurs spread 3 deviations, plus up to two pixels for the box approximation's rounding.
+fn grown(area: Rect, by: f64) -> Rect {
+  return Rect {
+    xMin: area.xMin - by,
+    yMin: area.yMin - by,
+    xMax: area.xMax + by,
+    yMax: area.yMax + by,
+  }
+}
+
+/// The `filter` list item `item` of `style`, a filter function, as the program of its
+/// markup equivalent (#FilterPrimitiveRepresentation), run in sRGB
+/// (#ColorInterpolationFiltersProperty) over `area` grown by what it spreads.
+pub effect fn shorthand(
+  styles: &mut StyledGraph<'_>,
+  style: StyleId,
+  item: usize,
+  area: Rect,
+) -> Shorthand
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let engine = &styles.catalog.engine
+  let entry = match &engine.get(style, Property.Filter) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let filter = match &engine.values.get(entry.value).* {
+    Value.Effect { value } => match &value {
+      EffectValue.Filters { items } => &items.asSlice()[item]
+      _ => {
+        fail RenderError.InvalidStyleContext
+      }
+    }
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let numerics = &engine.values.numerics
+  let mut covered = area
+  let mut program = Program.make(area)
+  let operation = match &filter.* {
+    Filter.Function { kind, amount } => {
+      let a = dimensions.evaluate(numerics, amount, 1.0)
+      if !f64.isFinite(a) {
+        fail RenderError.InvalidGeometry
+      }
+      let r = 1.0 - a
+      match kind {
+        FilterKind.Grayscale => run matrix(
+          &mut program,
+          [
+            0.2126 + 0.7874 * r,
+            0.7152 - 0.7152 * r,
+            0.0722 - 0.0722 * r,
+            0.0,
+            0.0,
+            0.2126 - 0.2126 * r,
+            0.7152 + 0.2848 * r,
+            0.0722 - 0.0722 * r,
+            0.0,
+            0.0,
+            0.2126 - 0.2126 * r,
+            0.7152 - 0.7152 * r,
+            0.0722 + 0.9278 * r,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+          ],
+        )
+        FilterKind.Sepia => run matrix(
+          &mut program,
+          [
+            0.393 + 0.607 * r,
+            0.769 - 0.769 * r,
+            0.189 - 0.189 * r,
+            0.0,
+            0.0,
+            0.349 - 0.349 * r,
+            0.686 + 0.314 * r,
+            0.168 - 0.168 * r,
+            0.0,
+            0.0,
+            0.272 - 0.272 * r,
+            0.534 - 0.534 * r,
+            0.131 + 0.869 * r,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+          ],
+        )
+        FilterKind.Saturate => run listed(&mut program, ColorMatrixKind.Saturate, a)
+        FilterKind.HueRotate => run listed(&mut program, ColorMatrixKind.HueRotate, a)
+        FilterKind.Invert => {
+          let channel = run table(&mut program, a, 1.0 - a)
+          Operation.ComponentTransfer { functions: [channel, channel, channel, Function.Identity] }
+        }
+        FilterKind.Opacity => {
+          let alpha = run table(&mut program, 0.0, a)
+          Operation.ComponentTransfer {
+            functions: [Function.Identity, Function.Identity, Function.Identity, alpha],
+          }
+        }
+        FilterKind.Brightness => {
+          let channel = Function.Linear { slope: a, intercept: 0.0 }
+          Operation.ComponentTransfer { functions: [channel, channel, channel, Function.Identity] }
+        }
+        FilterKind.Contrast => {
+          let channel = Function.Linear { slope: a, intercept: 0.5 - 0.5 * a }
+          Operation.ComponentTransfer { functions: [channel, channel, channel, Function.Identity] }
+        }
+        FilterKind.Blur => {
+          let deviation = dimensions.evaluate(numerics, amount, 0.0)
+          if !f64.isFinite(deviation) {
+            fail RenderError.InvalidGeometry
+          }
+          if deviation > 0.0 {
+            covered = grown(area, 3.0 * deviation + 2.0)
+            Operation.Blur { x: deviation, y: deviation }
+          } else {
+            Operation.Copy
+          }
+        }
+      }
+    }
+    Filter.DropShadow { x, y, blur, color } => {
+      let dx = dimensions.evaluate(numerics, x, 0.0)
+      let dy = dimensions.evaluate(numerics, y, 0.0)
+      let deviation = f64.max(0.0, dimensions.evaluate(numerics, blur, 0.0))
+      if !f64.isFinite(dx) || !f64.isFinite(dy) || !f64.isFinite(deviation) {
+        fail RenderError.InvalidGeometry
+      }
+      let shadow = grown(
+        Rect {
+          xMin: area.xMin + dx,
+          yMin: area.yMin + dy,
+          xMax: area.xMax + dx,
+          yMax: area.yMax + dy,
+        },
+        3.0 * deviation + 2.0,
+      )
+
+      // The blur runs before the offset, so its spread around the unshifted alpha counts too.
+      covered = match &unitedRects(grown(area, 3.0 * deviation + 2.0), shadow) {
+        Option<Rect>.Some { value } => value
+        _ => area
+      }
+      let srgb = colors.toSrgb(used_paints.resolveCurrent(engine, style, color))
+      Operation.DropShadow {
+        dx: dx,
+        dy: dy,
+        x: deviation,
+        y: deviation,
+        color: Rgba { r: srgb.r, g: srgb.g, b: srgb.b, a: srgb.a },
+      }
+    }
+    Filter.Url { url } => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  program.region = covered
+  run program.primitives.append(
+    Primitive {
+      operation: operation,
+      input: Input.SourceGraphic,
+      input2: Input.Transparent,
+      subregion: covered,
+      linearRgb: false,
+    },
+  )
+  return Shorthand { program: Option<Program>.some(move program), area: covered }
+}

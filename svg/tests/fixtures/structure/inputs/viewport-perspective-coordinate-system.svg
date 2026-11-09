@@ -1,0 +1,2 @@
+<!-- SVG2 coords#TransformProperty puts viewport transforms outside its viewBox. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><svg x="8" y="8" width="8" height="8" viewBox="0 0 4 4" style="perspective:32px;perspective-origin:0 0"><rect width="1" height="1" style="transform:translateZ(16px)"/></svg><rect x="24" width="8" height="8" fill="red"/></svg>

@@ -1,0 +1,264 @@
+//! Computed CSS basic shapes in the selected clipping reference box.
+import scene { FillRule, RenderError }
+import svg_css.computed { Engine }
+import svg_css.effect_values { Shape, RectangleKind, RadialSize, Extent }
+import svg_css.transform_values { PositionAxis, Edge }
+import svg_css.dimensions { ExprId }
+import svg_css.dimensions
+import svg_geometry.geometry { Path, Point, Rect, Segment, Arc, Size }
+import svg_geometry.svg
+import svg_geometry.math
+import silk.core.option { Option }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+
+pub struct Geometry {
+  pub path: Path,
+  pub rule: FillRule,
+}
+
+effect fn number(engine: &Engine<'_>, expression: ExprId, basis: f64) -> f64
+  ! RenderError {
+  let value = dimensions.evaluate(&engine.values.numerics, expression, basis)
+  if !f64.isFinite(value) {
+    fail RenderError.InvalidGeometry
+  }
+  return value
+}
+
+effect fn position(engine: &Engine<'_>, axis: PositionAxis, basis: f64) -> f64
+  ! RenderError {
+  let offset = run number(engine, axis.offset, basis)
+  return match axis.edge {
+    Edge.Start => offset
+    Edge.Center => basis * 0.5 + offset
+    Edge.End => basis - offset
+  }
+}
+
+fn arc(rx: f64, ry: f64, x: f64, y: f64) -> Segment {
+  return Segment.ArcTo {
+    arc: Arc {
+      radii: Size.new(rx, ry),
+      rotationDegrees: 0.0,
+      largeArc: false,
+      sweep: true,
+      to: Point.new(x, y),
+    },
+  }
+}
+
+pub effect fn build(engine: &Engine<'_>, shape: &Shape, box: Rect) -> Option<Geometry>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = Path.make()
+  let mut rule = FillRule.Nonzero
+  match &shape.* {
+    Shape.Ellipse { circle, size, position: center } => {
+      let cx = run position(engine, center.x, box.width())
+      let cy = run position(engine, center.y, box.height())
+      let mut rx: f64 = 0.0
+      let mut ry: f64 = 0.0
+      match &size {
+        RadialSize.Radii { x, y } => {
+          rx = run number(
+            engine,
+            x,
+            if circle {
+              math.hypot(box.width(), box.height()) / f64.sqrt(2.0)
+            } else {
+              box.width()
+            },
+          )
+          ry = match &y {
+            Option<ExprId>.Some { value } => run number(engine, value, box.height())
+            _ => rx
+          }
+        }
+        RadialSize.Extent { extent } => {
+          let far = extent == Extent.FarthestSide || extent == Extent.FarthestCorner
+          let dx = if far {
+            f64.max(f64.abs(cx), f64.abs(box.width() - cx))
+          } else {
+            f64.min(f64.abs(cx), f64.abs(box.width() - cx))
+          }
+          let dy = if far {
+            f64.max(f64.abs(cy), f64.abs(box.height() - cy))
+          } else {
+            f64.min(f64.abs(cy), f64.abs(box.height() - cy))
+          }
+          rx = dx
+          ry = dy
+          if circle {
+            rx = if extent == Extent.ClosestCorner || extent == Extent.FarthestCorner {
+              math.hypot(dx, dy)
+            } else if far {
+              f64.max(dx, dy)
+            } else {
+              f64.min(dx, dy)
+            }
+            ry = rx
+          }
+        }
+      }
+      result = run svg.ellipse(cx, cy, f64.max(0.0, rx), f64.max(0.0, ry))
+    }
+    Shape.Rectangle { kind, edges, corners } => {
+      let mut values: [f64; 4] = [0.0; 4]
+      let mut i: usize = 0
+      while i < 4 {
+        let basis = if kind == RectangleKind.Xywh {
+          if i % 2 == 0 {
+            box.width()
+          } else {
+            box.height()
+          }
+        } else {
+          if i % 2 == 0 {
+            box.height()
+          } else {
+            box.width()
+          }
+        }
+        values[i] = match &edges[i] {
+          Option<ExprId>.Some { value } => run number(engine, value, basis)
+          _ => if kind == RectangleKind.Rect && (i == 1 || i == 2) {
+            basis
+          } else {
+            0.0
+          }
+        }
+        i = i + 1
+      }
+      let mut left = values[3]
+      let mut top = values[0]
+      let mut right = values[1]
+      let mut bottom = values[2]
+      if kind == RectangleKind.Inset {
+        if left + right > box.width() {
+          let scale = box.width() / (left + right)
+          left = left * scale
+          right = right * scale
+        }
+        if top + bottom > box.height() {
+          let scale = box.height() / (top + bottom)
+          top = top * scale
+          bottom = bottom * scale
+        }
+        right = box.width() - right
+        bottom = box.height() - bottom
+      } else if kind == RectangleKind.Xywh {
+        left = values[0]
+        top = values[1]
+        right = left + values[2]
+        bottom = top + values[3]
+      }
+      let width = f64.max(0.0, right - left)
+      let height = f64.max(0.0, bottom - top)
+      let mut rx: [f64; 4] = [0.0; 4]
+      let mut ry: [f64; 4] = [0.0; 4]
+      i = 0
+      while i < 4 {
+        rx[i] = f64.max(0.0, run number(engine, corners.x[i], box.width()))
+        ry[i] = f64.max(0.0, run number(engine, corners.y[i], box.height()))
+        if rx[i] == 0.0 || ry[i] == 0.0 {
+          rx[i] = 0.0
+          ry[i] = 0.0
+        }
+        i = i + 1
+      }
+      let mut scale = 1.0
+      let sums = [rx[0] + rx[1], ry[1] + ry[2], rx[2] + rx[3], ry[3] + ry[0]]
+      i = 0
+      while i < 4 {
+        if sums[i] > 0.0 {
+          scale = f64.min(
+            scale,
+            (if i % 2 == 0 {
+              width
+            } else {
+              height
+            })
+              / sums[i],
+          )
+        }
+        i = i + 1
+      }
+      i = 0
+      while i < 4 {
+        rx[i] = rx[i] * scale
+        ry[i] = ry[i] * scale
+        i = i + 1
+      }
+      if width > 0.0 && height > 0.0 {
+        let segments = [
+          Segment.MoveTo { to: Point.new(left + rx[0], top) },
+          Segment.LineTo { to: Point.new(right - rx[1], top) },
+          arc(rx[1], ry[1], right, top + ry[1]),
+          Segment.LineTo { to: Point.new(right, bottom - ry[2]) },
+          arc(rx[2], ry[2], right - rx[2], bottom),
+          Segment.LineTo { to: Point.new(left + rx[3], bottom) },
+          arc(rx[3], ry[3], left, bottom - ry[3]),
+          Segment.LineTo { to: Point.new(left, top + ry[0]) },
+          arc(rx[0], ry[0], left + rx[0], top),
+          Segment.Close,
+        ]
+        i = 0
+        while i < segments.length {
+          if !(run result.append(segments[i])) {
+            fail RenderError.InvalidGeometry
+          }
+          i = i + 1
+        }
+      }
+    }
+    Shape.Path { evenodd, path } => {
+      // path() coordinates are CSS pixels relative to the reference-box origin.
+      // Retain that origin separately in the caller's mapping.
+      let segments = path.segments()
+      let mut i: usize = 0
+      while i < segments.length {
+        if !(run result.append(segments[i])) {
+          fail RenderError.InvalidGeometry
+        }
+        i = i + 1
+      }
+      if evenodd {
+        rule = FillRule.EvenOdd
+      }
+    }
+    Shape.Polygon { evenodd, round, points } => {
+      if round.isSome() {
+        return Option<Geometry>.None
+      }
+      let mut i: usize = 0
+      while i < points.length() {
+        let point = points.asSlice()[i]
+        let to = Point.new(
+          run number(engine, point.x, box.width()),
+          run number(engine, point.y, box.height()),
+        )
+        if !(run result.append(
+          if i == 0 {
+            Segment.MoveTo { to: to }
+          } else {
+            Segment.LineTo { to: to }
+          },
+        )) {
+          fail RenderError.InvalidGeometry
+        }
+        i = i + 1
+      }
+      if !result.isEmpty() {
+        drop run result.append(Segment.Close)
+      }
+      if evenodd {
+        rule = FillRule.EvenOdd
+      }
+    }
+    _ => {
+      return Option<Geometry>.None
+    }
+  }
+  return Option<Geometry>.Some { value: Geometry { path: move result, rule: rule } }
+}

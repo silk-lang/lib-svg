@@ -1,0 +1,224 @@
+//! Boolean regions of flattened clipping paths, before antialias coverage.
+import svg_core.scene { ClipNode, FillRule, RenderError }
+import vector.flatten { Line }
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f32
+import silk.num.f64
+
+struct Edge {
+  line: Line,
+  owner: usize,
+}
+
+impl Copy for Edge {}
+
+fn xAt(line: Line, y: f64) -> f64 {
+  let y0 = f32.toF64(line.y0)
+  return f32.toF64(line.x0)
+    + (y - y0) / (f32.toF64(line.y1) - y0) * (f32.toF64(line.x1) - f32.toF64(line.x0))
+}
+
+effect fn charge(work: &mut usize) -> ()
+  ! RenderError {
+  if work.* >= 16777216 {
+    fail RenderError.TooLarge
+  }
+  work.* = work.* + 1
+}
+
+// `count` charges at once: fails exactly when charging one at a time would.
+effect fn chargeMany(work: &mut usize, count: usize) -> ()
+  ! RenderError {
+  if count > 16777216 || work.* > 16777216 - count {
+    fail RenderError.TooLarge
+  }
+  work.* = work.* + count
+}
+
+effect fn event(events: &mut List<f64>, y: f64, work: &mut usize) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if !f64.isFinite(y) {
+    fail RenderError.InvalidGeometry
+  }
+  let mut i = events.length()
+  run events.append(y)
+  let mut values = events.asMutSlice()
+  while i > 0 && values[i - 1] > y {
+    run charge(&mut work.*)
+    values[i] = values[i - 1]
+    i = i - 1
+  }
+  values[i] = y
+}
+
+// Edge crossings are the only places where horizontal ordering changes.
+// Between consecutive events each boolean region is a set of trapezoids.
+pub effect fn combine(
+  nodes: &[ClipNode],
+  leaves: &[List<Line>],
+  root: usize,
+  needed: &[bool],
+) -> List<Line>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut work: usize = 0
+  let mut edges = List<Edge>.make()
+  let mut events = List<f64>.make()
+  let mut owner: usize = 0
+  while owner <= root {
+    let source = leaves[owner].asSlice()
+    let mut i: usize = 0
+    while i < source.length {
+      run charge(&mut work)
+      let line = source[i]
+      if line.y0 != line.y1 {
+        run edges.append(Edge { line: line, owner: owner })
+        run event(&mut events, f32.toF64(line.y0), &mut work)
+        run event(&mut events, f32.toF64(line.y1), &mut work)
+      }
+      i = i + 1
+    }
+    owner = owner + 1
+  }
+  let mut a: usize = 0
+  while a < edges.length() {
+    let first = edges.asSlice()[a].line
+    let mut b = a + 1
+    while b < edges.length() {
+      run charge(&mut work)
+      let second = edges.asSlice()[b].line
+      let low = f64.max(
+        f32.toF64(f32.min(first.y0, first.y1)),
+        f32.toF64(f32.min(second.y0, second.y1)),
+      )
+      let high = f64.min(
+        f32.toF64(f32.max(first.y0, first.y1)),
+        f32.toF64(f32.max(second.y0, second.y1)),
+      )
+      if low < high {
+        let d0 = xAt(first, low) - xAt(second, low)
+        let d1 = xAt(first, high) - xAt(second, high)
+        if (d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0) {
+          run event(&mut events, low + (high - low) * (d0 / (d0 - d1)), &mut work)
+        }
+      }
+      b = b + 1
+    }
+    a = a + 1
+  }
+  let mut winding = List<i32>.make()
+  let mut inside = List<bool>.make()
+  owner = 0
+  while owner <= root {
+    run winding.append(0)
+    run inside.append(false)
+    owner = owner + 1
+  }
+  let mut active = List<usize>.make()
+  let mut activeX = List<f64>.make()
+  let mut output = List<Line>.make()
+  let mut slab: usize = 1
+  while slab < events.length() {
+    let low = events.asSlice()[slab - 1]
+    let high = events.asSlice()[slab]
+    slab = slab + 1
+    if low == high {
+      continue
+    }
+    let middle = low + (high - low) * 0.5
+    active.clear()
+    activeX.clear()
+    a = 0
+    while a < edges.length() {
+      run charge(&mut work)
+      let line = edges.asSlice()[a].line
+      if middle > f32.toF64(f32.min(line.y0, line.y1))
+        && middle < f32.toF64(f32.max(line.y0, line.y1)) {
+        // Each active edge's x at the middle is kept beside it, not recomputed per shift.
+        let x = xAt(line, middle)
+        let mut at = active.length()
+        run active.append(a)
+        run activeX.append(x)
+        let mut entries = active.asMutSlice()
+        let mut xs = activeX.asMutSlice()
+        while at > 0 && xs[at - 1] > x {
+          run charge(&mut work)
+          entries[at] = entries[at - 1]
+          xs[at] = xs[at - 1]
+          at = at - 1
+        }
+        entries[at] = a
+        xs[at] = x
+      }
+      a = a + 1
+    }
+
+    // With every count zero every node is outside, so each edge below only re-evaluates
+    // the nodes from its owner up: references point backward, and lower nodes kept their
+    // counts.
+    owner = 0
+    while owner <= root {
+      let mut values = winding.asMutSlice()
+      values[owner] = 0
+      let mut states = inside.asMutSlice()
+      states[owner] = false
+      owner = owner + 1
+    }
+    a = 0
+    while a + 1 < active.length() {
+      let edge = edges.asSlice()[active.asSlice()[a]]
+      let mut counts = winding.asMutSlice()
+      counts[edge.owner] = counts[edge.owner]
+        + if edge.line.y1 > edge.line.y0 {
+          1
+        } else {
+          -1
+        }
+      run chargeMany(&mut work, root + 1)
+      owner = edge.owner
+      while owner <= root {
+        let value = if !needed[owner] {
+          false
+        } else {
+          match &nodes[owner] {
+            ClipNode.Empty => false
+            ClipNode.Shape { path, transform, rule } => if rule == FillRule.EvenOdd {
+              counts[owner] % 2 != 0
+            } else {
+              counts[owner] != 0
+            }
+            ClipNode.Union { left, right } => inside.asSlice()[left] || inside.asSlice()[right]
+            ClipNode.Intersect { left, right } => inside.asSlice()[left] && inside.asSlice()[right]
+          }
+        }
+        let mut values = inside.asMutSlice()
+        values[owner] = value
+        owner = owner + 1
+      }
+      let next = edges.asSlice()[active.asSlice()[a + 1]].line
+      if inside.asSlice()[root] && activeX.asSlice()[a] < activeX.asSlice()[a + 1] {
+        run output.append(
+          Line {
+            x0: f64.toF32(xAt(edge.line, low)),
+            y0: f64.toF32(low),
+            x1: f64.toF32(xAt(edge.line, high)),
+            y1: f64.toF32(high),
+          },
+        )
+        run output.append(
+          Line {
+            x0: f64.toF32(xAt(next, high)),
+            y0: f64.toF32(high),
+            x1: f64.toF32(xAt(next, low)),
+            y1: f64.toF32(low),
+          },
+        )
+      }
+      a = a + 1
+    }
+  }
+  return move output
+}

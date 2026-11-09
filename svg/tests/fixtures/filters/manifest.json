@@ -1,0 +1,2205 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "reference",
+  "cases": [
+    {
+      "id": "offset-user",
+      "input": "inputs/offset-user.svg",
+      "references": [
+        {
+          "path": "references/offset-user.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feOffset moves SourceGraphic by dx, dy in user units.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feOffsetElement",
+      "tolerance": {}
+    },
+    {
+      "id": "offset-bbox-units",
+      "input": "inputs/offset-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/offset-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With primitiveUnits=objectBoundingBox, dx and dy are fractions of the bounding box.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitiveunits",
+      "tolerance": {}
+    },
+    {
+      "id": "region-clips",
+      "input": "inputs/region-clips.svg",
+      "references": [
+        {
+          "path": "references/region-clips.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The filter region is a hard clip on the filter result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#filter-region",
+      "tolerance": {}
+    },
+    {
+      "id": "region-default",
+      "input": "inputs/region-default.svg",
+      "references": [
+        {
+          "path": "references/region-default.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The default filter region is -10%, -10%, 120%, 120% of the bounding box.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-x",
+      "tolerance": {}
+    },
+    {
+      "id": "region-bbox",
+      "input": "inputs/region-bbox.svg",
+      "references": [
+        {
+          "path": "references/region-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "filterUnits=objectBoundingBox resolves x, y, width and height against the bounding box.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-filterunits",
+      "tolerance": {}
+    },
+    {
+      "id": "flood",
+      "input": "inputs/flood.svg",
+      "references": [
+        {
+          "path": "references/flood.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feFlood fills its subregion, by default the filter region, with flood-color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feFloodElement",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-subregion",
+      "input": "inputs/flood-subregion.svg",
+      "references": [
+        {
+          "path": "references/flood-subregion.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "x, y, width and height of a primitive set its subregion in primitiveUnits.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-subregion-bbox",
+      "input": "inputs/flood-subregion-bbox.svg",
+      "references": [
+        {
+          "path": "references/flood-subregion-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Subregion attributes in objectBoundingBox primitive units are fractions or percentages of the box.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-subregion-clipped",
+      "input": "inputs/flood-subregion-clipped.svg",
+      "references": [
+        {
+          "path": "references/flood-subregion-clipped.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A subregion is clipped by the filter region.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-disabled",
+      "input": "inputs/flood-disabled.svg",
+      "references": [
+        {
+          "path": "references/flood-disabled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A primitive with a zero-width subregion is disabled: its result is transparent black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-opacity",
+      "input": "inputs/flood-opacity.svg",
+      "references": [
+        {
+          "path": "references/flood-opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "flood-opacity multiplies the flood color's alpha.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FloodOpacityProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-color-alpha",
+      "input": "inputs/flood-color-alpha.svg",
+      "references": [
+        {
+          "path": "references/flood-color-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A transparent flood-color stays transparent whatever flood-opacity is.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FloodColorProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "merge",
+      "input": "inputs/merge.svg",
+      "references": [
+        {
+          "path": "references/merge.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feMerge composites its nodes in order, each over the previous ones.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feMergeElement",
+      "tolerance": {}
+    },
+    {
+      "id": "merge-order",
+      "input": "inputs/merge-order.svg",
+      "references": [
+        {
+          "path": "references/merge-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Later feMergeNode inputs are drawn over earlier ones.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feMergeElement",
+      "tolerance": {}
+    },
+    {
+      "id": "source-alpha",
+      "input": "inputs/source-alpha.svg",
+      "references": [
+        {
+          "path": "references/source-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "SourceAlpha is the source's alpha with black color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-sourcealpha",
+      "tolerance": {}
+    },
+    {
+      "id": "result-named",
+      "input": "inputs/result-named.svg",
+      "references": [
+        {
+          "path": "references/result-named.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "in names the closest preceding primitive with that result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in",
+      "tolerance": {}
+    },
+    {
+      "id": "result-duplicate",
+      "input": "inputs/result-duplicate.svg",
+      "references": [
+        {
+          "path": "references/result-duplicate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "When a result name repeats, references use the closest preceding primitive.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-result",
+      "tolerance": {}
+    },
+    {
+      "id": "result-missing",
+      "input": "inputs/result-missing.svg",
+      "references": [
+        {
+          "path": "references/result-missing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A reference to a non-existent result acts as unspecified: the previous result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in",
+      "tolerance": {}
+    },
+    {
+      "id": "result-forward-first",
+      "input": "inputs/result-forward-first.svg",
+      "references": [
+        {
+          "path": "references/result-forward-first.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A first primitive without a usable in reads SourceGraphic.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitive-in",
+      "tolerance": {}
+    },
+    {
+      "id": "default-subregion-union",
+      "input": "inputs/default-subregion-union.svg",
+      "references": [
+        {
+          "path": "references/default-subregion-union.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Without x/y/width/height a primitive's subregion is the union of its referenced results' subregions.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "default-subregion-standard",
+      "input": "inputs/default-subregion-standard.svg",
+      "references": [
+        {
+          "path": "references/default-subregion-standard.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Referencing a standard input makes the default subregion the filter region.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-in",
+      "input": "inputs/composite-in.svg",
+      "references": [
+        {
+          "path": "references/composite-in.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "operator=in keeps the input where in2 has alpha.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-out",
+      "input": "inputs/composite-out.svg",
+      "references": [
+        {
+          "path": "references/composite-out.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "operator=out keeps the input where in2 is transparent.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-over",
+      "input": "inputs/composite-over.svg",
+      "references": [
+        {
+          "path": "references/composite-over.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The initial operator is over, drawing in over in2.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-atop",
+      "input": "inputs/composite-atop.svg",
+      "references": [
+        {
+          "path": "references/composite-atop.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "operator=atop draws in over in2 only where in2 has alpha.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-xor",
+      "input": "inputs/composite-xor.svg",
+      "references": [
+        {
+          "path": "references/composite-xor.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "operator=xor keeps each input where the other is transparent.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "composite-arithmetic",
+      "input": "inputs/composite-arithmetic.svg",
+      "references": [
+        {
+          "path": "references/composite-arithmetic.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "operator=arithmetic computes k1 i1 i2 + k2 i1 + k3 i2 + k4, clamped.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecomposite-operator",
+      "tolerance": {}
+    },
+    {
+      "id": "blend-multiply",
+      "input": "inputs/blend-multiply.svg",
+      "references": [
+        {
+          "path": "references/blend-multiply.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feBlend blends in onto in2 with the mode's blend function, like mix-blend-mode.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feBlendElement",
+      "tolerance": {}
+    },
+    {
+      "id": "color-matrix-matrix",
+      "input": "inputs/color-matrix-matrix.svg",
+      "references": [
+        {
+          "path": "references/color-matrix-matrix.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "type=matrix applies the 5x4 matrix to straight RGBA.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecolormatrix-values",
+      "tolerance": {}
+    },
+    {
+      "id": "color-matrix-short",
+      "input": "inputs/color-matrix-short.svg",
+      "references": [
+        {
+          "path": "references/color-matrix-short.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A matrix with the wrong number of values falls back to the identity default.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecolormatrix-values",
+      "tolerance": {}
+    },
+    {
+      "id": "color-matrix-luminance",
+      "input": "inputs/color-matrix-luminance.svg",
+      "references": [
+        {
+          "path": "references/color-matrix-luminance.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "luminanceToAlpha moves luminance to alpha and zeroes color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-type-luminancetoalpha",
+      "tolerance": {}
+    },
+    {
+      "id": "color-matrix-saturate-one",
+      "input": "inputs/color-matrix-saturate-one.svg",
+      "references": [
+        {
+          "path": "references/color-matrix-saturate-one.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "saturate defaults to 1, which leaves colors unchanged.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fecolormatrix-values",
+      "tolerance": {}
+    },
+    {
+      "id": "component-transfer",
+      "input": "inputs/component-transfer.svg",
+      "references": [
+        {
+          "path": "references/component-transfer.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Each feFuncX maps its channel: linear, table and discrete.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feComponentTransferElement",
+      "tolerance": {}
+    },
+    {
+      "id": "component-transfer-gamma",
+      "input": "inputs/component-transfer-gamma.svg",
+      "references": [
+        {
+          "path": "references/component-transfer-gamma.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "type=gamma computes amplitude C^exponent + offset.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feComponentTransferElement",
+      "tolerance": {}
+    },
+    {
+      "id": "component-transfer-last",
+      "input": "inputs/component-transfer-last.svg",
+      "references": [
+        {
+          "path": "references/component-transfer-last.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A later feFuncR replaces an earlier one.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feComponentTransferElement",
+      "tolerance": {}
+    },
+    {
+      "id": "morphology-dilate",
+      "input": "inputs/morphology-dilate.svg",
+      "references": [
+        {
+          "path": "references/morphology-dilate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "dilate takes the maximum over a (2 rx + 1) x (2 ry + 1) window.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feMorphologyElement",
+      "tolerance": {}
+    },
+    {
+      "id": "morphology-erode",
+      "input": "inputs/morphology-erode.svg",
+      "references": [
+        {
+          "path": "references/morphology-erode.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "erode, the initial operator, takes the minimum; two numbers give x and y radii.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feMorphologyElement",
+      "tolerance": {}
+    },
+    {
+      "id": "morphology-zero",
+      "input": "inputs/morphology-zero.svg",
+      "references": [
+        {
+          "path": "references/morphology-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero radius disables the primitive: the result is the input.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-femorphology-radius",
+      "tolerance": {}
+    },
+    {
+      "id": "tile",
+      "input": "inputs/tile.svg",
+      "references": [
+        {
+          "path": "references/tile.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feTile repeats its input's subregion across its own subregion.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feTileElement",
+      "tolerance": {}
+    },
+    {
+      "id": "blur-zero",
+      "input": "inputs/blur-zero.svg",
+      "references": [
+        {
+          "path": "references/blur-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "stdDeviation 0 disables the blur: the result is the input.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fegaussianblur-stddeviation",
+      "tolerance": {}
+    },
+    {
+      "id": "blur-negative",
+      "input": "inputs/blur-negative.svg",
+      "references": [
+        {
+          "path": "references/blur-negative.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A negative stdDeviation disables the blur: the result is the input.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fegaussianblur-stddeviation",
+      "tolerance": {}
+    },
+    {
+      "id": "drop-shadow-sharp",
+      "input": "inputs/drop-shadow-sharp.svg",
+      "references": [
+        {
+          "path": "references/drop-shadow-sharp.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feDropShadow is the offset, flood-colored alpha of its input merged under the input.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDropShadowElement",
+      "tolerance": {}
+    },
+    {
+      "id": "no-primitives",
+      "input": "inputs/no-primitives.svg",
+      "references": [
+        {
+          "path": "references/no-primitives.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An element whose filter has no primitives is not rendered.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveTree",
+      "tolerance": {}
+    },
+    {
+      "id": "missing-reference",
+      "input": "inputs/missing-reference.svg",
+      "references": [
+        {
+          "path": "references/missing-reference.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A reference to a non-existent object ignores the whole filter chain.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "not-a-filter",
+      "input": "inputs/not-a-filter.svg",
+      "references": [
+        {
+          "path": "references/not-a-filter.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A reference to an element that is not a filter ignores the whole filter chain.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "chain-missing",
+      "input": "inputs/chain-missing.svg",
+      "references": [
+        {
+          "path": "references/chain-missing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "One invalid reference ignores every filter in the list.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "zero-region",
+      "input": "inputs/zero-region.svg",
+      "references": [
+        {
+          "path": "references/zero-region.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero-width filter region disables rendering of the filtered element.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-width",
+      "tolerance": {}
+    },
+    {
+      "id": "empty-group-user",
+      "input": "inputs/empty-group-user.svg",
+      "references": [
+        {
+          "path": "references/empty-group-user.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A filter on an empty group still runs; flood needs no source.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterEffectsRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "empty-group-bbox",
+      "input": "inputs/empty-group-bbox.svg",
+      "references": [
+        {
+          "path": "references/empty-group-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Bounding-box units on an empty bounding box leave nothing to render.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-filterunits",
+      "tolerance": {}
+    },
+    {
+      "id": "chain",
+      "input": "inputs/chain.svg",
+      "references": [
+        {
+          "path": "references/chain.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "In a filter list each filter's input is the previous filter's result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "chain-order",
+      "input": "inputs/chain-order.svg",
+      "references": [
+        {
+          "path": "references/chain-order.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The first filter in the list runs first: its region clips before the second filter's offset.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "scaled",
+      "input": "inputs/scaled.svg",
+      "references": [
+        {
+          "path": "references/scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Primitive parameters are in user space and scale with the current transform.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitiveunits",
+      "tolerance": {}
+    },
+    {
+      "id": "rotated",
+      "input": "inputs/rotated.svg",
+      "references": [
+        {
+          "path": "references/rotated.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Filters run in the element's local coordinate system and the result is then transformed.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#filter-region",
+      "tolerance": {}
+    },
+    {
+      "id": "linear-rgb",
+      "input": "inputs/linear-rgb.svg",
+      "references": [
+        {
+          "path": "references/linear-rgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The initial color-interpolation-filters works in linearRGB and converts the result back to sRGB.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#ColorInterpolationFiltersProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "clipped-by-viewport",
+      "input": "inputs/clipped-by-viewport.svg",
+      "references": [
+        {
+          "path": "references/clipped-by-viewport.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An enclosing viewport's clip applies to the filter result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#filter-region",
+      "tolerance": {}
+    },
+    {
+      "id": "then-clip-path",
+      "input": "inputs/then-clip-path.svg",
+      "references": [
+        {
+          "path": "references/then-clip-path.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The filter applies before clip-path, which clips the filtered result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#placement",
+      "tolerance": {}
+    },
+    {
+      "id": "then-opacity",
+      "input": "inputs/then-opacity.svg",
+      "references": [
+        {
+          "path": "references/then-opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "opacity applies to the filtered result.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#placement",
+      "tolerance": {}
+    },
+    {
+      "id": "blur-subregion",
+      "input": "inputs/blur-subregion.svg",
+      "references": [
+        {
+          "path": "references/blur-subregion.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A subregion clips the blur's result, not its input: pixels outside it still spread into it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveSubRegion",
+      "tolerance": {}
+    },
+    {
+      "id": "blur-bbox-units",
+      "input": "inputs/blur-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/blur-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "stdDeviation in objectBoundingBox units scales by the box's width and height.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitiveunits",
+      "tolerance": {}
+    },
+    {
+      "id": "drop-shadow",
+      "input": "inputs/drop-shadow.svg",
+      "references": [
+        {
+          "path": "references/drop-shadow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feDropShadow equals its spec expansion: blur, offset, flood, composite in, merge.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDropShadowElement",
+      "tolerance": {}
+    },
+    {
+      "id": "function-grayscale",
+      "input": "inputs/function-grayscale.svg",
+      "references": [
+        {
+          "path": "references/function-grayscale.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "grayscale() is its feColorMatrix equivalent.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-sepia",
+      "input": "inputs/function-sepia.svg",
+      "references": [
+        {
+          "path": "references/function-sepia.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "sepia() is its feColorMatrix equivalent.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-saturate",
+      "input": "inputs/function-saturate.svg",
+      "references": [
+        {
+          "path": "references/function-saturate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "saturate() is feColorMatrix type=saturate.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-hue-rotate",
+      "input": "inputs/function-hue-rotate.svg",
+      "references": [
+        {
+          "path": "references/function-hue-rotate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "hue-rotate() is feColorMatrix type=hueRotate in degrees.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-invert",
+      "input": "inputs/function-invert.svg",
+      "references": [
+        {
+          "path": "references/function-invert.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "invert() is its feComponentTransfer table equivalent.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-opacity",
+      "input": "inputs/function-opacity.svg",
+      "references": [
+        {
+          "path": "references/function-opacity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "opacity() scales alpha through a table.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-brightness",
+      "input": "inputs/function-brightness.svg",
+      "references": [
+        {
+          "path": "references/function-brightness.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "brightness() is a linear transfer with the amount as slope.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-contrast",
+      "input": "inputs/function-contrast.svg",
+      "references": [
+        {
+          "path": "references/function-contrast.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "contrast() is a linear transfer around 0.5.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-blur",
+      "input": "inputs/function-blur.svg",
+      "references": [
+        {
+          "path": "references/function-blur.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "blur() is feGaussianBlur with the length as standard deviation, in a region covering its spread.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-drop-shadow",
+      "input": "inputs/function-drop-shadow.svg",
+      "references": [
+        {
+          "path": "references/function-drop-shadow.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "drop-shadow() is the shadow expansion with its third length as standard deviation.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterPrimitiveRepresentation",
+      "tolerance": {}
+    },
+    {
+      "id": "function-srgb",
+      "input": "inputs/function-srgb.svg",
+      "references": [
+        {
+          "path": "references/function-srgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Filter functions run in sRGB whatever color-interpolation-filters says.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#ColorInterpolationFiltersProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "function-chain",
+      "input": "inputs/function-chain.svg",
+      "references": [
+        {
+          "path": "references/function-chain.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "References and functions chain in list order.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "function-chain-missing",
+      "input": "inputs/function-chain-missing.svg",
+      "references": [
+        {
+          "path": "references/function-chain-missing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A missing reference anywhere in the list ignores every function too.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "href-children",
+      "input": "inputs/href-children.svg",
+      "references": [
+        {
+          "path": "references/href-children.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A filter without primitives uses its href template's primitives and attributes.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementHrefAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "href-attributes",
+      "input": "inputs/href-attributes.svg",
+      "references": [
+        {
+          "path": "references/href-attributes.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Own primitives win; unspecified attributes come from the template.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementHrefAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "href-chain",
+      "input": "inputs/href-chain.svg",
+      "references": [
+        {
+          "path": "references/href-chain.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Templates inherit indirectly through further href references.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementHrefAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "href-cycle",
+      "input": "inputs/href-cycle.svg",
+      "references": [
+        {
+          "path": "references/href-cycle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A self-referencing href is invalid and ignored.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementHrefAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "filterres-exact",
+      "input": "inputs/filterres-exact.svg",
+      "references": [
+        {
+          "path": "references/filterres-exact.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "filterRes matching device pixels reproduces the automatic result.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementFilterResAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "filterres-coarse",
+      "input": "inputs/filterres-coarse.svg",
+      "references": [
+        {
+          "path": "references/filterres-coarse.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "filterRes sets the intermediate pixel grid (non-integers truncate); a flood stays uniform.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementFilterResAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "filterres-zero",
+      "input": "inputs/filterres-zero.svg",
+      "references": [
+        {
+          "path": "references/filterres-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero filterRes disables rendering of the filtered element.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementFilterResAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "filterres-negative",
+      "input": "inputs/filterres-negative.svg",
+      "references": [
+        {
+          "path": "references/filterres-negative.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A negative filterRes is an error and leaves the automatic resolution.",
+      "spec": "https://www.w3.org/TR/2011/REC-SVG11-20110816/filters.html#FilterElementFilterResAttribute",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence",
+      "input": "inputs/turbulence.svg",
+      "references": [
+        {
+          "path": "references/turbulence.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feTurbulence follows the normative reference code, sampled per pixel in user space.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feTurbulenceElement",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-fractal-stitch",
+      "input": "inputs/turbulence-fractal-stitch.svg",
+      "references": [
+        {
+          "path": "references/turbulence-fractal-stitch.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "fractalNoise maps (sum + 1) / 2; stitchTiles adjusts frequencies to the subregion; the seed truncates toward zero.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feturbulence-stitchtiles",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-scaled",
+      "input": "inputs/turbulence-scaled.svg",
+      "references": [
+        {
+          "path": "references/turbulence-scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Noise is defined in user space: a scaled element samples it at device pixels mapped back to user space.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feTurbulenceElement",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-bbox-units",
+      "input": "inputs/turbulence-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/turbulence-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With primitiveUnits=objectBoundingBox the noise lives in bounding box units: baseFrequency is per box width and height.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-primitiveunits",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-seed-truncates",
+      "input": "inputs/turbulence-seed-truncates.svg",
+      "references": [
+        {
+          "path": "references/turbulence-seed-truncates.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The seed is truncated toward zero before setup_seed.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feturbulence-seed",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-zero-frequency",
+      "input": "inputs/turbulence-zero-frequency.svg",
+      "references": [
+        {
+          "path": "references/turbulence-zero-frequency.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Zero frequency samples lattice points, where noise is 0: fractalNoise gives (0 + 1) / 2 in every channel.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feTurbulenceElement",
+      "tolerance": {}
+    },
+    {
+      "id": "turbulence-negative",
+      "input": "inputs/turbulence-negative.svg",
+      "references": [
+        {
+          "path": "references/turbulence-negative.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Negative base frequencies are unsupported: no noise, transparent black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feturbulence-basefrequency",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-identity",
+      "input": "inputs/convolve-identity.svg",
+      "references": [
+        {
+          "path": "references/convolve-identity.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A kernel with 1 at the target reproduces the input.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feConvolveMatrixElement",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-shift",
+      "input": "inputs/convolve-shift.svg",
+      "references": [
+        {
+          "path": "references/convolve-shift.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The kernel is applied rotated by 180 degrees: its first entry weighs the pixel down and right of the target.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feConvolveMatrixElement",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-wrong-length",
+      "input": "inputs/convolve-wrong-length.svg",
+      "references": [
+        {
+          "path": "references/convolve-wrong-length.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A kernel whose length is not orderX * orderY makes the primitive a pass through filter.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-kernelmatrix",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-order-zero",
+      "input": "inputs/convolve-order-zero.svg",
+      "references": [
+        {
+          "path": "references/convolve-order-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Orders must be integers greater than zero; otherwise the primitive passes its input through.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-order",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-order-truncates",
+      "input": "inputs/convolve-order-truncates.svg",
+      "references": [
+        {
+          "path": "references/convolve-order-truncates.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Non-integer orders truncate toward zero.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-order",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-target-outside",
+      "input": "inputs/convolve-target-outside.svg",
+      "references": [
+        {
+          "path": "references/convolve-target-outside.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A target outside the kernel is an unfulfilled precondition: pass through.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-targetx",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-target",
+      "input": "inputs/convolve-target.svg",
+      "references": [
+        {
+          "path": "references/convolve-target.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "targetX positions the kernel relative to the target pixel.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-targetx",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-bias",
+      "input": "inputs/convolve-bias.svg",
+      "references": [
+        {
+          "path": "references/convolve-bias.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero kernel sum leaves divisor 1; bias is added to every premultiplied component.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-bias",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-divisor",
+      "input": "inputs/convolve-divisor.svg",
+      "references": [
+        {
+          "path": "references/convolve-divisor.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The weighted sum is divided by divisor.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-divisor",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-divisor-zero",
+      "input": "inputs/convolve-divisor-zero.svg",
+      "references": [
+        {
+          "path": "references/convolve-divisor-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero divisor falls back to the kernel sum.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-divisor",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-preserve-alpha",
+      "input": "inputs/convolve-preserve-alpha.svg",
+      "references": [
+        {
+          "path": "references/convolve-preserve-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "preserveAlpha convolves unpremultiplied color and keeps the source alpha.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-preservealpha",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-edge-wrap",
+      "input": "inputs/convolve-edge-wrap.svg",
+      "references": [
+        {
+          "path": "references/convolve-edge-wrap.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "edgeMode=wrap extends the input with its opposite edge.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-edgemode",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-edge-duplicate",
+      "input": "inputs/convolve-edge-duplicate.svg",
+      "references": [
+        {
+          "path": "references/convolve-edge-duplicate.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "edgeMode defaults to duplicate, which repeats the edge pixels.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-edgemode",
+      "tolerance": {}
+    },
+    {
+      "id": "displacement-alpha",
+      "input": "inputs/displacement-alpha.svg",
+      "references": [
+        {
+          "path": "references/displacement-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "P'(x, y) = P(x + scale (A - 0.5), y + scale (A - 0.5)) with the alpha channel by default.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDisplacementMapElement",
+      "tolerance": {}
+    },
+    {
+      "id": "displacement-channels",
+      "input": "inputs/displacement-channels.svg",
+      "references": [
+        {
+          "path": "references/displacement-channels.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xChannelSelector and yChannelSelector pick the map channels for each axis.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fedisplacementmap-xchannelselector",
+      "tolerance": {}
+    },
+    {
+      "id": "displacement-scale-zero",
+      "input": "inputs/displacement-scale-zero.svg",
+      "references": [
+        {
+          "path": "references/displacement-scale-zero.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A zero scale leaves the input unchanged.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fedisplacementmap-scale",
+      "tolerance": {}
+    },
+    {
+      "id": "displacement-bbox-units",
+      "input": "inputs/displacement-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/displacement-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "scale is in primitiveUnits: fractions of the bounding box width along x and height along y.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fedisplacementmap-scale",
+      "tolerance": {}
+    },
+    {
+      "id": "displacement-scaled",
+      "input": "inputs/displacement-scaled.svg",
+      "references": [
+        {
+          "path": "references/displacement-scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The displacement scales with the user space.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fedisplacementmap-scale",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-diffuse-flat",
+      "input": "inputs/lighting-diffuse-flat.svg",
+      "references": [
+        {
+          "path": "references/lighting-diffuse-flat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A flat surface lit from straight above reflects kd * lighting-color, opaque.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDiffuseLightingElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-diffuse-grazing",
+      "input": "inputs/lighting-diffuse-grazing.svg",
+      "references": [
+        {
+          "path": "references/lighting-diffuse-grazing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Light at zero elevation is perpendicular to a flat surface's normal: N.L = 0 gives opaque black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDistantLightElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-diffuse-constant",
+      "input": "inputs/lighting-diffuse-constant.svg",
+      "references": [
+        {
+          "path": "references/lighting-diffuse-constant.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "diffuseConstant scales the reflected light.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fediffuselighting-diffuseconstant",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-specular-flat",
+      "input": "inputs/lighting-specular-flat.svg",
+      "references": [
+        {
+          "path": "references/lighting-specular-flat.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Specular light on a flat surface from straight above: N.H = 1, and alpha is the largest component.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feSpecularLightingElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-specular-premultiplied",
+      "input": "inputs/lighting-specular-premultiplied.svg",
+      "references": [
+        {
+          "path": "references/lighting-specular-premultiplied.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Sa = max(Sr, Sg, Sb) makes the specular result a premultiplied color: half-strength white light is white at half opacity.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feSpecularLightingElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-no-light",
+      "input": "inputs/lighting-no-light.svg",
+      "references": [
+        {
+          "path": "references/lighting-no-light.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Without a light source element there is no light: transparent black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feDiffuseLightingElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-linear-rgb",
+      "input": "inputs/lighting-linear-rgb.svg",
+      "references": [
+        {
+          "path": "references/lighting-linear-rgb.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "lighting-color is converted into the primitive's color space like flood-color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#ColorInterpolationFiltersProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-point-bbox-units",
+      "input": "inputs/lighting-point-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/lighting-point-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Light positions are in primitiveUnits; z of a bounding box scales by its normalized diagonal.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fepointlight-x",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-spot-bbox-units",
+      "input": "inputs/lighting-spot-bbox-units.svg",
+      "references": [
+        {
+          "path": "references/lighting-spot-bbox-units.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feSpotLight positions and target are in primitiveUnits; the cone angle's sign does not matter.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feSpotLightElement",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-scaled",
+      "input": "inputs/lighting-scaled.svg",
+      "references": [
+        {
+          "path": "references/lighting-scaled.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Light positions follow the user space transform, z scaling with it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#light-source",
+      "tolerance": {}
+    },
+    {
+      "id": "image-meet",
+      "input": "inputs/image-meet.svg",
+      "references": [
+        {
+          "path": "references/image-meet.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A PNG feImage renders like image: xMidYMid meet inside the subregion.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-none",
+      "input": "inputs/image-none.svg",
+      "references": [
+        {
+          "path": "references/image-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "preserveAspectRatio=\"none\" stretches the image over the subregion.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-slice",
+      "input": "inputs/image-slice.svg",
+      "references": [
+        {
+          "path": "references/image-slice.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "xMinYMin slice covers the subregion; the overflow is cut at the subregion.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-subregion",
+      "input": "inputs/image-subregion.svg",
+      "references": [
+        {
+          "path": "references/image-subregion.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "x, y, width and height place the image in a primitive subregion.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-svg-document",
+      "input": "inputs/image-svg-document.svg",
+      "references": [
+        {
+          "path": "references/image-svg-document.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An SVG document reference renders like image, fitted with its intrinsic ratio.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-element",
+      "input": "inputs/image-element.svg",
+      "references": [
+        {
+          "path": "references/image-element.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An element reference renders like use in user space; the subregion x/y does not translate it (Chrome does).",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-element-bbox",
+      "input": "inputs/image-element-bbox.svg",
+      "references": [
+        {
+          "path": "references/image-element-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With primitiveUnits=\"objectBoundingBox\" the referenced element is drawn in bounding box units.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-element-composite",
+      "input": "inputs/image-element-composite.svg",
+      "references": [
+        {
+          "path": "references/image-element-composite.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feImage results feed later primitives by name.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-missing",
+      "input": "inputs/image-missing.svg",
+      "references": [
+        {
+          "path": "references/image-missing.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A missing reference fills the subregion with transparent black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "image-cycle",
+      "input": "inputs/image-cycle.svg",
+      "references": [
+        {
+          "path": "references/image-cycle.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A reference back to the filtered element is a cycle and draws nothing (Chrome draws the element unfiltered).",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#feImageElement",
+      "tolerance": {}
+    },
+    {
+      "id": "background-offset",
+      "input": "inputs/background-offset.svg",
+      "references": [
+        {
+          "path": "references/background-offset.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "BackgroundImage is the backdrop under the filter region; feOffset moves it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "background-alpha",
+      "input": "inputs/background-alpha.svg",
+      "references": [
+        {
+          "path": "references/background-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "BackgroundAlpha keeps only the backdrop alpha, with black color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundalpha",
+      "tolerance": {}
+    },
+    {
+      "id": "background-isolated",
+      "input": "inputs/background-isolated.svg",
+      "references": [
+        {
+          "path": "references/background-isolated.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The backdrop is that of the current isolation group, empty at the start of an isolated group.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "background-clipped",
+      "input": "inputs/background-clipped.svg",
+      "references": [
+        {
+          "path": "references/background-clipped.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The filter region clips the backdrop like any input (#FilterEffectsRegion), so content left of it does not move in.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-fill-merge",
+      "input": "inputs/paint-fill-merge.svg",
+      "references": [
+        {
+          "path": "references/paint-fill-merge.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "FillPaint is the fill with its fill-opacity over the whole filter region (the FE1 subregion example reads it so).",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-fillpaint",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-stroke",
+      "input": "inputs/paint-stroke.svg",
+      "references": [
+        {
+          "path": "references/paint-stroke.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "StrokePaint is the stroke paint with its stroke-opacity over the filter region.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-strokepaint",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-fill-gradient",
+      "input": "inputs/paint-fill-gradient.svg",
+      "references": [
+        {
+          "path": "references/paint-fill-gradient.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A FillPaint paint server keeps the filtered element's bounding box, padded past it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-fillpaint",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-fill-none",
+      "input": "inputs/paint-fill-none.svg",
+      "references": [
+        {
+          "path": "references/paint-fill-none.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "fill=\"none\" makes FillPaint transparent black.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-fillpaint",
+      "tolerance": {}
+    },
+    {
+      "id": "paint-fill-group",
+      "input": "inputs/paint-fill-group.svg",
+      "references": [
+        {
+          "path": "references/paint-fill-group.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "On a group, FillPaint is the group's own fill, not its children's.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-fillpaint",
+      "tolerance": {}
+    },
+    {
+      "id": "background-enable-new",
+      "input": "inputs/background-enable-new.svg",
+      "references": [
+        {
+          "path": "references/background-enable-new.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "enable-background: new (FE1 Appendix A, SVG 1.1) restarts BackgroundImage: the blue rect drawn before it is not part of it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "background-enable-region",
+      "input": "inputs/background-enable-region.svg",
+      "references": [
+        {
+          "path": "references/background-enable-region.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "An enable-background: new region limits BackgroundImage to that rectangle in the element's user space.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "background-own-group",
+      "input": "inputs/background-own-group.svg",
+      "references": [
+        {
+          "path": "references/background-own-group.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The filtered element's own opacity group applies after the filter, so BackgroundImage is its parent's backdrop.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#attr-valuedef-in-backgroundimage",
+      "tolerance": {}
+    },
+    {
+      "id": "blend-no-composite-normal",
+      "input": "inputs/blend-no-composite-normal.svg",
+      "references": [
+        {
+          "path": "references/blend-no-composite-normal.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With no-composite, normal blending yields the source alone: the yellow backdrop is not composited in.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feblend-no-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "blend-no-composite-multiply",
+      "input": "inputs/blend-no-composite-multiply.svg",
+      "references": [
+        {
+          "path": "references/blend-no-composite-multiply.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Multiply of blue on yellow is black where the source is; outside it the result keeps the source alpha, 0.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feblend-no-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "blend-no-composite-alpha",
+      "input": "inputs/blend-no-composite-alpha.svg",
+      "references": [
+        {
+          "path": "references/blend-no-composite-alpha.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The mixing formula keeps the source alpha: a half-transparent source stays half transparent over an opaque backdrop.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feblend-no-composite",
+      "tolerance": {}
+    },
+    {
+      "id": "kernel-unit-convolve",
+      "input": "inputs/kernel-unit-convolve.svg",
+      "references": [
+        {
+          "path": "references/kernel-unit-convolve.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "With kernelUnitLength=\"2\" the kernel steps by two user units: the image is resampled to one pixel per unit, convolved and resampled back (bilinearly).",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-kernelunitlength",
+      "tolerance": {}
+    },
+    {
+      "id": "kernel-unit-convolve-pixel",
+      "input": "inputs/kernel-unit-convolve-pixel.svg",
+      "references": [
+        {
+          "path": "references/kernel-unit-convolve-pixel.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A kernel unit of one device pixel is the default stepping.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-kernelunitlength",
+      "tolerance": {}
+    },
+    {
+      "id": "kernel-unit-convolve-negative",
+      "input": "inputs/kernel-unit-convolve-negative.svg",
+      "references": [
+        {
+          "path": "references/kernel-unit-convolve-negative.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A negative or zero kernelUnitLength uses the default.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-kernelunitlength",
+      "tolerance": {}
+    },
+    {
+      "id": "kernel-unit-lighting-pixel",
+      "input": "inputs/kernel-unit-lighting-pixel.svg",
+      "references": [
+        {
+          "path": "references/kernel-unit-lighting-pixel.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Lighting with a kernel unit of one device pixel matches the default normals.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-fediffuselighting-kernelunitlength",
+      "tolerance": {}
+    },
+    {
+      "id": "region-empty-group-flood",
+      "input": "inputs/region-empty-group-flood.svg",
+      "references": [
+        {
+          "path": "references/region-empty-group-flood.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A user-space filter region does not depend on content: an empty group still renders its flood.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-filterunits",
+      "tolerance": {}
+    },
+    {
+      "id": "region-empty-group-source",
+      "input": "inputs/region-empty-group-source.svg",
+      "references": [
+        {
+          "path": "references/region-empty-group-source.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "The SourceGraphic of a group whose only child is empty is transparent black over the whole region.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-filter-filterunits",
+      "tolerance": {}
+    },
+    {
+      "id": "region-empty-group-bbox",
+      "input": "inputs/region-empty-group-bbox.svg",
+      "references": [
+        {
+          "path": "references/region-empty-group-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "objectBoundingBox filter units on an empty bounding box disable the filter, so the element is not rendered.",
+      "spec": "https://www.w3.org/TR/SVG2/coords.html#ObjectBoundingBoxUnits",
+      "tolerance": {}
+    },
+    {
+      "id": "region-empty-group-bbox-primitives",
+      "input": "inputs/region-empty-group-bbox-primitives.svg",
+      "references": [
+        {
+          "path": "references/region-empty-group-bbox-primitives.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "objectBoundingBox primitive units on an empty bounding box also cannot be resolved; the element is not rendered.",
+      "spec": "https://www.w3.org/TR/SVG2/coords.html#ObjectBoundingBoxUnits",
+      "tolerance": {}
+    },
+    {
+      "id": "region-huge-user",
+      "input": "inputs/region-huge-user.svg",
+      "references": [
+        {
+          "path": "references/region-huge-user.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A practically infinite filter region is clipped to the canvas and floods all of it.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#filter-region",
+      "tolerance": {}
+    },
+    {
+      "id": "region-huge-bbox",
+      "input": "inputs/region-huge-bbox.svg",
+      "references": [
+        {
+          "path": "references/region-huge-bbox.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Huge bounding-box fractions behave like an infinite region and flood the canvas.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#filter-region",
+      "tolerance": {}
+    },
+    {
+      "id": "flood-current-color",
+      "input": "inputs/flood-current-color.svg",
+      "references": [
+        {
+          "path": "references/flood-current-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "feFlood currentColor uses the primitive's computed color, inherited through filter and defs, not the filtered element's.",
+      "spec": "https://www.w3.org/TR/css-color-4/#resolving-other-colors",
+      "tolerance": {}
+    },
+    {
+      "id": "lighting-current-color",
+      "input": "inputs/lighting-current-color.svg",
+      "references": [
+        {
+          "path": "references/lighting-current-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "lighting-color currentColor resolves to the computed color; a flat opaque surface lit from straight above reflects the full light colour.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#LightingColorProperty",
+      "tolerance": {}
+    },
+    {
+      "id": "drop-shadow-current-color",
+      "input": "inputs/drop-shadow-current-color.svg",
+      "references": [
+        {
+          "path": "references/drop-shadow-current-color.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "drop-shadow() currentColor is the filtered element's computed color.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#funcdef-filter-drop-shadow",
+      "tolerance": {}
+    },
+    {
+      "id": "convolve-zero-sum-kernel",
+      "input": "inputs/convolve-zero-sum-kernel.svg",
+      "references": [
+        {
+          "path": "references/convolve-zero-sum-kernel.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A kernelMatrix whose entries sum to zero uses divisor 1, even when the float sum of its decimals rounds away from zero.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#element-attrdef-feconvolvematrix-divisor",
+      "tolerance": {}
+    },
+    {
+      "id": "function-unitless-attribute",
+      "input": "inputs/function-unitless-attribute.svg",
+      "references": [
+        {
+          "path": "references/function-unitless-attribute.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Presentation attributes admit unitless lengths and angles throughout the property grammar, including inside filter functions.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/types.html#presentation-attribute-css-value",
+      "tolerance": {}
+    },
+    {
+      "id": "nested-svg-viewbox-region",
+      "input": "inputs/nested-svg-viewbox-region.svg",
+      "references": [
+        {
+          "path": "references/nested-svg-viewbox-region.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "A filter region on a viewport element is in that element's user space, outside its viewBox transform: the bounding box is measured there and the region stays where it was measured.",
+      "spec": "https://www.w3.org/TR/filter-effects-1/#FilterEffectsRegion",
+      "tolerance": {}
+    }
+  ]
+}

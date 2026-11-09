@@ -1,0 +1,2 @@
+<!-- SVG2 embedded#Placement: the positioning rectangle is the embedded element's bounding box even when content overflows. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32"><g style="transform-box:fill-box;transform:translateX(100%)"><foreignObject x="8" y="8" width="8" height="8" overflow="visible"><svg x="16" width="4" height="4"><rect width="4" height="4"/></svg></foreignObject></g></svg>

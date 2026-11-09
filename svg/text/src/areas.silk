@@ -1,0 +1,346 @@
+//! Wrapping areas for `shape-inside` and `shape-subtract` (SVG 2 #TextShapeInside): shapes
+//! as polygons, and the spans of a line band that lie inside one shape and outside others.
+import on_path { polylines }
+import svg_geometry.geometry { Path, Point, Segment, Transform }
+import silk.collections.list { List }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.usize
+
+/// One shape in the text's user space: its outline as closed polygons and its fill rule.
+pub struct Region {
+  edges: List<Edge>,
+  evenOdd: bool,
+  /// The shape's extent along y.
+  pub top: f64,
+  pub bottom: f64,
+}
+
+/// A polygon edge from `from` to `to`, not horizontal.
+struct Edge {
+  from: Point,
+  to: Point,
+}
+
+impl Copy for Edge {}
+
+/// Where an edge crosses a horizontal line, and which way it winds.
+struct Crossing {
+  x: f64,
+  winding: i32,
+}
+
+impl Copy for Crossing {}
+
+impl Region {
+  /// The shape `path` after `transform`; every subpath closes, as for filling.
+  pub effect fn make(path: &Path, transform: Transform, evenOdd: bool) -> Region
+    ! OutOfMemoryError
+    ? &mut Allocator {
+    let mut closes = List<bool>.make()
+    let subpaths = run polylines(path, &mut closes)
+    let mut region = Region {
+      edges: List<Edge>.make(),
+      evenOdd: evenOdd,
+      top: f64.INFINITY,
+      bottom: -f64.INFINITY,
+    }
+    let all = List<List<Point>>.asSlice(&subpaths)
+    let mut s: usize = 0
+    while s < all.length {
+      let points = List<Point>.asSlice(&all[s])
+      let mut k: usize = 0
+      while k < points.length {
+        let from = transform * points[k]
+        let to = transform * points[(k + 1) % points.length]
+        region.top = f64.min(region.top, from.y)
+        region.bottom = f64.max(region.bottom, from.y)
+        if from.y != to.y {
+          run List<Edge>.append(&mut region.edges, Edge { from: from, to: to })
+        }
+        k = k + 1
+      }
+      s = s + 1
+    }
+    return move region
+  }
+
+  pub fn empty(self: &Self) -> bool {
+    return List<Edge>.length(&self.edges) == 0
+  }
+}
+
+/// The shape `path` after `transform`, grown by `margin` (CSS Shapes 1
+/// #shape-margin-property): every point within `margin` of it. Appended to `out` as regions
+/// whose union it is: the shape, a band `margin` wide on both sides of each edge, and a
+/// disc at each vertex, as a 64-sided polygon inscribed in it.
+pub effect fn grown(
+  path: &Path,
+  transform: Transform,
+  evenOdd: bool,
+  margin: f64,
+  out: &mut List<Region>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run List<Region>.append(&mut out, run Region.make(path, transform, evenOdd))
+  if !(margin > 0.0) || !f64.isFinite(margin) {
+    return
+  }
+  let mut closes = List<bool>.make()
+  let subpaths = run polylines(path, &mut closes)
+  let all = List<List<Point>>.asSlice(&subpaths)
+  let mut s: usize = 0
+  while s < all.length {
+    let points = List<Point>.asSlice(&all[s])
+    let mut k: usize = 0
+    while k < points.length {
+      let from = transform * points[k]
+      let to = transform * points[(k + 1) % points.length]
+      let dx = to.x - from.x
+      let dy = to.y - from.y
+      let length = f64.sqrt(dx * dx + dy * dy)
+      if length > 0.0 {
+        let nx = -dy / length * margin
+        let ny = dx / length * margin
+        let mut band = Path.make()
+        drop run band.append(Segment.MoveTo { to: Point.new(from.x + nx, from.y + ny) })
+        drop run band.append(Segment.LineTo { to: Point.new(to.x + nx, to.y + ny) })
+        drop run band.append(Segment.LineTo { to: Point.new(to.x - nx, to.y - ny) })
+        drop run band.append(Segment.LineTo { to: Point.new(from.x - nx, from.y - ny) })
+        drop run band.append(Segment.Close)
+        run List<Region>.append(&mut out, run Region.make(&band, Transform.identity(), false))
+      }
+      let mut disc = Path.make()
+      let mut step: usize = 0
+      while step < 64 {
+        let angle = usize.toF64(step) * f64.PI / 32.0
+        let at = Point.new(from.x + margin * f64.cos(angle), from.y + margin * f64.sin(angle))
+        drop run disc.append(
+          if step == 0 {
+            Segment.MoveTo { to: at }
+          } else {
+            Segment.LineTo { to: at }
+          },
+        )
+        step = step + 1
+      }
+      drop run disc.append(Segment.Close)
+      run List<Region>.append(&mut out, run Region.make(&disc, Transform.identity(), false))
+      k = k + 1
+    }
+    s = s + 1
+  }
+}
+
+// The x where an edge crosses y, on its line.
+fn crossingAt(edge: Edge, y: f64) -> f64 {
+  return edge.from.x + (y - edge.from.y) * (edge.to.x - edge.from.x) / (edge.to.y - edge.from.y)
+}
+
+// The inside of `region` along y, for the edges spanning all of `[low, high]`, as sorted
+// disjoint intervals [a, b] appended to `out` as pairs.
+effect fn inside(region: &Region, y: f64, low: f64, high: f64, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut crossings = List<Crossing>.make()
+  let edges = List<Edge>.asSlice(&region.edges)
+  let mut e: usize = 0
+  while e < edges.length {
+    let edge = edges[e]
+    if f64.min(edge.from.y, edge.to.y) <= low && f64.max(edge.from.y, edge.to.y) >= high {
+      let crossing = Crossing {
+        x: crossingAt(edge, y),
+        winding: if edge.to.y > edge.from.y {
+          1
+        } else {
+          -1
+        },
+      }
+
+      // Insertion keeps the crossings sorted by x.
+      run List<Crossing>.append(&mut crossings, crossing)
+      let sorted = List<Crossing>.asMutSlice(&mut crossings)
+      let mut k = sorted.length - 1
+      while k > 0 && sorted[k - 1].x > sorted[k].x {
+        let swap = sorted[k - 1]
+        sorted[k - 1] = sorted[k]
+        sorted[k] = swap
+        k = k - 1
+      }
+    }
+    e = e + 1
+  }
+  let sorted = List<Crossing>.asSlice(&crossings)
+  let mut winding: i32 = 0
+  let mut c: usize = 0
+  while c < sorted.length {
+    let before = filled(winding, region.evenOdd)
+    winding = winding + sorted[c].winding
+    let after = filled(winding, region.evenOdd)
+    if !before && after {
+      run List<f64>.append(&mut out, sorted[c].x)
+    } else if before && !after {
+      run List<f64>.append(&mut out, sorted[c].x)
+    }
+    c = c + 1
+  }
+}
+
+fn filled(winding: i32, evenOdd: bool) -> bool {
+  if evenOdd {
+    return winding % 2 != 0
+  }
+  return winding != 0
+}
+
+// `left` minus the union of `right`, both sorted disjoint interval lists.
+effect fn subtract(left: &List<f64>, right: &List<f64>, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let a = List<f64>.asSlice(left)
+  let b = List<f64>.asSlice(right)
+  let mut i: usize = 0
+  while i + 1 < a.length {
+    let mut start = a[i]
+    let end = a[i + 1]
+    let mut j: usize = 0
+    while j + 1 < b.length && start < end {
+      if b[j + 1] > start && b[j] < end {
+        if b[j] > start {
+          run List<f64>.append(&mut out, start)
+          run List<f64>.append(&mut out, b[j])
+        }
+        start = f64.max(start, b[j + 1])
+      }
+      j = j + 2
+    }
+    if start < end {
+      run List<f64>.append(&mut out, start)
+      run List<f64>.append(&mut out, end)
+    }
+    i = i + 2
+  }
+}
+
+// The intersection of two sorted disjoint interval lists.
+effect fn intersect(left: &List<f64>, right: &List<f64>, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let a = List<f64>.asSlice(left)
+  let b = List<f64>.asSlice(right)
+  let mut i: usize = 0
+  let mut j: usize = 0
+  while i + 1 < a.length && j + 1 < b.length {
+    let start = f64.max(a[i], b[j])
+    let end = f64.min(a[i + 1], b[j + 1])
+    if start < end {
+      run List<f64>.append(&mut out, start)
+      run List<f64>.append(&mut out, end)
+    }
+    if a[i + 1] < b[j + 1] {
+      i = i + 2
+    } else {
+      j = j + 2
+    }
+  }
+}
+
+// The ys where the regions' boundaries change direction within `(top, bottom)`, with the
+// band's own edges, sorted.
+effect fn events(shape: &Region, holes: &[Region], top: f64, bottom: f64, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run List<f64>.append(&mut out, top)
+  run List<f64>.append(&mut out, bottom)
+  run vertices(shape, top, bottom, &mut out)
+  let mut h: usize = 0
+  while h < holes.length {
+    run vertices(&holes[h], top, bottom, &mut out)
+    h = h + 1
+  }
+  let ys = List<f64>.asMutSlice(&mut out)
+  let mut k: usize = 1
+  while k < ys.length {
+    let mut m = k
+    while m > 0 && ys[m - 1] > ys[m] {
+      let swap = ys[m - 1]
+      ys[m - 1] = ys[m]
+      ys[m] = swap
+      m = m - 1
+    }
+    k = k + 1
+  }
+}
+
+effect fn vertices(region: &Region, top: f64, bottom: f64, out: &mut List<f64>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let edges = List<Edge>.asSlice(&region.edges)
+  let mut e: usize = 0
+  while e < edges.length {
+    let y = edges[e].from.y
+    if y > top && y < bottom {
+      run List<f64>.append(&mut out, y)
+    }
+    e = e + 1
+  }
+}
+
+/// The intervals of x, as sorted pairs appended to `out`, that lie inside `shape` and outside
+/// every one of `holes` for every y of the band `[top, bottom]`. Between two consecutive ys
+/// where a boundary bends, edges are straight, so checking both ends of each piece with
+/// the edges that span it covers the piece.
+pub effect fn available(
+  shape: &Region,
+  holes: &[Region],
+  top: f64,
+  bottom: f64,
+  out: &mut List<f64>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut ys = List<f64>.make()
+  run events(shape, holes, top, bottom, &mut ys)
+  let mut result = List<f64>.make()
+  let mut first = true
+  let marks = List<f64>.asSlice(&ys)
+  let mut k: usize = 0
+  while k + 1 < marks.length {
+    let low = marks[k]
+    let high = marks[k + 1]
+    if high > low || marks.length == 2 {
+      let mut end: usize = 0
+      while end < 2 {
+        let y = if end == 0 {
+          low
+        } else {
+          high
+        }
+        let mut here = List<f64>.make()
+        run inside(shape, y, low, high, &mut here)
+        let mut h: usize = 0
+        while h < holes.length {
+          let mut covered = List<f64>.make()
+          run inside(&holes[h], y, low, high, &mut covered)
+          let mut rest = List<f64>.make()
+          run subtract(&here, &covered, &mut rest)
+          here = move rest
+          h = h + 1
+        }
+        if first {
+          result = move here
+          first = false
+        } else {
+          let mut both = List<f64>.make()
+          run intersect(&result, &here, &mut both)
+          result = move both
+        }
+        end = end + 1
+      }
+    }
+    k = k + 1
+  }
+  run List<f64>.appendSlice(&mut out, List<f64>.asSlice(&result))
+}

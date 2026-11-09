@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120">
+<rect width="200" height="120" fill="white"/>
+<g fill="none" stroke="red" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+<circle pathLength="1" stroke-dasharray="1" stroke-dashoffset="1" cx="50" cy="50" r="30"/>
+<path pathLength="1" stroke-dasharray="1" stroke-dashoffset="1" d="M100 90 C 100 20, 180 20, 180 90"/>
+<ellipse pathLength="10" stroke-dasharray="10" stroke-dashoffset="-10" stroke-linecap="square" cx="50" cy="100" rx="40" ry="10"/>
+</g>
+</svg>

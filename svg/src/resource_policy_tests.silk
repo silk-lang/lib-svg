@@ -1,0 +1,132 @@
+import resources { Resolver, Response, ResourceKind, ResourceError, ProcessingMode, Policy, Limits }
+import resources
+import url { Url, UrlError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+struct Host {
+  calls: usize,
+}
+
+impl Host {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    return Response.fromBytes(run Bytes.copy(b"host"))
+  }
+}
+
+impl Resolver for Host {
+  fetch: Host.fetch
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#features
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-static-mode
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#secure-animated-mode
+test effect fn secureModesRejectExternalRequestsBeforeHostDispatch() -> ()
+  ! AssertionError<'static> | UrlError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let address = run Url.parseAbsolute(b"https://example.test/resource")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let modes = [
+    ProcessingMode.Static,
+    ProcessingMode.Animated,
+    ProcessingMode.SecureStatic,
+    ProcessingMode.SecureAnimated,
+  ]
+  let kinds = [
+    ResourceKind.StyleSheet,
+    ResourceKind.Document,
+    ResourceKind.Image,
+    ResourceKind.Font,
+    ResourceKind.ColorProfile,
+  ]
+  let mut m: usize = 0
+  while m < modes.length {
+    let mut k: usize = 0
+    while k < kinds.length {
+      let mut host = Host { calls: 0 }
+      let policy = Policy { mode: modes[m], limits: Limits.defaults() }
+      let result = run Effect.result(resources.fetchWithPolicy(&address, kinds[k], &policy))
+        |> Effect.provideMut<Resolver>(&mut host)
+        |> Effect.provideMut<Allocator>(&mut allocator)
+      let blocked = match &result {
+        Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+          ResourceError reason => reason == ResourceError.BlockedLocation
+          OutOfMemoryError exhausted => {
+            fail OutOfMemoryError {}
+          }
+        }
+        _ => false
+      }
+      let allowed = match &result {
+        Result<Response, ResourceError | OutOfMemoryError>.Success { value } => true
+        _ => false
+      }
+      if modes[m] == ProcessingMode.SecureStatic || modes[m] == ProcessingMode.SecureAnimated {
+        run Testing.expect(
+          blocked && host.calls == 0,
+          "secure policy denies every external resource kind before arbitrary host code",
+        )
+      } else {
+        run Testing.expect(
+          allowed && host.calls == 1,
+          "nonsecure modes permit host-provided external resources",
+        )
+      }
+      k = k + 1
+    }
+    m = m + 1
+  }
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#features
+// https://www.rfc-editor.org/rfc/rfc2397.html#section-3
+test effect fn secureDataCannotInvokeAnExternalResolver() -> ()
+  ! AssertionError<'static> | UrlError | ResourceError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let address = run Url.parseAbsolute(b"data:text/css;charset=windows-1252,%80")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut host = Host { calls: 0 }
+  let policy = Policy { mode: ProcessingMode.SecureStatic, limits: Limits { maxResourceBytes: 1 } }
+  let response = run resources.fetchWithPolicy(&address, ResourceKind.StyleSheet, &policy)
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let bytes = Bytes.asSlice(&response.bytes)
+  run Testing.expect(
+    host.calls == 0 && bytes.length == 1 && bytes[0] == 128,
+    "data URLs cannot be reinterpreted by an arbitrary external resolver",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// An implementation resource ceiling is not a claim that the larger resource is invalid SVG.
+test effect fn hostResponsesCannotBypassTheConsumerByteLimit() -> ()
+  ! AssertionError<'static> | UrlError | OutOfMemoryError {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let address = run Url.parseAbsolute(b"asset:large")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let policy = Policy { mode: ProcessingMode.Static, limits: Limits { maxResourceBytes: 3 } }
+  let mut host = Host { calls: 0 }
+  let result = run Effect.result(
+    resources.fetchWithPolicy(&address, ResourceKind.Document, &policy),
+  )
+    |> Effect.provideMut<Resolver>(&mut host)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    match &result {
+      Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
+        ResourceError reason => reason == ResourceError.TooLarge
+        OutOfMemoryError exhausted => {
+          fail OutOfMemoryError {}
+        }
+      }
+      _ => false
+    },
+    "a permissive provider cannot return an oversized resource to the parser",
+  )
+}

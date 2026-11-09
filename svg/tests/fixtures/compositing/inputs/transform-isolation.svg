@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/><g style="transform:translate(0px)"><rect width="2" height="4" fill="blue" style="mix-blend-mode:multiply"/></g><g style="transform:translateZ(0px)"><rect x="2" width="2" height="4" fill="blue" style="mix-blend-mode:multiply"/></g></svg>

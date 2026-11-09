@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+<path id="p" d="M 10 60 H 290"/>
+<text font-family="Noto Sans" font-size="24"><textPath href="#p">Abc</textPath></text>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+<!-- tspan is an inline box, not a container or graphics element, so these properties do not apply. -->
+<clipPath id="c"><rect width="1" height="1"/></clipPath>
+<mask id="m"><rect width="300" height="100" fill="black"/></mask>
+<filter id="f"><feFlood flood-color="red"/></filter>
+<text x="10" y="60" font-family="Noto Sans" font-size="24">A<tspan clip-path="url(#c)">b</tspan><tspan mask="url(#m)">c</tspan><tspan filter="url(#f)">d</tspan><tspan opacity="0.5">e</tspan><tspan transform="rotate(45)" style="mix-blend-mode: difference">f</tspan></text>
+</svg>

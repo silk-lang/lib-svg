@@ -1,0 +1,2 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/painting.html#RenderingMarkers -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16"><path d="M6 10H2L4 6Z M18 6H22L20 10Z" fill="red"/><path d="M4 8H20" fill="none" stroke="blue" stroke-width="2"/></svg>

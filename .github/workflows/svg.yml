@@ -1,0 +1,102 @@
+name: svg
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: svg-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+jobs:
+  rendering:
+    name: Unit tests, CPU corpus, GPU and wasm parity
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache
+            ~/.silk
+            svg/.cache
+            svg/tests/.cache
+          key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock.json', '**/silk.toml', 'svg/*.lock.json', 'svg/tests/suites.lock.json') }}
+      - name: Bootstrap pinned Silk
+        run: node scripts/install-silk.mjs
+      - name: Fetch exact dependency revisions serially
+        run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+      - name: Prepare LLVM and lavapipe
+        run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs" --linux-gpu
+      - name: Install corpus fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
+      - run: node svg/scripts/check
+      - run: node svg/scripts/test-gpu
+      - run: node scripts/check-wasm.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: svg-rendering
+          path: build/svg/
+          if-no-files-found: warn
+  conformance:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node scripts/install-silk.mjs
+      - run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+      - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
+      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: svg/tests/.cache/suites
+          key: svg-conformance-${{ hashFiles('svg/tests/suites.lock.json') }}
+      - run: node scripts/conformance.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: svg-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/svg-conformance/
+          if-no-files-found: warn
+          retention-days: 30
+  benchmarks:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node scripts/install-silk.mjs
+      - run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+      - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
+      - name: Install recorded Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+      - run: silk build --release --manifest-path svg/bench/silk.toml
+      - run: node svg/scripts/rust-bench/build
+      - run: node svg/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: svg-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/svg/bench.json
+          if-no-files-found: warn

@@ -1,0 +1,390 @@
+//! Rational functions of a positive calibration scale, evaluated as scale -> infinity.
+//! Used only for SVG pathLength=0: preserving coefficients before modulo avoids
+//! losing periodic dash phase to Infinity/Infinity. Ordinary paths do not allocate here.
+import scene { RenderError }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u32
+import silk.num.u64
+
+const MAX_COEFFICIENTS: usize = 65
+
+pub struct Budget {
+  remaining: usize
+}
+
+impl Budget {
+  pub fn make() -> Budget {
+    return Budget { remaining: 131072 }
+  }
+
+  effect fn spend(self: &mut Budget, amount: usize) -> ()
+    ! RenderError {
+    if amount > self.remaining {
+      fail RenderError.TooLarge
+    }
+    self.remaining = self.remaining - amount
+  }
+}
+
+pub struct Value {
+  numerator: List<f64>,
+  denominator: List<f64>,
+}
+
+effect fn coefficient(value: f64) -> f64
+  ! RenderError {
+  if !f64.isFinite(value) {
+    fail RenderError.InvalidGeometry
+  }
+  return value
+}
+
+// Modulo and branch selection require exact coefficients, not merely small
+// relative errors: losing one unit beside 2^53 can change an infinite gap to ink.
+// FastTwoSum recovers the exact addition residual (including subnormal inputs).
+effect fn exactSum(a: f64, b: f64) -> f64
+  ! RenderError {
+  let result = run coefficient(a + b)
+  let residual = if f64.abs(a) >= f64.abs(b) {
+    b - (result - a)
+  } else {
+    a - (result - b)
+  }
+  if residual != 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+  return result
+}
+
+// Every nonzero finite binary64 is an odd integer times a power of two.
+fn oddSignificand(value: f64) -> u64 {
+  let bits = f64.toBits(value)
+  let fraction = u64.bitAnd(bits, 4503599627370495)
+  let significand = if u64.bitAnd(bits, 9218868437227405312) == 0 {
+    fraction
+  } else {
+    fraction + 4503599627370496
+  }
+  return u64.shiftRight(significand, u32.toU64(u64.trailingZeros(significand)))
+}
+
+effect fn exactProduct(a: f64, b: f64) -> f64
+  ! RenderError {
+  let result = run coefficient(a * b)
+  if a == 0.0 || b == 0.0 || f64.abs(a) == 1.0 || f64.abs(b) == 1.0 {
+    return result
+  }
+  if result == 0.0 {
+    fail RenderError.InvalidGeometry
+  }
+  let x = oddSignificand(a)
+  let y = oddSignificand(b)
+
+  // A product of odd significands cannot discard low bits. Checking the
+  // result's significand also detects rounding at the subnormal boundary.
+  if x > 9007199254740991 / y || oddSignificand(result) != x * y {
+    fail RenderError.InvalidGeometry
+  }
+  return result
+}
+
+fn trim(values: &mut List<f64>) -> () {
+  while values.length() > 1 && values.asSlice()[values.length() - 1] == 0.0 {
+    let count = values.length() - 1
+    values.truncate(count)
+  }
+}
+
+fn zero(values: &[f64]) -> bool {
+  return values.length == 1 && values[0] == 0.0
+}
+
+fn signNumber(value: f64) -> i32 {
+  return if value > 0.0 {
+    1
+  } else if value < 0.0 {
+    -1
+  } else {
+    0
+  }
+}
+
+fn direction(value: &Value) -> f64 {
+  let a = value.numerator.asSlice()
+  let b = value.denominator.asSlice()
+  return f64.copysign(1.0, a[a.length - 1]) * f64.copysign(1.0, b[b.length - 1])
+}
+
+pub fn sign(value: &Value) -> i32 {
+  return if zero(value.numerator.asSlice()) {
+    0
+  } else {
+    signNumber(direction(value))
+  }
+}
+
+pub fn negativeZero(value: &Value) -> bool {
+  return zero(value.numerator.asSlice()) && direction(value) < 0.0
+}
+
+fn infinite(value: &Value) -> bool {
+  return zero(value.denominator.asSlice())
+}
+
+pub effect fn constant(number: f64) -> Value
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if number != number {
+    fail RenderError.InvalidGeometry
+  }
+  let mut numerator = List<f64>.make()
+  let mut denominator = List<f64>.make()
+  run numerator.append(
+    if f64.isFinite(number) {
+      number
+    } else if number > 0.0 {
+      1.0
+    } else {
+      -1.0
+    },
+  )
+  run denominator.append(
+    if f64.isFinite(number) {
+      1.0
+    } else {
+      0.0
+    },
+  )
+  return Value { numerator: move numerator, denominator: move denominator }
+}
+
+pub effect fn monomial(number: f64, exponent: i32) -> Value
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if number == 0.0 || !f64.isFinite(number) || exponent == 0 {
+    return run constant(number)
+  }
+  if exponent < -64 || exponent > 64 {
+    fail RenderError.TooLarge
+  }
+  let mut result = run constant(number)
+  let mut i: i32 = 0
+  if exponent > 0 {
+    result.numerator.clear()
+    while i < exponent {
+      run result.numerator.append(0.0)
+      i = i + 1
+    }
+    run result.numerator.append(number)
+  } else {
+    result.denominator.clear()
+    while i < -exponent {
+      run result.denominator.append(0.0)
+      i = i + 1
+    }
+    run result.denominator.append(1.0)
+  }
+  return move result
+}
+
+effect fn product(a: &[f64], b: &[f64], budget: &mut Budget) -> List<f64>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let count = a.length + b.length - 1
+  if count > MAX_COEFFICIENTS {
+    fail RenderError.TooLarge
+  }
+  run budget.spend(a.length * b.length)
+  if zero(a) || zero(b) {
+    let mut out = run List<f64>.makeWithCapacity(1)
+    run out.append(0.0 * a[a.length - 1] * b[b.length - 1])
+    return move out
+  }
+  let mut out = run List<f64>.makeWithCapacity(count)
+  let mut i: usize = 0
+  while i < count {
+    run out.append(0.0)
+    i = i + 1
+  }
+  i = 0
+  while i < a.length {
+    let mut j: usize = 0
+    while j < b.length {
+      let term = run exactProduct(a[i], b[j])
+      let sum = run exactSum(out.asSlice()[i + j], term)
+      out.set(i + j, sum)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  trim(&mut out)
+  return move out
+}
+
+effect fn sum(a: &[f64], b: &[f64], scale: f64, budget: &mut Budget) -> List<f64>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let count = if a.length > b.length {
+    a.length
+  } else {
+    b.length
+  }
+  run budget.spend(count)
+  let mut out = run List<f64>.makeWithCapacity(count)
+  let mut i: usize = 0
+  while i < count {
+    let x = if i < a.length {
+      a[i]
+    } else {
+      0.0
+    }
+    let y = if i < b.length {
+      run exactProduct(b[i], scale)
+    } else {
+      0.0
+    }
+    run out.append(run exactSum(x, y))
+    i = i + 1
+  }
+  trim(&mut out)
+  return move out
+}
+
+pub effect fn linear(a: &Value, b: &Value, scale: f64, budget: &mut Budget) -> Value
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  drop run coefficient(scale)
+  if infinite(b) && scale == 0.0 {
+    // This is NaN even when a is infinite; never turn 0 * Infinity into a
+    // missing contribution before CSS's outer calculation boundary.
+    fail RenderError.InvalidGeometry
+  }
+  if infinite(a) || infinite(b) {
+    let x = if infinite(a) {
+      sign(a)
+    } else {
+      0
+    }
+    let y = if infinite(b) {
+      sign(b) * signNumber(scale)
+    } else {
+      0
+    }
+    if x != 0 && y != 0 && x != y {
+      fail RenderError.InvalidGeometry
+    }
+    let s = if x != 0 {
+      x
+    } else {
+      y
+    }
+    return run constant(
+      if s > 0 {
+        1.0 / 0.0
+      } else {
+        -1.0 / 0.0
+      },
+    )
+  }
+  let left = run product(a.numerator.asSlice(), b.denominator.asSlice(), &mut budget.*)
+  let right = run product(b.numerator.asSlice(), a.denominator.asSlice(), &mut budget.*)
+  let mut numerator = run sum(left.asSlice(), right.asSlice(), scale, &mut budget.*)
+  let denominator = run product(a.denominator.asSlice(), b.denominator.asSlice(), &mut budget.*)
+  if zero(numerator.asSlice()) {
+    // Exact cancellation of nonzero operands is +0, regardless of how the
+    // rational denominator is signed. Only addition of signed zeros can yield -0.
+    let result = if zero(a.numerator.asSlice()) && (zero(b.numerator.asSlice()) || scale == 0.0) {
+      direction(a) * 0.0 + (direction(b) * 0.0) * scale
+    } else {
+      0.0
+    }
+    let d = denominator.asSlice()
+    numerator.set(0, result * f64.copysign(1.0, d[d.length - 1]))
+  }
+  return Value { numerator: move numerator, denominator: move denominator }
+}
+
+pub effect fn multiply(a: &Value, b: &Value, divide: bool, budget: &mut Budget) -> Value
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let aZero = zero(a.numerator.asSlice())
+  let bZero = zero(b.numerator.asSlice())
+  let polarity = direction(a) * direction(b)
+
+  // Handle zero/infinity before convolution. Summing polynomial zero terms
+  // must not erase the sign of a divisor or of an IEEE-754 zero result.
+  if (divide && ((aZero && bZero) || (infinite(a) && infinite(b))))
+    || (!divide && ((aZero && infinite(b)) || (bZero && infinite(a)))) {
+    fail RenderError.InvalidGeometry
+  }
+  if (divide && (infinite(a) || bZero)) || (!divide && (infinite(a) || infinite(b))) {
+    return run constant(polarity * (1.0 / 0.0))
+  }
+  if aZero || (divide && infinite(b)) || (!divide && bZero) {
+    return run constant(polarity * 0.0)
+  }
+  let numerator = run product(
+    a.numerator.asSlice(),
+    if divide {
+      b.denominator.asSlice()
+    } else {
+      b.numerator.asSlice()
+    },
+    &mut budget.*,
+  )
+  let denominator = run product(
+    a.denominator.asSlice(),
+    if divide {
+      b.numerator.asSlice()
+    } else {
+      b.denominator.asSlice()
+    },
+    &mut budget.*,
+  )
+  return Value { numerator: move numerator, denominator: move denominator }
+}
+
+pub effect fn compare(a: &Value, b: &Value, budget: &mut Budget) -> i32
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  if infinite(a) || infinite(b) {
+    if infinite(a) && infinite(b) {
+      return if sign(a) == sign(b) {
+        0
+      } else if sign(a) < sign(b) {
+        -1
+      } else {
+        1
+      }
+    }
+    return if infinite(a) {
+      sign(a)
+    } else {
+      -sign(b)
+    }
+  }
+  let difference = run linear(a, b, -1.0, &mut budget.*)
+  return sign(&difference)
+}
+
+pub effect fn limit(value: &Value) -> f64
+  ! RenderError {
+  let a = value.numerator.asSlice()
+  let b = value.denominator.asSlice()
+  if zero(a) {
+    return direction(value) * 0.0
+  }
+  if infinite(value) || a.length > b.length {
+    return if sign(value) > 0 {
+      1.0 / 0.0
+    } else {
+      -1.0 / 0.0
+    }
+  }
+  if a.length < b.length {
+    return direction(value) * 0.0
+  }
+  return run coefficient(a[a.length - 1] / b[b.length - 1])
+}

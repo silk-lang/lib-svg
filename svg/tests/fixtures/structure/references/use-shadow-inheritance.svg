@@ -1,0 +1,5 @@
+<!-- Independent literal control: shadow roots inherit separately; source/host ancestry does not match ordinary selectors. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <rect x="2" y="2" width="8" height="8" fill="red"/>
+  <rect x="14" y="2" width="8" height="8" fill="blue"/>
+</svg>

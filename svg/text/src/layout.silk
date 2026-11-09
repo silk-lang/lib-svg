@@ -1,0 +1,1676 @@
+//! SVG 2 text layout (https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm) for one
+//! `text` element: per-character font selection, shaping, the positioning attributes and
+//! text-anchor, producing positioned glyphs in the element's user space.
+import font_outline.outline { Outlines, Recorder }
+import on_path { OnPath }
+import svg_fonts.database { Fonts, Face, AXIS_WEIGHT, AXIS_WIDTH, AXIS_ITALIC, AXIS_SLANT }
+import svg_fonts.matching { Selection }
+import harfrust.lib {
+  Buffer,
+  Shaper,
+  ShaperData,
+  ConfiguredShaper,
+  DefaultFontFuncs,
+  Feature,
+  Variation,
+  GlyphInfo,
+  GlyphPosition,
+  shapeWithFeatures,
+  ShapeError,
+  Direction
+}
+import read_fonts.lib { FontRef, ReadError, Os2, Post }
+import read_fonts.model.charmap { Charmap }
+import read_fonts.model.metrics { Metrics, LineBox }
+import font_types.lib { F2Dot14, F48Dot16, GlyphId, Tag }
+import silk.text.unicode { Unicode }
+import silk.text.string { String }
+import silk.text.bidi { BidiWorkspace, ParagraphDirection, analyzeCodepoints, reorder }
+import silk.text.vertical_text { Orientation, OrientationRun, orientations }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f32
+import silk.num.f64
+import silk.num.i16
+import silk.num.i32
+import silk.num.u16
+import silk.num.u32
+import silk.num.usize
+
+pub enum Anchor {
+  Start,
+  Middle,
+  End,
+}
+
+/// The characters of one element (text, tspan) share a span: its font and anchor.
+pub struct Span {
+  /// Faces to try in order: one selection per font-family entry, then fallbacks.
+  pub faces: List<Selection>,
+  /// font-size in user units.
+  pub size: f64,
+  pub anchor: Anchor,
+  /// letter-spacing and word-spacing in user units.
+  pub letterSpacing: f64,
+  pub wordSpacing: f64,
+  pub dominant: Baseline,
+  /// alignment-baseline; None aligns by the parent's dominant baseline.
+  pub alignment: Option<Baseline>,
+  pub shift: Shift,
+  /// The enclosing element's span, which must come earlier.
+  pub parent: Option<usize>,
+  /// direction: rtl.
+  pub rtl: bool,
+  pub bidi: Bidi,
+  /// OpenType features for the span's characters, in order; a later setting of a tag wins.
+  pub features: List<Setting>,
+  /// font-variation-settings, applied after the axes font matching sets.
+  pub variations: List<Axis>,
+  /// line-height in user units; None is `normal`, the first face's line metrics.
+  pub lineHeight: Option<f64>,
+  /// writing-mode; the text element's sets the layout's.
+  pub writing: Writing,
+  /// text-orientation, for vertical text.
+  pub orientation: TextOrientation,
+}
+
+/// writing-mode (CSS Writing Modes 3), with the SVG 1.1 values already mapped.
+pub enum Writing {
+  HorizontalTb,
+  VerticalRl,
+  VerticalLr,
+}
+
+/// text-orientation (CSS Writing Modes 3 #text-orientation).
+pub enum TextOrientation {
+  Mixed,
+  Upright,
+  Sideways,
+}
+
+/// One variation axis value.
+pub struct Axis {
+  pub tag: u32,
+  pub value: f64,
+}
+
+impl Copy for Axis {}
+
+/// One OpenType feature setting: a tag and its value, 0 for off.
+pub struct Setting {
+  pub tag: u32,
+  pub value: u32,
+}
+
+impl Copy for Setting {}
+
+/// unicode-bidi (CSS Writing Modes 3 #unicode-bidi).
+pub enum Bidi {
+  Normal,
+  Embed,
+  Isolate,
+  Override,
+  IsolateOverride,
+  Plaintext,
+}
+
+/// Baseline types (CSS Inline 3 #baseline-types), horizontal only.
+pub enum Baseline {
+  Alphabetic,
+  TextTop,
+  TextBottom,
+  Ideographic,
+  Middle,
+  Central,
+  Mathematical,
+  Hanging,
+}
+
+/// baseline-shift: a length raises (positive) or lowers the box; sub and super use the
+/// parent's font.
+pub union Shift {
+  Length { pub value: f64 },
+  Sub,
+  Super,
+}
+
+impl Copy for Shift {}
+
+/// A `textLength` on the element whose characters are `[start, end)`. Lengths are given
+/// in document order of their elements.
+pub struct TextLength {
+  pub start: usize,
+  pub end: usize,
+  pub length: f64,
+  /// lengthAdjust="spacingAndGlyphs".
+  pub glyphs: bool,
+  /// The element's direction is rtl: the adjustment moves later characters left.
+  pub rtl: bool,
+}
+
+impl Copy for TextLength {}
+
+/// Spacing carried from one cluster to the next across runs.
+struct Spacing {
+  started: bool,
+  letter: f64,
+  word: f64,
+  /// The glyph that ends the previous cluster, which takes the spacing in its advance.
+  last: usize,
+}
+
+/// One addressable character with its resolved positioning values.
+pub struct Character {
+  pub cp: u32,
+  pub span: usize,
+  pub x: Option<f64>,
+  pub y: Option<f64>,
+  pub dx: f64,
+  pub dy: f64,
+  /// Degrees.
+  pub rotate: f64,
+  /// The `textPath` (an index into `layout`'s paths) the character is in.
+  pub path: Option<usize>,
+  /// Its place on a line of auto-wrapped text; `wrap` sets it.
+  pub line: Line,
+}
+
+/// Where a character sits on a line of auto-wrapped text (SVG 2 #InlineSize).
+pub enum Line {
+  Inside,
+  /// Starts a line after the first, so letter spacing starts afresh.
+  Start,
+  /// White space at the end of a line, which hangs: it has no advance and is not drawn
+  /// (CSS Text 3 #white-space-phase-2).
+  Hang,
+}
+
+impl Copy for Character {}
+
+/// A face at one set of variation values, with the metrics glyph placement needs.
+pub struct Instance {
+  pub face: usize,
+  pub selection: Selection,
+  pub coords: List<F2Dot14>,
+  /// User units per font unit.
+  pub scale: f64,
+  /// Ascent and descent in user units, positive above and below the baseline.
+  pub ascent: f64,
+  pub descent: f64,
+  /// The line gap of the same metrics, for `line-height: normal`.
+  pub lineGap: f64,
+  /// x-height and the OS/2 subscript and superscript offsets, in user units; absent
+  /// metrics are None.
+  pub xHeight: Option<f64>,
+  pub subscript: Option<f64>,
+  pub superscript: Option<f64>,
+  /// The top of the underline and line-through below the baseline (post, OS/2), and their
+  /// thicknesses, in user units.
+  pub underline: Option<f64>,
+  pub underlineThickness: Option<f64>,
+  pub strikeout: Option<f64>,
+  pub strikeoutThickness: Option<f64>,
+  pub glyphCount: u32,
+  pub unitsPerEm: u16,
+  span: usize,
+  choice: usize,
+}
+
+pub struct PlacedGlyph {
+  pub span: usize,
+  pub instance: usize,
+  pub glyph: u32,
+  /// The first character of the glyph's cluster.
+  pub owner: usize,
+  /// The pen position on the baseline, in user space.
+  pub x: f64,
+  pub y: f64,
+  /// The shaper's offset of the glyph from the pen, in user units (y down).
+  pub offsetX: f64,
+  pub offsetY: f64,
+  /// Degrees, clockwise.
+  pub rotate: f64,
+  /// Horizontal glyph scale from lengthAdjust="spacingAndGlyphs".
+  pub scaleX: f64,
+  /// Horizontal advance in user units.
+  pub advance: f64,
+  /// Off the end of its text path, so not rendered.
+  pub hidden: bool,
+  /// Set upright in vertical text: shaped top to bottom, its position is on the line's
+  /// central baseline and its offsets are the shaper's vertical ones.
+  pub upright: bool,
+  /// For an upright glyph, how far its span's alphabetic baseline lies beyond its position,
+  /// across the line.
+  pub center: f64,
+}
+
+impl Copy for PlacedGlyph {}
+
+pub struct Layout {
+  pub glyphs: List<PlacedGlyph>,
+  pub instances: List<Instance>,
+  /// Per span, how far its alphabetic baseline lies below the text position's.
+  pub drops: List<f64>,
+}
+
+const TAG_WGHT: u32 = 0x77676874
+
+const TAG_WDTH: u32 = 0x77647468
+
+const TAG_ITAL: u32 = 0x6974616c
+
+const TAG_SLNT: u32 = 0x736c6e74
+
+pub fn fontOf<'a>(database: &'a Fonts<'_>, face: usize) -> Option<FontRef<'a>> {
+  let index = database.face(face).index
+  return match move FontRef.fromIndex(database.data(face), index) {
+    Result<FontRef<'a>, ReadError>.Success { value } => Option<FontRef<'a>>.Some { value: value }
+    Result<FontRef<'a>, ReadError>.Failure { error } => Option<FontRef<'a>>.None
+  }
+}
+
+/// The face's x-height divided by its em size at default variations, for font-size-adjust
+/// (CSS Fonts 5 #aspect-value); None without an x-height metric.
+pub fn aspect(database: &Fonts<'_>, face: usize) -> Option<f64> {
+  if let Option<FontRef>.Some { value: font } = fontOf(database, face) {
+    let metrics = Metrics.fromSfnt(&font, &[])
+    if let Option<F48Dot16>.Some { value } = metrics.xHeight {
+      let height = lineMetric(value)
+      if height > 0.0 && metrics.unitsPerEm > 0 {
+        return Option<f64>.Some { value: height / u16.toF64(metrics.unitsPerEm) }
+      }
+    }
+  }
+  return Option<f64>.None
+}
+
+fn supports(database: &Fonts<'_>, face: usize, cp: u32) -> bool {
+  return match fontOf(database, face) {
+    Option<FontRef>.Some { value: font } => Charmap.new(&font).mapUnicode(cp).isSome()
+    Option<FontRef>.None => false
+  }
+}
+
+/// Characters that belong to the cluster of the previous one keep its face.
+fn continues(cp: u32) -> bool {
+  return Unicode.isMark(cp) || cp == 0x200C || cp == 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F)
+    || (cp >= 0xE0100 && cp <= 0xE01EF)
+}
+
+/// The variation values the matching step chose, for the axes the face has.
+effect fn variations(face: &Face, selection: &Selection, out: &mut List<Variation>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if (face.axes & AXIS_WEIGHT) != 0 {
+    run List<Variation>.append(
+      &mut out,
+      Variation { tag: Tag.fromU32(TAG_WGHT), value: f64.toF32(selection.weight) },
+    )
+  }
+  if (face.axes & AXIS_WIDTH) != 0 {
+    run List<Variation>.append(
+      &mut out,
+      Variation { tag: Tag.fromU32(TAG_WDTH), value: f64.toF32(selection.width) },
+    )
+  }
+  if (face.axes & AXIS_ITALIC) != 0 {
+    if let Option<f64>.Some { value } = selection.italic {
+      run List<Variation>.append(
+        &mut out,
+        Variation { tag: Tag.fromU32(TAG_ITAL), value: f64.toF32(value) },
+      )
+    }
+  }
+  if (face.axes & AXIS_SLANT) != 0 {
+    if let Option<f64>.Some { value } = selection.oblique {
+      run List<Variation>.append(
+        &mut out,
+        Variation { tag: Tag.fromU32(TAG_SLNT), value: f64.toF32(-value) },
+      )
+    }
+  }
+}
+
+fn lineMetric(value: F48Dot16) -> f64 {
+  return F48Dot16.toF64(value)
+}
+
+fn optional(left: Option<f64>, right: Option<f64>) -> bool {
+  return match left {
+    Option<f64>.Some { value: a } => match right {
+      Option<f64>.Some { value: b } => a == b
+      Option<f64>.None => false
+    }
+    Option<f64>.None => right.isNone()
+  }
+}
+
+fn sameAxes(left: &List<Axis>, right: &List<Axis>) -> bool {
+  let a = List<Axis>.asSlice(&left.*)
+  let b = List<Axis>.asSlice(&right.*)
+  if a.length != b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index].tag != b[index].tag || a[index].value != b[index].value {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+/// Whether two selections render glyphs identically.
+fn same(left: &Selection, right: &Selection) -> bool {
+  return left.face == right.face && left.weight == right.weight && left.width == right.width
+    && optional(left.italic, right.italic)
+    && optional(left.oblique, right.oblique)
+    && left.syntheticOblique == right.syntheticOblique
+    && left.syntheticBold == right.syntheticBold
+}
+
+/// The instance for a span's face choice, created on first use and shared by spans whose
+/// choice renders the same.
+pub effect fn instance(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  span: usize,
+  choice: usize,
+  instances: &mut List<Instance>,
+) -> usize
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  while index < List<Instance>.length(&instances.*) {
+    let existing = &List<Instance>.asSlice(&instances.*)[index]
+    if (existing.span == span && existing.choice == choice)
+      || same(&existing.selection, &List<Selection>.asSlice(&spans[span].faces)[choice])
+        && spans[existing.span].size == spans[span].size
+        && sameAxes(&spans[existing.span].variations, &spans[span].variations) {
+      return index
+    }
+    index = index + 1
+  }
+  let selection = List<Selection>.asSlice(&spans[span].faces)[choice]
+  let face = database.face(selection.face)
+  let mut coords = List<F2Dot14>.make()
+  let mut scale = 0.0
+  let mut ascent = 0.0
+  let mut descent = 0.0
+  let mut lineGap = 0.0
+  let mut xHeight = Option<f64>.None
+  let mut subscript = Option<f64>.None
+  let mut superscript = Option<f64>.None
+  let mut underline = Option<f64>.None
+  let mut underlineThickness = Option<f64>.None
+  let mut strikeout = Option<f64>.None
+  let mut strikeoutThickness = Option<f64>.None
+  let mut glyphCount: u32 = 0
+  let mut unitsPerEm: u16 = 0
+  if let Option<FontRef>.Some { value: font } = fontOf(database, selection.face) {
+    let data = ShaperData.new(&font)
+    let mut shaper = Shaper.withFuncs(&data, DefaultFontFuncs {})
+    let mut wanted = List<Variation>.make()
+    run variations(face, &selection, &mut wanted)
+    let axes = List<Axis>.asSlice(&spans[span].variations)
+    let mut axis: usize = 0
+    while axis < axes.length {
+      run List<Variation>.append(
+        &mut wanted,
+        Variation { tag: Tag.fromU32(axes[axis].tag), value: f64.toF32(axes[axis].value) },
+      )
+      axis = axis + 1
+    }
+    run shaper.setVariations(List<Variation>.asSlice(&wanted))
+    run List<F2Dot14>.appendSlice(&mut coords, List<F2Dot14>.asSlice(&shaper.coords))
+    let metrics = Metrics.fromSfnt(&font, List<F2Dot14>.asSlice(&coords))
+    scale = spans[span].size / u16.toF64(metrics.unitsPerEm)
+    glyphCount = metrics.numGlyphs
+    unitsPerEm = metrics.unitsPerEm
+    if let Option<LineBox<F48Dot16>>.Some { value: line } = metrics.hLine() {
+      ascent = lineMetric(line.ascender) * scale
+      descent = -lineMetric(line.descender) * scale
+      lineGap = lineMetric(line.lineGap) * scale
+    }
+    if let Option<F48Dot16>.Some { value } = metrics.xHeight {
+      if lineMetric(value) > 0.0 {
+        xHeight = Option<f64>.Some { value: lineMetric(value) * scale }
+      }
+    }
+    if let Result<Os2, ReadError>.Success { value: os2 } = FontRef.os2(&font) {
+      let below = i16.toF64(os2.ySubscriptYOffset())
+      let above = i16.toF64(os2.ySuperscriptYOffset())
+      if below != 0.0 {
+        subscript = Option<f64>.Some { value: below * scale }
+      }
+      if above != 0.0 {
+        superscript = Option<f64>.Some { value: above * scale }
+      }
+      let size = i16.toF64(os2.yStrikeoutSize())
+      if size > 0.0 {
+        strikeout = Option<f64>.Some { value: -i16.toF64(os2.yStrikeoutPosition()) * scale }
+        strikeoutThickness = Option<f64>.Some { value: size * scale }
+      }
+    }
+    if let Result<Post, ReadError>.Success { value: post } = FontRef.post(&font) {
+      let size = i16.toF64(post.underlineThickness().toI16())
+      if size > 0.0 {
+        underline = Option<f64>.Some { value: -i16.toF64(post.underlinePosition().toI16()) * scale }
+        underlineThickness = Option<f64>.Some { value: size * scale }
+      }
+    }
+  }
+  run List<Instance>.append(
+    &mut instances,
+    Instance {
+      face: selection.face,
+      selection: selection,
+      coords: move coords,
+      scale: scale,
+      ascent: ascent,
+      descent: descent,
+      lineGap: lineGap,
+      xHeight: xHeight,
+      subscript: subscript,
+      superscript: superscript,
+      underline: underline,
+      underlineThickness: underlineThickness,
+      strikeout: strikeout,
+      strikeoutThickness: strikeoutThickness,
+      glyphCount: glyphCount,
+      unitsPerEm: unitsPerEm,
+      span: span,
+      choice: choice,
+    },
+  )
+  return List<Instance>.length(&instances.*) - 1
+}
+
+/// Per character: the index of the span face that renders it (CSS Fonts 4 #cluster-matching,
+/// with marks and joiners kept on the face of the character before them).
+fn choose(database: &Fonts<'_>, spans: &[Span], characters: &[Character], at: usize) -> usize {
+  let character = characters[at]
+  let faces = List<Selection>.asSlice(&spans[character.span].faces)
+  let mut choice: usize = 0
+  while choice < faces.length {
+    if supports(database, faces[choice].face, character.cp) {
+      return choice
+    }
+    choice = choice + 1
+  }
+  return 0
+}
+
+/// Shapes `characters[start..end)` (one span, one face) and appends their glyphs from the
+/// CSS pen position `pen`. Each cluster's first character records the pen offset of the
+/// cluster; the other characters of a cluster record their owner.
+effect fn shapeRun(
+  database: &Fonts<'_>,
+  layout: &mut Layout,
+  instanceIndex: usize,
+  characters: &[Character],
+  start: usize,
+  end: usize,
+  spans: &[Span],
+  pen: f64,
+  rtl: bool,
+  upright: bool,
+  spacing: &mut Spacing,
+  offsets: &mut List<f64>,
+  owners: &mut List<usize>,
+) -> f64
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let instance = &List<Instance>.asSlice(&layout.instances)[instanceIndex]
+  let scale = instance.scale
+  let bold = if instance.selection.syntheticBold {
+    u16.toF64(instance.unitsPerEm) / 24.0 * scale
+  } else {
+    0.0
+  }
+  let font = match fontOf(database, instance.face) {
+    Option<FontRef>.Some { value } => value
+    Option<FontRef>.None => {
+      return pen
+    }
+  }
+  let data = ShaperData.new(&font)
+  let mut shaper = Shaper.withFuncs(&data, DefaultFontFuncs {})
+  List<F2Dot14>.clear(&mut shaper.coords)
+  run List<F2Dot14>.appendSlice(&mut shaper.coords, List<F2Dot14>.asSlice(&instance.coords))
+  let mut buffer = Buffer.new()
+  let mut index = start
+  while index < end {
+    run buffer.add(characters[index].cp, usize.toU32(index - start))
+    index = index + 1
+  }
+  if upright {
+    buffer.setDirection(Direction.TopToBottom)
+  } else if rtl {
+    buffer.setDirection(Direction.RightToLeft)
+  }
+  buffer.guessSegmentProperties()
+
+  // Each span's own features over its characters, then CSS Text 3 #letter-spacing-property:
+  // optional ligatures are off where spacing applies.
+  let mut features = List<Feature>.make()
+  index = start
+  while index < end {
+    let owner = characters[index].span
+    let mut last = index + 1
+    while last < end && characters[last].span == owner {
+      last = last + 1
+    }
+    let settings = List<Setting>.asSlice(&spans[owner].features)
+    let mut setting: usize = 0
+    while setting < settings.length {
+      run List<Feature>.append(
+        &mut features,
+        Feature.ranged(
+          Tag.fromU32(settings[setting].tag),
+          settings[setting].value,
+          usize.toU32(index - start),
+          usize.toU32(last - start),
+        ),
+      )
+      setting = setting + 1
+    }
+    index = last
+  }
+  index = start
+  while index < end {
+    if spans[characters[index].span].letterSpacing != 0.0 {
+      let mut last = index + 1
+      while last < end && spans[characters[last].span].letterSpacing != 0.0 {
+        last = last + 1
+      }
+      let tags: [u32; 4] = [0x6c696761, 0x636c6967, 0x646c6967, 0x686c6967]
+      let mut tag: usize = 0
+      while tag < 4 {
+        run List<Feature>.append(
+          &mut features,
+          Feature.ranged(
+            Tag.fromU32(tags[tag]),
+            0,
+            usize.toU32(index - start),
+            usize.toU32(last - start),
+          ),
+        )
+        tag = tag + 1
+      }
+      index = last
+    } else {
+      index = index + 1
+    }
+  }
+  let shaped = run shapeWithFeatures(&shaper, &mut buffer, List<Feature>.asSlice(&features))
+  if let Result<(), ShapeError>.Failure { error } = move shaped {
+    return pen
+  }
+  let mut advance = pen
+  let first = List<PlacedGlyph>.length(&layout.glyphs)
+  let count = buffer.len()
+  let mut glyph: usize = 0
+  while glyph < count {
+    let info = match buffer.glyphInfo(glyph) {
+      Option<GlyphInfo>.Some { value } => value
+      Option<GlyphInfo>.None => GlyphInfo { glyphId: 0, cluster: 0, flags: 0 }
+    }
+    let position = match buffer.glyphPosition(glyph) {
+      Option<GlyphPosition>.Some { value } => value
+      Option<GlyphPosition>.None => GlyphPosition.zero()
+    }
+    let owner = start + u32.toUsize(info.cluster)
+    let hangs = characters[owner].line == Line.Hang
+
+    // Synthetic bold widens each advancing glyph by the emboldening strength.
+    let along = if upright {
+      -position.yAdvance
+    } else {
+      position.xAdvance
+    }
+    let width = if hangs {
+      0.0
+    } else if along != 0 {
+      i32.toF64(along) * scale + bold
+    } else {
+      0.0
+    }
+    if hangs {
+      List<f64>.set(&mut offsets, owner, advance)
+      List<usize>.set(&mut owners, owner, owner)
+    } else if List<usize>.get(&owners.*, owner) == usize.MAX {
+      // Letter spacing puts half its amount on each side of a typographic character, but
+      // none at the line start or end; word spacing follows word separators.
+      let letter = spans[characters[owner].span].letterSpacing
+      if spacing.started {
+        let gap = spacing.word + spacing.letter / 2.0 + letter / 2.0
+        if gap != 0.0 {
+          advance = advance + gap
+          let previous = List<PlacedGlyph>.asMutSlice(&mut layout.glyphs)
+          previous[spacing.last].advance = previous[spacing.last].advance + gap
+        }
+      }
+      spacing.started = true
+      spacing.letter = letter
+      spacing.word = if separator(characters[owner].cp) {
+        spans[characters[owner].span].wordSpacing
+      } else {
+        0.0
+      }
+      List<f64>.set(&mut offsets, owner, advance)
+      List<usize>.set(&mut owners, owner, owner)
+    }
+    run List<PlacedGlyph>.append(
+      &mut layout.glyphs,
+      PlacedGlyph {
+        span: characters[owner].span,
+        instance: instanceIndex,
+        glyph: info.glyphId,
+        owner: owner,
+        x: advance,
+        y: 0.0,
+        offsetX: i32.toF64(position.xOffset) * scale,
+        offsetY: -i32.toF64(position.yOffset) * scale,
+        rotate: 0.0,
+        hidden: hangs,
+        scaleX: 1.0,
+        advance: width,
+        upright: upright,
+        center: 0.0,
+      },
+    )
+    if !hangs {
+      spacing.last = List<PlacedGlyph>.length(&layout.glyphs) - 1
+    }
+    advance = advance + width
+    glyph = glyph + 1
+  }
+
+  // A right-to-left character's position is the right edge of its cluster, where its
+  // advance starts (SVG 2 #TextLayoutAlgorithm takes such advances as negative).
+  if rtl {
+    let placed = List<PlacedGlyph>.asSlice(&layout.glyphs)
+    let mut g = first
+    while g < placed.length {
+      let owner = placed[g].owner
+      let moved = List<f64>.get(&offsets.*, owner) + placed[g].advance
+      List<f64>.set(&mut offsets, owner, moved)
+      g = g + 1
+    }
+  }
+
+  // Characters without a glyph of their own belong to the cluster before them.
+  index = start
+  while index < end {
+    if List<usize>.get(&owners.*, index) == usize.MAX {
+      let previous = if index > start {
+        List<usize>.get(&owners.*, index - 1)
+      } else {
+        index
+      }
+      List<usize>.set(&mut owners, index, previous)
+      let inherited = List<f64>.get(&offsets.*, previous)
+      List<f64>.set(&mut offsets, index, inherited)
+    }
+    index = index + 1
+  }
+  return advance
+}
+
+/// Word separators, which take word-spacing (CSS Text 3 #word-separator).
+pub fn separator(cp: u32) -> bool {
+  return cp == 0x20 || cp == 0xA0 || cp == 0x1361 || cp == 0x10100 || cp == 0x10101 || cp == 0x1039F
+    || cp == 0x1091F
+}
+
+/// The formatting characters CSS Writing Modes 3 #bidi-control-codes gives an element with
+/// `unicode-bidi`, at its start (`opening`) or end.
+effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let isolate: u32 = if span.rtl {
+    0x2067
+  } else {
+    0x2066
+  }
+  let embed: u32 = if span.rtl {
+    0x202B
+  } else {
+    0x202A
+  }
+  let force: u32 = if span.rtl {
+    0x202E
+  } else {
+    0x202D
+  }
+  match span.bidi {
+    Bidi.Normal => {}
+    Bidi.Embed => {
+      run List<u32>.append(
+        &mut out,
+        if opening {
+          embed
+        } else {
+          0x202C
+        },
+      )
+    }
+    Bidi.Isolate => {
+      run List<u32>.append(
+        &mut out,
+        if opening {
+          isolate
+        } else {
+          0x2069
+        },
+      )
+    }
+    Bidi.Override => {
+      run List<u32>.append(
+        &mut out,
+        if opening {
+          force
+        } else {
+          0x202C
+        },
+      )
+    }
+    Bidi.IsolateOverride => {
+      if opening {
+        run List<u32>.append(&mut out, isolate)
+        run List<u32>.append(&mut out, force)
+      } else {
+        run List<u32>.append(&mut out, 0x202C)
+        run List<u32>.append(&mut out, 0x2069)
+      }
+    }
+    Bidi.Plaintext => {
+      run List<u32>.append(
+        &mut out,
+        if opening {
+          0x2068
+        } else {
+          0x2069
+        },
+      )
+    }
+  }
+}
+
+/// Whether `span` is `inner` or one of its ancestors.
+fn encloses(spans: &[Span], span: usize, inner: usize) -> bool {
+  let mut at = Option<usize>.Some { value: inner }
+  while let Option<usize>.Some { value } = at {
+    if value == span {
+      return true
+    }
+    at = spans[value].parent
+  }
+  return false
+}
+
+/// The unwrapped embedding level of each character of the text chunk `[start, end)`, which
+/// is an independent block for the Unicode bidirectional algorithm (SVG 2 #TextLayoutIntroduction).
+/// The text element's direction sets the paragraph level; descendants' `unicode-bidi` and
+/// `direction` become formatting characters around their content.
+effect fn chunkLevels(
+  spans: &[Span],
+  characters: &[Character],
+  start: usize,
+  end: usize,
+  workspace: &mut BidiWorkspace,
+  levels: &mut List<u8>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let root = &spans[0]
+  let direction = if root.bidi == Bidi.Plaintext {
+    ParagraphDirection.Auto
+  } else if root.rtl {
+    ParagraphDirection.Rtl
+  } else {
+    ParagraphDirection.Ltr
+  }
+  let mut codepoints = List<u32>.make()
+  let mut slots = List<usize>.make()
+  if root.bidi == Bidi.Override || root.bidi == Bidi.IsolateOverride {
+    run List<u32>.append(
+      &mut codepoints,
+      if root.rtl {
+        0x202E
+      } else {
+        0x202D
+      },
+    )
+  }
+  let mut open = List<usize>.make()
+  let mut index = start
+  while index < end {
+    let span = characters[index].span
+
+    // Close the elements this character is outside of, then open the ones it is inside.
+    while List<usize>.length(&open) > 0
+      && !encloses(spans, List<usize>.get(&open, List<usize>.length(&open) - 1), span) {
+      let closing = List<usize>.get(&open, List<usize>.length(&open) - 1)
+      drop List<usize>.pop(&mut open)
+      run controls(&spans[closing], false, &mut codepoints)
+    }
+    let mut chain = List<usize>.make()
+    let mut at = Option<usize>.Some { value: span }
+    while let Option<usize>.Some { value } = at {
+      let inside = List<usize>.length(&open) > 0
+        && List<usize>.get(&open, List<usize>.length(&open) - 1) == value
+      let top = match spans[value].parent {
+        Option<usize>.Some { value: above } => false
+        Option<usize>.None => true
+      }
+      if inside || top {
+        at = Option<usize>.None
+      } else {
+        run List<usize>.append(&mut chain, value)
+        at = spans[value].parent
+      }
+    }
+    while List<usize>.length(&chain) > 0 {
+      let opening = List<usize>.get(&chain, List<usize>.length(&chain) - 1)
+      drop List<usize>.pop(&mut chain)
+      run controls(&spans[opening], true, &mut codepoints)
+      run List<usize>.append(&mut open, opening)
+    }
+    run List<usize>.append(&mut slots, List<u32>.length(&codepoints))
+    run List<u32>.append(&mut codepoints, characters[index].cp)
+    index = index + 1
+  }
+  drop run analyzeCodepoints(List<u32>.asSlice(&codepoints), direction, &mut workspace)
+  index = 0
+  while index < List<usize>.length(&slots) {
+    run List<u8>.append(&mut levels, workspace.unwrappedLevel(List<usize>.get(&slots, index)))
+    index = index + 1
+  }
+}
+
+/// Whether the character has an absolute position, which starts a text chunk.
+fn positioned(character: &Character) -> bool {
+  if let Option<f64>.Some { value } = character.x {
+    return true
+  }
+  if let Option<f64>.Some { value } = character.y {
+    return true
+  }
+  return false
+}
+
+/// Whether the character starts a `textPath`, which always starts an anchored chunk.
+fn pathStart(characters: &[Character], index: usize) -> bool {
+  if let Option<usize>.Some { value } = characters[index].path {
+    if index == 0 {
+      return true
+    }
+    if let Option<usize>.Some { value: before } = characters[index - 1].path {
+      return before != value
+    }
+    return true
+  }
+  return false
+}
+
+/// Lays out one text element's addressable characters.
+pub effect fn layout(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  given: &[Character],
+  lengths: &[TextLength],
+  paths: &[OnPath],
+) -> Layout
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = Layout {
+    glyphs: List<PlacedGlyph>.make(),
+    instances: List<Instance>.make(),
+    drops: List<f64>.make(),
+  }
+  let count = given.length
+  if count == 0 {
+    return move result
+  }
+
+  // Vertical text is laid out as horizontal text in a frame turned a quarter clockwise:
+  // the inline axis runs down and the line's under side is on the left
+  // (CSS Writing Modes 3 #vertical-layout). Text on a path stays horizontal.
+  let vertical = spans[0].writing != Writing.HorizontalTb && paths.length == 0
+  let mut turned = List<Character>.make()
+  let mut uprights = List<bool>.make()
+  if vertical {
+    run turn(spans, given, &mut turned, &mut uprights)
+  } else {
+    run List<bool>.appendRepeated(&mut uprights, false, count)
+  }
+  let characters = if vertical {
+    List<Character>.asSlice(&turned)
+  } else {
+    given
+  }
+  let mut offsets = List<f64>.make()
+  let mut owners = List<usize>.make()
+  let mut choices = List<usize>.make()
+  run List<f64>.appendRepeated(&mut offsets, 0.0, count)
+  run List<usize>.appendRepeated(&mut owners, usize.MAX, count)
+  let mut index: usize = 0
+  while index < count {
+    let choice = if index > 0 && continues(characters[index].cp)
+      && characters[index - 1].span == characters[index].span {
+      List<usize>.get(&choices, index - 1)
+    } else {
+      choose(database, spans, characters, index)
+    }
+    run List<usize>.append(&mut choices, choice)
+    index = index + 1
+  }
+
+  // Per character, the font instance that renders it, or usize.MAX without a face.
+  let mut used = List<usize>.make()
+  index = 0
+  while index < count {
+    let span = characters[index].span
+    let chosen = if List<Selection>.length(&spans[span].faces) > 0 {
+      run instance(database, spans, span, List<usize>.get(&choices, index), &mut result.instances)
+    } else {
+      usize.MAX
+    }
+    run List<usize>.append(&mut used, chosen)
+    index = index + 1
+  }
+
+  // Step "CSS layout" along one line. Each text chunk (begun by an x or y value) is an
+  // independent block for ligatures and bidi reordering (SVG 2 #TermTextChunk). Within a
+  // chunk, runs end where the font instance or embedding level changes, and are placed in
+  // visual order. CSS Text 3 #boundary-shaping keeps shaping across other element boundaries.
+  let mut chunks = List<usize>.make()
+  let mut levels = List<u8>.make()
+  let mut workspace = BidiWorkspace.make()
+  let mut pen = 0.0
+  let mut spacing = Spacing { started: false, letter: 0.0, word: 0.0, last: 0 }
+  let mut chunkStart: usize = 0
+  while chunkStart < count {
+    let mut chunkEnd = chunkStart + 1
+    while chunkEnd < count && !positioned(&characters[chunkEnd])
+      && !pathStart(characters, chunkEnd) {
+      chunkEnd = chunkEnd + 1
+    }
+    run List<usize>.appendRepeated(&mut chunks, chunkStart, chunkEnd - chunkStart)
+    if characters[chunkStart].line == Line.Start {
+      spacing.started = false
+    }
+    run chunkLevels(spans, characters, chunkStart, chunkEnd, &mut workspace, &mut levels)
+    let mut runStarts = List<usize>.make()
+    let mut runLevels = List<u8>.make()
+    let mut start = chunkStart
+    while start < chunkEnd {
+      run List<usize>.append(&mut runStarts, start)
+      run List<u8>.append(&mut runLevels, List<u8>.get(&levels, start))
+      let mut end = start + 1
+      while end < chunkEnd && List<usize>.get(&used, end) == List<usize>.get(&used, start)
+        && List<u8>.get(&levels, end) == List<u8>.get(&levels, start)
+        && List<bool>.get(&uprights, end) == List<bool>.get(&uprights, start) {
+        end = end + 1
+      }
+      start = end
+    }
+    run List<usize>.append(&mut runStarts, chunkEnd)
+    let mut order = List<usize>.make()
+    run reorder(List<u8>.asSlice(&runLevels), &mut order)
+    let mut visual: usize = 0
+    while visual < List<usize>.length(&order) {
+      let item = List<usize>.get(&order, visual)
+      let start = List<usize>.get(&runStarts, item)
+      let end = List<usize>.get(&runStarts, item + 1)
+      let instanceIndex = List<usize>.get(&used, start)
+      if instanceIndex != usize.MAX {
+        pen = run shapeRun(
+          database,
+          &mut result,
+          instanceIndex,
+          characters,
+          start,
+          end,
+          spans,
+          pen,
+          List<u8>.get(&runLevels, item) % 2 == 1 && !List<bool>.get(&uprights, start),
+          List<bool>.get(&uprights, start),
+          &mut spacing,
+          &mut offsets,
+          &mut owners,
+        )
+      } else {
+        index = start
+        while index < end {
+          List<usize>.set(&mut owners, index, index)
+          List<f64>.set(&mut offsets, index, pen)
+          index = index + 1
+        }
+      }
+      visual = visual + 1
+    }
+    chunkStart = chunkEnd
+  }
+
+  // Step "Adjust positions: dx, dy". Only the first character of a typographic character
+  // takes positioning values.
+  let mut positionsX = List<f64>.make()
+  let mut positionsY = List<f64>.make()
+  let mut scales = List<f64>.make()
+  let mut shiftX = 0.0
+  let mut shiftY = 0.0
+  index = 0
+  while index < count {
+    if List<usize>.get(&owners, index) == index {
+      shiftX = shiftX + characters[index].dx
+      shiftY = shiftY + characters[index].dy
+    }
+    run List<f64>.append(&mut positionsX, List<f64>.get(&offsets, index) + shiftX)
+    run List<f64>.append(&mut positionsY, shiftY)
+    run List<f64>.append(&mut scales, 1.0)
+    index = index + 1
+  }
+
+  run applyLengths(&result, &owners, &levels, lengths, &mut positionsX, &mut scales)
+
+  // Step "Adjust positions: x, y": x and y start a text chunk. The character's own dx and
+  // dy still apply after its x and y, as the attribute definitions say.
+  shiftX = 0.0
+  shiftY = 0.0
+  let xs = List<f64>.asMutSlice(&mut positionsX)
+  let ys = List<f64>.asMutSlice(&mut positionsY)
+  index = 0
+  while index < count {
+    let character = characters[index]
+    if List<usize>.get(&owners, index) == index {
+      if let Option<f64>.Some { value } = character.x {
+        shiftX = (value + character.dx) - xs[index]
+      }
+      if let Option<f64>.Some { value } = character.y {
+        shiftY = (value + character.dy) - ys[index]
+      }
+    }
+    xs[index] = xs[index] + shiftX
+    ys[index] = ys[index] + shiftY
+    index = index + 1
+  }
+
+  // Glyphs move with the first character of their cluster.
+  let glyphs = List<PlacedGlyph>.asMutSlice(&mut result.glyphs)
+  let mut g: usize = 0
+  while g < glyphs.length {
+    let owner = glyphs[g].owner
+    let scale = List<f64>.get(&scales, owner)
+    glyphs[g].x = xs[owner] + (glyphs[g].x - List<f64>.get(&offsets, owner)) * scale
+    glyphs[g].y = ys[owner]
+    glyphs[g].rotate = characters[owner].rotate
+    glyphs[g].scaleX = scale
+    glyphs[g].advance = glyphs[g].advance * scale
+    glyphs[g].offsetX = glyphs[g].offsetX * scale
+    g = g + 1
+  }
+  anchor(spans, characters, &chunks, vertical, &mut positionsX, &mut glyphs)
+
+  // Baseline alignment: each glyph's alphabetic baseline moves to its span's.
+  let mut drops = List<f64>.make()
+  run baselines(database, spans, &mut result.instances, &mut drops)
+  let placed = List<PlacedGlyph>.asMutSlice(&mut result.glyphs)
+  g = 0
+  while g < placed.length {
+    placed[g].y = placed[g].y + List<f64>.get(&drops, placed[g].span)
+    g = g + 1
+  }
+  run List<f64>.appendSlice(&mut result.drops, List<f64>.asSlice(&drops))
+  if vertical {
+    run upright(database, spans, &mut result)
+  }
+  if paths.length > 0 {
+    run onPaths(
+      spans,
+      characters,
+      paths,
+      &owners,
+      &chunks,
+      &levels,
+      &positionsX,
+      &positionsY,
+      &drops,
+      &mut result,
+    )
+  }
+  return move result
+}
+
+// How "Position on path" moves one typographic character.
+union Placement {
+  Line,
+  Hidden,
+  Path { pub x: f64, pub y: f64, pub tangentX: f64, pub tangentY: f64 },
+  After { pub x: f64, pub y: f64 },
+}
+
+impl Copy for Placement {}
+
+// Step "Position on path": each typographic character of a textPath goes to the point
+// its midpoint reaches along the path, turned to the tangent there. Characters after
+// the element continue from the path's end until the next anchored chunk.
+effect fn onPaths(
+  spans: &[Span],
+  characters: &[Character],
+  paths: &[OnPath],
+  owners: &List<usize>,
+  chunks: &List<usize>,
+  levels: &List<u8>,
+  positionsX: &List<f64>,
+  positionsY: &List<f64>,
+  drops: &List<f64>,
+  result: &mut Layout,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = characters.length
+  let mut sizes = List<f64>.make()
+  run List<f64>.appendRepeated(&mut sizes, 0.0, count)
+  advances(&result.*, count, &mut sizes)
+  let xs = List<f64>.asSlice(positionsX)
+  let ys = List<f64>.asSlice(positionsY)
+  let mut placements = List<Placement>.make()
+  let mut current = Option<usize>.None
+  let mut after = false
+  let mut shiftX = 0.0
+  let mut shiftY = 0.0
+  let mut index: usize = 0
+  while index < count {
+    let owner = List<usize>.get(owners, index) == index
+    let mut placement = Placement.Line
+    if let Option<usize>.Some { value: which } = characters[index].path {
+      current = Option<usize>.Some { value: which }
+      after = false
+      let path = &paths[which]
+      if !path.valid {
+        placement = Placement.Hidden
+      } else if owner {
+        let advance = if List<u8>.get(levels, index) % 2 == 1 {
+          -List<f64>.get(&sizes, index)
+        } else {
+          List<f64>.get(&sizes, index)
+        }
+        let mut mid = xs[index] + advance / 2.0 + path.offset
+        let mut hidden = false
+        if !path.closed {
+          hidden = mid < 0.0 || mid > path.length
+        } else if !f64.isFinite(path.offset) {
+          // An infinite startOffset (pathLength="0") places no character on the path.
+          hidden = true
+        } else {
+          let span = &spans[characters[index].span]
+          let along = mid - path.offset
+          let first = (span.anchor == Anchor.Start && !span.rtl)
+            || (span.anchor == Anchor.End && span.rtl)
+          let middle = span.anchor == Anchor.Middle
+          hidden = if first {
+            along < 0.0 || along > path.length
+          } else if middle {
+            along < -path.length / 2.0 || along > path.length / 2.0
+          } else {
+            along < -path.length || along > 0.0
+          }
+          mid = mid - f64.floor(mid / path.length) * path.length
+        }
+        if hidden {
+          placement = Placement.Hidden
+        } else {
+          let frame = path.at(mid)
+          let y = ys[index] + List<f64>.get(drops, characters[index].span)
+          let half = advance / 2.0
+          placement = Placement.Path {
+            x: frame.point.x - half * frame.tangentX + y * -frame.tangentY,
+            y: frame.point.y - half * frame.tangentY + y * frame.tangentX,
+            tangentX: frame.tangentX,
+            tangentY: frame.tangentY,
+          }
+        }
+      }
+    } else if owner {
+      if let Option<usize>.Some { value: which } = current {
+        current = Option<usize>.None
+
+        // An empty path (invalid reference) has no end point, so path_end keeps its
+        // initial (0, 0) and the characters after it stay in place.
+        after = paths[which].valid
+        shiftX = paths[which].last.x - xs[index]
+        shiftY = paths[which].last.y - ys[index]
+      }
+      if after {
+        if List<usize>.get(chunks, index) == index {
+          after = false
+        } else {
+          placement = Placement.After { x: shiftX, y: shiftY }
+        }
+      }
+    }
+    run List<Placement>.append(&mut placements, placement)
+    index = index + 1
+  }
+
+  let glyphs = List<PlacedGlyph>.asMutSlice(&mut result.glyphs)
+  let mut g: usize = 0
+  while g < glyphs.length {
+    let owner = glyphs[g].owner
+    match List<Placement>.get(&placements, owner) {
+      Placement.Line => {}
+      Placement.Hidden => {
+        glyphs[g].hidden = true
+      }
+      Placement.Path { x, y, tangentX, tangentY } => {
+        let along = glyphs[g].x - xs[owner]
+        glyphs[g].x = x + along * tangentX
+        glyphs[g].y = y + along * tangentY
+        glyphs[g].rotate = glyphs[g].rotate + f64.atan2(tangentY, tangentX) * 180.0 / f64.PI
+      }
+      Placement.After { x, y } => {
+        glyphs[g].x = glyphs[g].x + x
+        glyphs[g].y = glyphs[g].y + y
+      }
+    }
+    g = g + 1
+  }
+}
+
+/// The instance of a span's first face, which gives its metrics.
+pub fn spanInstance(result: &Layout, span: usize) -> Option<usize> {
+  let instances = List<Instance>.asSlice(&result.instances)
+  let mut index: usize = 0
+  while index < instances.length {
+    if instances[index].span == span && instances[index].choice == 0 {
+      return Option<usize>.Some { value: index }
+    }
+    index = index + 1
+  }
+  return Option<usize>.None
+}
+
+/// The height of `baseline` above the alphabetic baseline, in user units, from the metrics
+/// of a span's first face (CSS Inline 3 #baseline-synthesis-fonts where tables lack it).
+pub fn height(instance: &Instance, size: f64, baseline: Baseline) -> f64 {
+  let xHeight = match instance.xHeight {
+    Option<f64>.Some { value } => value
+    Option<f64>.None => size * 0.5
+  }
+  return match baseline {
+    Baseline.Alphabetic => 0.0
+    Baseline.TextTop => instance.ascent
+    Baseline.TextBottom => -instance.descent
+    Baseline.Ideographic => -instance.descent
+    Baseline.Central => (instance.ascent - instance.descent) / 2.0
+    Baseline.Middle => xHeight / 2.0
+    Baseline.Mathematical => xHeight / 2.0
+    Baseline.Hanging => size * 0.6
+  }
+}
+
+// CSS Inline 3 #baseline-alignment: the text element's dominant baseline sits on the
+// text position; a child aligns its alignment baseline (by default the parent's dominant
+// baseline) with the parent's, then baseline-shift moves it. Per span, the result is how
+// far its alphabetic baseline lies below the text position.
+effect fn baselines(
+  database: &Fonts<'_>,
+  spans: &[Span],
+  instances: &mut List<Instance>,
+  out: &mut List<f64>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut index: usize = 0
+  while index < spans.length {
+    let span = &spans[index]
+    let mut lowered = 0.0
+    if List<Selection>.length(&span.faces) > 0 {
+      let own = run instance(database, spans, index, 0, &mut instances)
+      let mine = &List<Instance>.asSlice(&instances.*)[own]
+      match span.parent {
+        Option<usize>.None => {
+          lowered = height(mine, span.size, span.dominant)
+        }
+        Option<usize>.Some { value: parent } => {
+          let above = &spans[parent]
+          let base = List<f64>.get(&out.*, parent)
+          let kind = match span.alignment {
+            Option<Baseline>.Some { value } => value
+            Option<Baseline>.None => above.dominant
+          }
+          let mut theirs = 0.0
+          let mut lower = above.size / 5.0
+          let mut raise = above.size / 3.0
+          if List<Selection>.length(&above.faces) > 0 {
+            let other = run instance(database, spans, parent, 0, &mut instances)
+            let outer = &List<Instance>.asSlice(&instances.*)[other]
+            theirs = height(outer, above.size, kind)
+            if let Option<f64>.Some { value } = outer.subscript {
+              lower = value
+            }
+            if let Option<f64>.Some { value } = outer.superscript {
+              raise = value
+            }
+          }
+          let mine = &List<Instance>.asSlice(&instances.*)[own]
+          let shift = match span.shift {
+            Shift.Length { value } => value
+            Shift.Sub => -lower
+            Shift.Super => raise
+          }
+          lowered = base - theirs + height(mine, span.size, kind) - shift
+        }
+      }
+    } else if let Option<usize>.Some { value: parent } = span.parent {
+      lowered = List<f64>.get(&out.*, parent)
+    }
+    run List<f64>.append(&mut out, lowered)
+    index = index + 1
+  }
+}
+
+/// The advance of each typographic character: the sum of its glyphs' advances.
+pub fn advances(result: &Layout, count: usize, out: &mut List<f64>) -> () {
+  let glyphs = List<PlacedGlyph>.asSlice(&result.glyphs)
+  let values = List<f64>.asMutSlice(&mut out)
+  let mut g: usize = 0
+  while g < glyphs.length {
+    if glyphs[g].owner < count {
+      values[glyphs[g].owner] = values[glyphs[g].owner] + glyphs[g].advance
+    }
+    g = g + 1
+  }
+}
+
+// Step "Apply 'textLength' attribute", nested elements before their ancestors. A nested
+// element with its own textLength (a resolved descendant) counts as one typographic
+// character of its ancestor. With spacingAndGlyphs the characters and their glyphs are
+// scaled horizontally about the start of the extent instead.
+effect fn applyLengths(
+  result: &Layout,
+  owners: &List<usize>,
+  levels: &List<u8>,
+  lengths: &[TextLength],
+  positions: &mut List<f64>,
+  scales: &mut List<f64>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let count = List<f64>.length(&positions.*)
+  let mut sizes = List<f64>.make()
+  run List<f64>.appendRepeated(&mut sizes, 0.0, count)
+  advances(result, count, &mut sizes)
+  let mut item = lengths.length
+  while item > 0 {
+    item = item - 1
+    let length = lengths[item]
+    let xs = List<f64>.asMutSlice(&mut positions)
+    let factors = List<f64>.asMutSlice(&mut scales)
+    let mut low = f64.INFINITY
+    let mut high = -f64.INFINITY
+    let mut k = length.start
+    while k < length.end && k < count {
+      if List<usize>.get(owners, k) == k {
+        // Right-to-left advances are negative from the character's position.
+        let size = if List<u8>.get(levels, k) % 2 == 1 {
+          -List<f64>.get(&sizes, k)
+        } else {
+          List<f64>.get(&sizes, k)
+        }
+        let advance = size * factors[k]
+        low = f64.min(low, f64.min(xs[k], xs[k] + advance))
+        high = f64.max(high, f64.max(xs[k], xs[k] + advance))
+      }
+      k = k + 1
+    }
+    if low != f64.INFINITY {
+      let delta = length.length - (high - low)
+      if length.glyphs {
+        let extent = high - low
+        let factor = if extent > 0.0 {
+          length.length / extent
+        } else {
+          1.0
+        }
+
+        // The extent keeps its start edge: the right one for rtl.
+        let fixed = if length.rtl {
+          high
+        } else {
+          low
+        }
+        k = length.start
+        while k < length.end && k < count {
+          xs[k] = fixed + (xs[k] - fixed) * factor
+          factors[k] = factors[k] * factor
+          k = k + 1
+        }
+      } else {
+        // n counts typographic characters, a resolved descendant as one.
+        let mut units: usize = 0
+        k = length.start
+        while k < length.end && k < count {
+          if List<usize>.get(owners, k) == k && !insideResolved(lengths, item, k, false) {
+            units = units + 1
+          }
+          k = k + 1
+        }
+        let step = if units > 1 {
+          delta / usize.toF64(units - 1)
+        } else {
+          0.0
+        }
+        let delta = if length.rtl {
+          -step
+        } else {
+          step
+        }
+        let mut shift = 0.0
+        k = length.start
+        while k < length.end && k < count {
+          xs[k] = xs[k] + shift
+          if List<usize>.get(owners, k) == k && !insideResolved(lengths, item, k, false) {
+            shift = shift + delta
+          }
+          k = k + 1
+        }
+      }
+    }
+  }
+}
+
+/// Whether character `k` lies in a resolved descendant of `lengths[item]` other than as
+/// its first character.
+fn insideResolved(lengths: &[TextLength], item: usize, k: usize, first: bool) -> bool {
+  let outer = lengths[item]
+  let mut index = item + 1
+  while index < lengths.length {
+    let inner = lengths[index]
+    if inner.start >= outer.start && inner.end <= outer.end && k >= inner.start && k < inner.end
+      && k != inner.start {
+      return true
+    }
+    index = index + 1
+  }
+  return first
+}
+
+// Step "Apply anchoring": each chunk shifts so its advance extent [a, b] starts, centers or
+// ends on the position of its first character, per that character's text-anchor and
+// direction. A chunk's glyphs are contiguous.
+fn anchor(
+  spans: &[Span],
+  characters: &[Character],
+  chunks: &List<usize>,
+  vertical: bool,
+  xs: &mut List<f64>,
+  glyphs: &mut [PlacedGlyph],
+) -> () {
+  let mut first: usize = 0
+  while first < glyphs.length {
+    let chunk = List<usize>.get(chunks, glyphs[first].owner)
+    let mut last = first + 1
+    while last < glyphs.length && List<usize>.get(chunks, glyphs[last].owner) == chunk {
+      last = last + 1
+    }
+    let mut low = f64.INFINITY
+    let mut high = -f64.INFINITY
+    let mut g = first
+    while g < last {
+      let left = f64.min(glyphs[g].x, glyphs[g].x + glyphs[g].advance)
+      let right = f64.max(glyphs[g].x, glyphs[g].x + glyphs[g].advance)
+      low = f64.min(low, left)
+      high = f64.max(high, right)
+      g = g + 1
+    }
+    let origin = List<f64>.get(&xs.*, chunk)
+    let span = &spans[characters[chunk].span]
+
+    // In vertical text start is the top whatever the direction (#TextAnchoringProperties).
+    let rtl = span.rtl && !vertical
+    let shift = match span.anchor {
+      Anchor.Start => if rtl {
+        origin - high
+      } else {
+        origin - low
+      }
+      Anchor.Middle => origin - (low + high) / 2.0
+      Anchor.End => if rtl {
+        origin - low
+      } else {
+        origin - high
+      }
+    }
+    g = first
+    while g < last {
+      glyphs[g].x = glyphs[g].x + shift
+      g = g + 1
+    }
+    let mut c = chunk
+    while c < List<usize>.length(chunks) && List<usize>.get(chunks, c) == chunk {
+      let moved = List<f64>.get(&xs.*, c) + shift
+      List<f64>.set(&mut xs, c, moved)
+      c = c + 1
+    }
+    first = last
+  }
+}
+
+// The characters of vertical text in the turned frame: the inline position comes from y,
+// the position across the line from x (negated, as the frame's down is the left), and per
+// character whether it is set upright: by text-orientation, and for `mixed` by its
+// UAX #50 orientation per grapheme cluster (CSS Writing Modes 3 #text-orientation).
+effect fn turn(
+  spans: &[Span],
+  characters: &[Character],
+  out: &mut List<Character>,
+  uprights: &mut List<bool>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut text = List<u8>.make()
+  let mut offsets = List<usize>.make()
+  let mut index: usize = 0
+  while index < characters.length {
+    let mut character = characters[index]
+    character.x = characters[index].y
+    character.y = match characters[index].x {
+      Option<f64>.Some { value } => Option<f64>.Some { value: -value }
+      Option<f64>.None => Option<f64>.None
+    }
+    character.dx = characters[index].dy
+    character.dy = -characters[index].dx
+    run List<Character>.append(&mut out, character)
+    run List<usize>.append(&mut offsets, List<u8>.length(&text))
+    run encode(characters[index].cp, &mut text)
+    index = index + 1
+  }
+  let mut runs = List<OrientationRun>.make()
+
+  // `encode` writes each character's scalar as UTF-8, so the bytes are valid text.
+  run orientations(unsafe String.fromUtf8Unchecked(List<u8>.asSlice(&text)), &mut runs)
+  let mut item: usize = 0
+  index = 0
+  while index < characters.length {
+    let offset = List<usize>.get(&offsets, index)
+    while item + 1 < List<OrientationRun>.length(&runs)
+      && List<OrientationRun>.get(&runs, item).end <= offset {
+      item = item + 1
+    }
+    let natural = List<OrientationRun>.length(&runs) > item
+      && List<OrientationRun>.get(&runs, item).orientation == Orientation.Upright
+    let upright = match spans[characters[index].span].orientation {
+      TextOrientation.Mixed => natural
+      TextOrientation.Upright => true
+      TextOrientation.Sideways => false
+    }
+    run List<bool>.append(&mut uprights, upright)
+    index = index + 1
+  }
+}
+
+// Turns the laid-out frame of vertical text back to user space. Sideways glyphs turn with
+// it; upright glyphs move from their span's alphabetic baseline to its central baseline,
+// which the shaper's vertical origin centres them on.
+effect fn upright(database: &Fonts<'_>, spans: &[Span], result: &mut Layout) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut centers = List<f64>.make()
+  let mut span: usize = 0
+  while span < spans.length {
+    let mut center = 0.0
+    if List<Selection>.length(&spans[span].faces) > 0 {
+      let own = run instance(database, spans, span, 0, &mut result.instances)
+      let metrics = &List<Instance>.asSlice(&result.instances)[own]
+      center = height(metrics, spans[span].size, Baseline.Central)
+    }
+    run List<f64>.append(&mut centers, center)
+    span = span + 1
+  }
+  let glyphs = List<PlacedGlyph>.asMutSlice(&mut result.glyphs)
+  let mut g: usize = 0
+  while g < glyphs.length {
+    let along = glyphs[g].x
+    let mut across = glyphs[g].y
+    if glyphs[g].upright {
+      let center = List<f64>.get(&centers, glyphs[g].span)
+      across = across - center
+      glyphs[g].center = center
+    } else {
+      glyphs[g].rotate = glyphs[g].rotate + 90.0
+    }
+    glyphs[g].x = -across
+    glyphs[g].y = along
+    g = g + 1
+  }
+}
+
+/// UTF-8 bytes of `cp` appended to `out`.
+pub effect fn encode(cp: u32, out: &mut List<u8>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if cp < 0x80 {
+    run List<u8>.append(&mut out, u32.toU8(cp))
+  } else if cp < 0x800 {
+    run List<u8>.append(&mut out, u32.toU8(0xC0 | (cp / 64)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | (cp % 64)))
+  } else if cp < 0x10000 {
+    run List<u8>.append(&mut out, u32.toU8(0xE0 | (cp / 4096)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | ((cp / 64) % 64)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | (cp % 64)))
+  } else {
+    run List<u8>.append(&mut out, u32.toU8(0xF0 | (cp / 262144)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | ((cp / 4096) % 64)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | ((cp / 64) % 64)))
+    run List<u8>.append(&mut out, u32.toU8(0x80 | (cp % 64)))
+  }
+}

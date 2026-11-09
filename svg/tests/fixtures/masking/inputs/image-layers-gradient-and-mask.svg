@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8"><mask id="a"><rect width="8" height="8" fill="white"/></mask><rect width="16" height="8" fill="green" style="mask-image:linear-gradient(black,black),url(#a);mask-composite:intersect;mask-size:100% 50%,auto;mask-repeat:no-repeat"/></svg>

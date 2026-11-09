@@ -1,0 +1,136 @@
+import url_idna
+import url_idna_punycode { IdnaError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+fn equal(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut i: usize = 0
+  while i < a.length {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+effect fn ascii(input: &[u8], expected: &[u8]) -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let value = run url_idna.domainToAscii(input)
+  match &value {
+    Option<Bytes>.Some { value: bytes } => {
+      run Testing.expect(equal(Bytes.asSlice(&bytes), expected), "UTS46 ToASCII output")
+    }
+    Option<Bytes>.None => {
+      run Testing.expect(false, "valid IDNA input")
+    }
+  }
+}
+
+effect fn invalid(input: &[u8]) -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let value = run url_idna.domainToAscii(input)
+  run Testing.expect(!value.isSome(), "invalid IDNA input")
+}
+
+// Pinned svg/specs.lock.json unicode-uts46 (Unicode18, revision36):
+// https://www.unicode.org/reports/tr46/#ProcessingStepMap
+// https://www.unicode.org/reports/tr46/#ProcessingStepNormalize
+// https://www.unicode.org/reports/tr46/#ToASCII
+// https://url.spec.whatwg.org/#concept-domain-to-ascii
+// Non-strict flags do not enforce DNS length, hyphens, STD3, or CONTEXTO.
+effect fn mappingCases() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run ascii(b"B\xC3\x9CCHER.example", b"xn--bcher-kva.example")
+  run ascii(b"bu\xCC\x88cher.example", b"xn--bcher-kva.example")
+  run ascii(b"fa\xC3\x9F.de", b"xn--fa-hia.de")
+  run ascii(b"fa\xE1\xBA\x9E.de", b"xn--fa-hia.de")
+  run ascii(b"\xEF\xBC\xA1\xE3\x80\x82COM", b"a.com")
+  run ascii(b"a\xC2\xADb.com", b"ab.com")
+  run ascii(b"\xE1\x84\x80\xE1\x85\xA1", b"xn--o39a")
+  run ascii(b"\xC2\xB7", b"xn--uba")
+  run ascii(b"\xF0\x9F\x98\x80", b"xn--e28h") // Supplementary symbols are UTS46-valid.
+  run ascii(b"\xE4\xBE\x8B\xE5\xAD\x90", b"xn--fsqu00a")
+  run ascii(b"\xE2\x84\xAB", b"xn--5ca") // Singleton canonical mapping and case mapping.
+  run ascii(b"_a.-b-.a--b..", b"_a.-b-.a--b..")
+  run ascii(b"", b"")
+  run ascii(b"xn--bcher-kva.example", b"xn--bcher-kva.example")
+  let mut long = List<u8>.make()
+  let mut i: usize = 0
+  while i < 300 {
+    run long.append(97)
+    i = i + 1
+  }
+  run ascii(long.asSlice(), long.asSlice())
+}
+
+// https://www.unicode.org/reports/tr46/#Validity_Criteria
+// https://www.unicode.org/reports/tr46/#ProcessingStepPunycode
+// https://www.rfc-editor.org/rfc/rfc3492.html#section-6.2
+effect fn validityCases() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run invalid(b"\xCC\x81a")
+  run invalid(b"\xE0\xA4\x83a") // Mc with CCC=0 is still a leading mark.
+  run invalid(b"\xEF\xBF\xBD")
+  run invalid(b"\xED\xA0\x80")
+  run invalid(b"\xC0\xAF")
+  run invalid(b"\xF4\x90\x80\x80")
+  run invalid(b"xn--")
+  run invalid(b"xn--abc-")
+  run invalid(b"xn--0")
+  run invalid(b"xn--u-ccb.com") // Decodes to non-NFC u + diaeresis.
+  run invalid(b"xn--a-ecp") // Decoded mapping-disallowed input.
+  run invalid(b"xn--\xC3\xBC")
+  run invalid(b"xn--8i7caa") // ASCII URL callers bypass this UTS46 validation.
+  run invalid(b"xn--8i7caa.\xC3\xBC") // Non-ASCII domain must validate every A-label.
+  run invalid(b"xn--999999999999999999999999999999999999")
+}
+
+// https://www.rfc-editor.org/rfc/rfc5892.html#appendix-A.1
+// https://www.rfc-editor.org/rfc/rfc5892.html#appendix-A.2
+// https://www.rfc-editor.org/rfc/rfc5893.html#section-2
+// https://www.unicode.org/reports/tr46/#Validity_Criteria
+effect fn contextCases() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  run invalid(b"a\xE2\x80\x8Cb")
+  run invalid(b"a\xE2\x80\x8Db")
+  run ascii(b"\xD7\x90", b"xn--4db")
+  run invalid(b"1.\xD7\x90") // Bidi rule applies to every label.
+  run invalid(b"1.xn--4db") // Decoded A-labels also make the whole domain bidi.
+  run invalid(b"a-.\xD7\x90")
+  run invalid(b"\xD7\x90a")
+  run invalid(b"\xD8\xA8\xD9\xA1\x31")
+  run ascii(b"\xD8\xA8\xE2\x80\x8C\xD8\xA8", b"xn--ngba799q")
+  run ascii(b"\xE0\xA4\x95\xE0\xA5\x8D\xE2\x80\x8D", b"xn--11b6iy14e")
+  run ascii(b"\xD7\x90\xD6\xB0", b"xn--7cb7d") // Trailing NSM is allowed.
+}
+
+test effect fn uts46MappingAndNormalization() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run mappingCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn uts46InvalidInputAndPunycode() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run validityCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+test effect fn uts46ContextAndBidi() -> ()
+  ! IdnaError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run contextCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}

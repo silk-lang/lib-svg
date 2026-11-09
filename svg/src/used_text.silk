@@ -1,0 +1,2022 @@
+//! SVG 2 `text` content (https://www.w3.org/TR/SVG2/text.html): gathers the addressable
+//! characters of a `text` element and its text content children, resolves their fonts and
+//! positioning attributes, and lays them out with `svg/text`. Each element gets its
+//! glyph outlines and glyph cells as user-space paths.
+import silk.text.string { String }
+import structure { Graph, OccurrenceId, SourceId }
+import document_styles { StyledGraph }
+import scene { RenderError, FillRule }
+import used_style
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.dimensions { Context, Dimension, ExprId }
+import svg_css.dimensions
+import svg_css.values { Value }
+import svg_css.properties { Property }
+import svg_css.value_keywords { Keyword }
+import svg_css.text_values { TextValue, Atom, GenericFamily, Keyword as TextKeyword }
+import svg_css.tokens { Limits, CssError }
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.value_cursor { Cursor }
+import svg_fonts.database { Fonts, Generic, Alternate }
+import svg_fonts.matching { Request, Selection, Style as FontStyle }
+import svg_fonts.matching
+import svg_fonts.names
+import svg_text.layout {
+  Anchor,
+  Baseline,
+  Bidi,
+  Setting,
+  Axis,
+  Shift,
+  Span,
+  Character,
+  Layout,
+  TextLength,
+  Line,
+  Writing,
+  TextOrientation,
+  aspect,
+  layout
+}
+import svg_text.lines { Align, wrap, wrapInAreas }
+import svg_text.areas { Region, grown }
+import svg_css.effect_values { EffectValue, ClipSource }
+import used_clip_shapes
+import svg_text.paths { spanGeometry, decorationGeometry, Decoration, ColorGlyph }
+import svg_text.on_path { OnPath, Offset }
+import used_geometry
+import used_path_length
+import svg_geometry.svg
+import svg_geometry.geometry { Path, Transform, Rect, checkedRect }
+import svg_geometry.bounds { Result }
+import svg_geometry.bounds
+import svg_geometry.transforms { Matrix, Projection }
+import svg_geometry.transforms
+import used_transforms
+import silk.collections.slice { Slice }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+/// The glyphs one element of a `text` subtree renders itself.
+pub struct TextPiece {
+  pub occurrence: usize,
+  pub outline: Path,
+  pub cells: Path,
+  /// The element's own underlines and overlines, painted before the glyphs, and
+  /// line-throughs, painted after them (CSS Text Decoration 3 #painting-order).
+  pub early: Path,
+  pub late: Path,
+  /// Glyphs drawn from SVG glyph documents instead of `outline`.
+  pub colors: List<ColorGlyph>,
+}
+
+/// An element of the subtree, in document order, with its addressable characters.
+struct Entry {
+  occurrence: OccurrenceId,
+  node: XmlNodeId,
+  style: StyleId,
+  span: usize,
+  start: usize,
+  end: usize,
+}
+
+impl Copy for Entry {}
+
+/// Per addressable character: its UTF-16 length, which positioning lists count in.
+struct Gather {
+  entries: List<Entry>,
+  spans: List<Span>,
+  characters: List<Character>,
+  units: List<u8>,
+  lengths: List<TextLength>,
+  /// The last character is a collapsible space (CSS Text 4 #white-space-phase-1).
+  collapsible: bool,
+  /// The entry of each textPath element, and the one the walk is inside.
+  paths: List<usize>,
+  path: Option<usize>,
+  /// The walk is in the text element itself or in `a` elements directly inside it, where
+  /// a textPath is correctly parented.
+  pathsAllowed: bool,
+}
+
+fn equal(left: &[u8], right: &[u8]) -> bool {
+  if left.length != right.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < left.length {
+    if left[index] != right[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+/// Text content child elements. Unknown elements render as unpositioned spans (SVG 2
+/// changes: "Unknown elements within text render as unpositioned spans").
+pub fn contentChild(document: &XmlDocument, node: XmlNodeId) -> bool {
+  let name = String.utf8Bytes(XmlDocument.localName(document, node))
+  if !equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(document, node)),
+    b"http://www.w3.org/2000/svg",
+  ) {
+    return false
+  }
+  if equal(name, b"tspan") || equal(name, b"a") || equal(name, b"textPath") || equal(name, b"tref")
+    || equal(name, b"altGlyph") {
+    return true
+  }
+  return !known(name)
+}
+
+fn known(name: &[u8]) -> bool {
+  let names: &[&[u8]] = &[
+    b"svg",
+    b"g",
+    b"defs",
+    b"desc",
+    b"title",
+    b"metadata",
+    b"symbol",
+    b"use",
+    b"switch",
+    b"image",
+    b"path",
+    b"rect",
+    b"circle",
+    b"ellipse",
+    b"line",
+    b"polyline",
+    b"polygon",
+    b"text",
+    b"tspan",
+    b"textPath",
+    b"a",
+    b"view",
+    b"style",
+    b"script",
+    b"linearGradient",
+    b"radialGradient",
+    b"meshgradient",
+    b"meshrow",
+    b"meshpatch",
+    b"hatch",
+    b"hatchpath",
+    b"stop",
+    b"pattern",
+    b"marker",
+    b"clipPath",
+    b"mask",
+    b"filter",
+    b"foreignObject",
+    b"animate",
+    b"animateMotion",
+    b"animateTransform",
+    b"set",
+    b"mpath",
+    b"discard",
+    b"tref",
+    b"altGlyph",
+    b"altGlyphDef",
+    b"altGlyphItem",
+    b"glyphRef",
+    b"font",
+    b"glyph",
+    b"missing-glyph",
+    b"hkern",
+    b"vkern",
+    b"font-face",
+    b"cursor",
+    b"color-profile",
+  ]
+  let mut index: usize = 0
+  while index < names.length {
+    if equal(name, names[index]) {
+      return true
+    }
+    index = index + 1
+  }
+  return name.length > 2 && name[0] == 102 && name[1] == 101
+}
+
+// --- Computed font properties -------------------------------------------------------------
+
+fn textValue<'e>(engine: &'e Engine<'_>, style: StyleId, property: Property) -> Option<
+  &'e TextValue
+> {
+  return match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => match &engine.values.get(value.value).* {
+      Value.Text { value: text } => Option<&TextValue>.Some { value: &text }
+      _ => Option<&TextValue>.None
+    }
+    _ => Option<&TextValue>.None
+  }
+}
+
+effect fn feature(out: &mut List<Setting>, tag: u32, value: u32) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run out.append(Setting { tag: tag, value: value })
+}
+
+/// The features a font-variant-* keyword turns on or off (CSS Fonts 4 #font-variant-*-prop).
+effect fn variant(out: &mut List<Setting>, keyword: TextKeyword) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  match keyword {
+    TextKeyword.None => {
+      run feature(&mut out.*, 0x6c696761, 0)
+      run feature(&mut out.*, 0x636c6967, 0)
+      run feature(&mut out.*, 0x646c6967, 0)
+      run feature(&mut out.*, 0x686c6967, 0)
+      run feature(&mut out.*, 0x63616c74, 0)
+    }
+    TextKeyword.CommonLigatures => {
+      run feature(&mut out.*, 0x6c696761, 1)
+      run feature(&mut out.*, 0x636c6967, 1)
+    }
+    TextKeyword.NoCommonLigatures => {
+      run feature(&mut out.*, 0x6c696761, 0)
+      run feature(&mut out.*, 0x636c6967, 0)
+    }
+    TextKeyword.DiscretionaryLigatures => run feature(&mut out.*, 0x646c6967, 1)
+    TextKeyword.NoDiscretionaryLigatures => run feature(&mut out.*, 0x646c6967, 0)
+    TextKeyword.HistoricalLigatures => run feature(&mut out.*, 0x686c6967, 1)
+    TextKeyword.NoHistoricalLigatures => run feature(&mut out.*, 0x686c6967, 0)
+    TextKeyword.Contextual => run feature(&mut out.*, 0x63616c74, 1)
+    TextKeyword.NoContextual => run feature(&mut out.*, 0x63616c74, 0)
+    TextKeyword.SmallCaps => run feature(&mut out.*, 0x736d6370, 1)
+    TextKeyword.AllSmallCaps => {
+      run feature(&mut out.*, 0x63327363, 1)
+      run feature(&mut out.*, 0x736d6370, 1)
+    }
+    TextKeyword.PetiteCaps => run feature(&mut out.*, 0x70636170, 1)
+    TextKeyword.AllPetiteCaps => {
+      run feature(&mut out.*, 0x63327063, 1)
+      run feature(&mut out.*, 0x70636170, 1)
+    }
+    TextKeyword.Unicase => run feature(&mut out.*, 0x756e6963, 1)
+    TextKeyword.TitlingCaps => run feature(&mut out.*, 0x7469746c, 1)
+    TextKeyword.LiningNums => run feature(&mut out.*, 0x6c6e756d, 1)
+    TextKeyword.OldstyleNums => run feature(&mut out.*, 0x6f6e756d, 1)
+    TextKeyword.ProportionalNums => run feature(&mut out.*, 0x706e756d, 1)
+    TextKeyword.TabularNums => run feature(&mut out.*, 0x746e756d, 1)
+    TextKeyword.DiagonalFractions => run feature(&mut out.*, 0x66726163, 1)
+    TextKeyword.StackedFractions => run feature(&mut out.*, 0x61667263, 1)
+    TextKeyword.Ordinal => run feature(&mut out.*, 0x6f72646e, 1)
+    TextKeyword.SlashedZero => run feature(&mut out.*, 0x7a65726f, 1)
+    TextKeyword.Jis78 => run feature(&mut out.*, 0x6a703738, 1)
+    TextKeyword.Jis83 => run feature(&mut out.*, 0x6a703833, 1)
+    TextKeyword.Jis90 => run feature(&mut out.*, 0x6a703930, 1)
+    TextKeyword.Jis04 => run feature(&mut out.*, 0x6a703034, 1)
+    TextKeyword.Simplified => run feature(&mut out.*, 0x736d706c, 1)
+    TextKeyword.Traditional => run feature(&mut out.*, 0x74726164, 1)
+    TextKeyword.FullWidth => run feature(&mut out.*, 0x66776964, 1)
+    TextKeyword.ProportionalWidth => run feature(&mut out.*, 0x70776964, 1)
+    TextKeyword.Ruby => run feature(&mut out.*, 0x72756279, 1)
+    TextKeyword.Sub => run feature(&mut out.*, 0x73756273, 1)
+    TextKeyword.Super => run feature(&mut out.*, 0x73757073, 1)
+    TextKeyword.HistoricalForms => run feature(&mut out.*, 0x68697374, 1)
+    _ => {}
+  }
+}
+
+/// OpenType features in CSS Fonts 4 #feature-precedence order: font-kerning (and SVG 1.1
+/// kerning with a length), then font-variant-*, then font-feature-settings.
+effect fn features(engine: &Engine<'_>, style: StyleId, size: f64) -> List<Setting>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<Setting>.make()
+  let kern: u32 = 0x6b65726e
+  if let Option<TextKeyword>.Some { value } = textKeyword(engine, style, Property.FontKerning) {
+    if value == TextKeyword.None {
+      run feature(&mut out, kern, 0)
+    } else if value == TextKeyword.Normal {
+      run feature(&mut out, kern, 1)
+    }
+  }
+  if kerningLength(engine, style, size).isSome() {
+    run feature(&mut out, kern, 0)
+  }
+  let properties = [
+    Property.FontVariantLigatures,
+    Property.FontVariantCaps,
+    Property.FontVariantNumeric,
+    Property.FontVariantEastAsian,
+    Property.FontVariantPosition,
+    Property.FontVariantAlternates,
+  ]
+  let mut which: usize = 0
+  while which < 6 {
+    if let Option<&TextValue>.Some { value: text } = textValue(engine, style, properties[which]) {
+      let items = text.items.asSlice()
+      let mut index: usize = 0
+      while index < items.length {
+        if let Atom.Keyword { value } = items[index].atom {
+          run variant(&mut out, value)
+        }
+        index = index + 1
+      }
+    }
+    which = which + 1
+  }
+  if let Option<&TextValue>.Some { value: text } = textValue(
+    engine,
+    style,
+    Property.FontFeatureSettings,
+  ) {
+    let items = text.items.asSlice()
+    let mut index: usize = 0
+    while index < items.length {
+      if let Atom.Setting { tag, value } = items[index].atom {
+        let amount = dimensions.evaluate(&engine.values.numerics, value, 0.0)
+        if f64.isFinite(amount) && amount >= 0.0 && amount < 4294967296.0 {
+          run feature(&mut out, tag, f64.toU32(amount))
+        }
+      }
+      index = index + 1
+    }
+  }
+  return move out
+}
+
+/// font-optical-sizing, then font-variation-settings (CSS Fonts 4 #font-optical-sizing-def,
+/// #font-variation-settings-def). With `auto`, `opsz` follows the used font size in CSS
+/// pixels (user units); explicit settings come later, so they win.
+effect fn axes(engine: &Engine<'_>, style: StyleId, size: f64) -> List<Axis>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<Axis>.make()
+  let optical = match textKeyword(engine, style, Property.FontOpticalSizing) {
+    Option<TextKeyword>.Some { value } => value != TextKeyword.None
+    _ => true
+  }
+  if optical && size > 0.0 {
+    run out.append(Axis { tag: 0x6f70737a, value: size })
+  }
+  if let Option<&TextValue>.Some { value: text } = textValue(
+    engine,
+    style,
+    Property.FontVariationSettings,
+  ) {
+    let items = text.items.asSlice()
+    let mut index: usize = 0
+    while index < items.length {
+      if let Atom.Setting { tag, value } = items[index].atom {
+        let amount = dimensions.evaluate(&engine.values.numerics, value, 0.0)
+        if f64.isFinite(amount) {
+          run out.append(Axis { tag: tag, value: amount })
+        }
+      }
+      index = index + 1
+    }
+  }
+  return move out
+}
+
+/// SVG 1.1 `kerning`: a length turns automatic kerning off and adds to letter-spacing.
+fn kerningLength(engine: &Engine<'_>, style: StyleId, size: f64) -> Option<f64> {
+  if let Option<f64>.Some { value } = engine.number(style, Property.Kerning, size) {
+    if f64.isFinite(value) {
+      return Option<f64>.Some { value: value }
+    }
+  }
+  return Option<f64>.None
+}
+
+/// The element's own text-decoration-line and text-decoration-thickness; `auto` and
+/// `from-font` thickness use the font's metrics.
+fn decoration(engine: &Engine<'_>, style: StyleId, size: f64) -> Decoration {
+  let mut result = Decoration {
+    underline: false,
+    overline: false,
+    lineThrough: false,
+    thickness: Option<f64>.None,
+  }
+  if let Option<&TextValue>.Some { value: text } = textValue(
+    engine,
+    style,
+    Property.TextDecorationLine,
+  ) {
+    let items = text.items.asSlice()
+    let mut index: usize = 0
+    while index < items.length {
+      if let Atom.Keyword { value } = items[index].atom {
+        if value == TextKeyword.Underline {
+          result.underline = true
+        } else if value == TextKeyword.Overline {
+          result.overline = true
+        } else if value == TextKeyword.LineThrough {
+          result.lineThrough = true
+        }
+      }
+      index = index + 1
+    }
+  }
+  if let Option<f64>.Some { value } = engine.textNumber(
+    style,
+    Property.TextDecorationThickness,
+    size,
+  ) {
+    if f64.isFinite(value) && value >= 0.0 {
+      result.thickness = Option<f64>.Some { value: value }
+    }
+  }
+  return result
+}
+
+fn weight(engine: &Engine<'_>, style: StyleId) -> f64 {
+  if let Option<&TextValue>.Some { value: text } = textValue(engine, style, Property.FontWeight) {
+    let items = text.items.asSlice()
+    if items.length > 0 {
+      return match &items[0].atom {
+        Atom.Numeric { value } => dimensions.evaluate(&engine.values.numerics, value, 0.0)
+        Atom.Keyword { value } => if value == TextKeyword.Bold {
+          700.0
+        } else {
+          400.0
+        }
+        _ => 400.0
+      }
+    }
+  }
+  return 400.0
+}
+
+fn width(engine: &Engine<'_>, style: StyleId) -> f64 {
+  if let Option<&TextValue>.Some { value: text } = textValue(engine, style, Property.FontWidth) {
+    let items = text.items.asSlice()
+    if items.length > 0 {
+      return match &items[0].atom {
+        Atom.Numeric { value } => dimensions.evaluate(&engine.values.numerics, value, 100.0)
+        Atom.Keyword { value } => match value {
+          TextKeyword.UltraCondensed => 50.0
+          TextKeyword.ExtraCondensed => 62.5
+          TextKeyword.Condensed => 75.0
+          TextKeyword.SemiCondensed => 87.5
+          TextKeyword.SemiExpanded => 112.5
+          TextKeyword.Expanded => 125.0
+          TextKeyword.ExtraExpanded => 150.0
+          TextKeyword.UltraExpanded => 200.0
+          _ => 100.0
+        }
+        _ => 100.0
+      }
+    }
+  }
+  return 100.0
+}
+
+// CSS Fonts 4 #font-style-prop: `oblique` without an angle is 14deg.
+fn fontStyle(engine: &Engine<'_>, style: StyleId) -> FontStyle {
+  let mut result = FontStyle.Normal
+  if let Option<&TextValue>.Some { value: text } = textValue(engine, style, Property.FontStyle) {
+    let items = text.items.asSlice()
+    let mut index: usize = 0
+    while index < items.length {
+      match &items[index].atom {
+        Atom.Keyword { value } => {
+          if value == TextKeyword.Italic {
+            result = FontStyle.Italic
+          } else if value == TextKeyword.Oblique {
+            result = FontStyle.Oblique { degrees: 14.0 }
+          }
+        }
+        Atom.Numeric { value } => {
+          result = FontStyle.Oblique {
+            degrees: dimensions.evaluate(&engine.values.numerics, value, 0.0),
+          }
+        }
+        _ => {}
+      }
+      index = index + 1
+    }
+  }
+  return result
+}
+
+/// letter-spacing or word-spacing in user units; `normal` is 0.
+fn spacingValue(engine: &Engine<'_>, style: StyleId, property: Property) -> f64 {
+  let value = match &engine.textNumber(style, property, 0.0) {
+    Option<f64>.Some { value } => value
+    _ => match &engine.number(style, property, 0.0) {
+      Option<f64>.Some { value } => value
+      _ => 0.0
+    }
+  }
+  return if f64.isFinite(value) {
+    value
+  } else {
+    0.0
+  }
+}
+
+fn generic(family: GenericFamily) -> Option<Generic> {
+  return match family {
+    GenericFamily.Serif => Option<Generic>.Some { value: Generic.Serif }
+    GenericFamily.SansSerif => Option<Generic>.Some { value: Generic.SansSerif }
+    GenericFamily.Cursive => Option<Generic>.Some { value: Generic.Cursive }
+    GenericFamily.Fantasy => Option<Generic>.Some { value: Generic.Fantasy }
+    GenericFamily.Monospace => Option<Generic>.Some { value: Generic.Monospace }
+    GenericFamily.SystemUi => Option<Generic>.Some { value: Generic.SystemUi }
+    GenericFamily.UiSerif => Option<Generic>.Some { value: Generic.UiSerif }
+    GenericFamily.UiSansSerif => Option<Generic>.Some { value: Generic.UiSansSerif }
+    GenericFamily.UiMonospace => Option<Generic>.Some { value: Generic.UiMonospace }
+    GenericFamily.UiRounded => Option<Generic>.Some { value: Generic.UiRounded }
+    GenericFamily.Math => Option<Generic>.Some { value: Generic.Math }
+    GenericFamily.Fangsong => Option<Generic>.Some { value: Generic.Fangsong }
+    _ => Option<Generic>.None
+  }
+}
+
+effect fn choose(
+  fonts: &Fonts<'_>,
+  faces: &List<usize>,
+  request: Request,
+  out: &mut List<Selection>,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if let Option<Selection>.Some { value } = run matching.select(fonts, faces.asSlice(), request) {
+    run out.append(value)
+  }
+}
+
+/// The installed families in database order, each as its faces, for last-resort fallback.
+effect fn families(fonts: &Fonts<'_>) -> List<List<usize>>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = List<List<usize>>.make()
+  let mut face: usize = 0
+  while face < fonts.faceCount() {
+    let labels = fonts.face(face).families.asSlice()
+    if labels.length > 0 {
+      let name = Bytes.asSlice(&labels[0])
+      let mut seen = false
+      let mut index: usize = 0
+      while index < result.length() && !seen {
+        let first = result.asSlice()[index].asSlice()[0]
+        let other = fonts.face(first).families.asSlice()
+        seen = other.length > 0 && names.same(Bytes.asSlice(&other[0]), name)
+        index = index + 1
+      }
+      if !seen {
+        let mut members = List<usize>.make()
+        run fonts.family(name, &mut members)
+        run result.append(move members)
+      }
+    }
+    face = face + 1
+  }
+  return move result
+}
+
+// A text-align-all or text-align-last keyword.
+fn textAlign(engine: &Engine<'_>, style: StyleId, property: Property) -> Option<Keyword> {
+  return match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => match &engine.values.get(value.value).* {
+      Value.Keyword { keyword } => Option<Keyword>.some(keyword)
+      _ => Option<Keyword>.None
+    }
+    _ => Option<Keyword>.None
+  }
+}
+
+// text-align-all or text-align-last as a line alignment (CSS Text 4 #text-align-property);
+// None for auto. match-parent is the inherited value, which is the parent's start or end.
+fn alignment(engine: &Engine<'_>, style: StyleId, property: Property) -> Option<Align> {
+  return match textAlign(engine, style, property) {
+    Option<Keyword>.Some { value } => match value {
+      Keyword.End => Option<Align>.some(Align.End)
+      Keyword.Left => Option<Align>.some(Align.Left)
+      Keyword.Right => Option<Align>.some(Align.Right)
+      Keyword.Center => Option<Align>.some(Align.Center)
+      Keyword.Justify => Option<Align>.some(Align.Justify)
+      Keyword.Auto => Option<Align>.None
+      _ => Option<Align>.some(Align.Start)
+    }
+    Option<Keyword>.None => Option<Align>.None
+  }
+}
+
+fn textKeyword(engine: &Engine<'_>, style: StyleId, property: Property) -> Option<TextKeyword> {
+  if let Option<&TextValue>.Some { value: text } = textValue(engine, style, property) {
+    let items = text.items.asSlice()
+    if items.length > 0 {
+      if let Atom.Keyword { value } = items[0].atom {
+        return Option<TextKeyword>.Some { value: value }
+      }
+    }
+  }
+  return Option<TextKeyword>.None
+}
+
+/// A baseline keyword as a horizontal baseline type; None for auto and the values that
+/// defer to the parent (CSS Inline 3 #dominant-baseline-property, #alignment-baseline-property).
+/// The SVG 1.1 edge keywords map to the text-over/under edges (text-top/text-bottom).
+fn baselineType(keyword: TextKeyword) -> Option<Baseline> {
+  return match keyword {
+    TextKeyword.Alphabetic => Option<Baseline>.Some { value: Baseline.Alphabetic }
+    TextKeyword.TextTop => Option<Baseline>.Some { value: Baseline.TextTop }
+    TextKeyword.BeforeEdge => Option<Baseline>.Some { value: Baseline.TextTop }
+    TextKeyword.TextBeforeEdge => Option<Baseline>.Some { value: Baseline.TextTop }
+    TextKeyword.TextBottom => Option<Baseline>.Some { value: Baseline.TextBottom }
+    TextKeyword.AfterEdge => Option<Baseline>.Some { value: Baseline.TextBottom }
+    TextKeyword.TextAfterEdge => Option<Baseline>.Some { value: Baseline.TextBottom }
+    TextKeyword.Ideographic => Option<Baseline>.Some { value: Baseline.Ideographic }
+    TextKeyword.Middle => Option<Baseline>.Some { value: Baseline.Middle }
+    TextKeyword.Central => Option<Baseline>.Some { value: Baseline.Central }
+    TextKeyword.Mathematical => Option<Baseline>.Some { value: Baseline.Mathematical }
+    TextKeyword.Hanging => Option<Baseline>.Some { value: Baseline.Hanging }
+    _ => Option<Baseline>.None
+  }
+}
+
+/// baseline-shift. Percentages refer to line-height (CSS Inline 3 #baseline-shift-property).
+/// top/center/bottom align to the line box, which SVG text does not have, so they do not shift.
+fn shiftValue(engine: &Engine<'_>, style: StyleId, lineHeight: f64) -> Shift {
+  if let Option<TextKeyword>.Some { value } = textKeyword(engine, style, Property.BaselineShift) {
+    return match value {
+      TextKeyword.Sub => Shift.Sub
+      TextKeyword.Super => Shift.Super
+      _ => Shift.Length { value: 0.0 }
+    }
+  }
+  let value = match &engine.textNumber(style, Property.BaselineShift, lineHeight) {
+    Option<f64>.Some { value } => value
+    _ => 0.0
+  }
+  return Shift.Length {
+    value: if f64.isFinite(value) {
+      value
+    } else {
+      0.0
+    },
+  }
+}
+
+// text-orientation, which SVG 1.1's glyph-orientation-vertical aliases (#GlyphOrientationVerticalProperty):
+// `0deg` is upright and `90deg` sideways; the alias wins when it is not `auto`.
+effect fn orientation(engine: &Engine<'_>, style: StyleId) -> TextOrientation
+  ! RenderError {
+  if !keywordIs(engine, style, Property.GlyphOrientationVertical, TextKeyword.Auto) {
+    if let Option<f64>.Some { value } = engine.textNumber(
+      style,
+      Property.GlyphOrientationVertical,
+      0.0,
+    ) {
+      return if value == 0.0 {
+        TextOrientation.Upright
+      } else {
+        TextOrientation.Sideways
+      }
+    }
+  }
+  return match &(run used_style.keyword(engine, style, Property.TextOrientation)) {
+    Keyword.Upright => TextOrientation.Upright
+    Keyword.Sideways => TextOrientation.Sideways
+    _ => TextOrientation.Mixed
+  }
+}
+
+fn keywordIs(engine: &Engine<'_>, style: StyleId, property: Property, wanted: TextKeyword) -> bool {
+  if let Option<TextKeyword>.Some { value } = textKeyword(engine, style, property) {
+    return value == wanted
+  }
+  return false
+}
+
+// line-height, or None for `normal`.
+fn lineHeight(engine: &Engine<'_>, style: StyleId, computed: f64) -> Option<f64> {
+  if let Option<TextKeyword>.Some { value } = textKeyword(engine, style, Property.LineHeight) {
+    if value == TextKeyword.Normal {
+      return Option<f64>.None
+    }
+  }
+  return Option<f64>.Some { value: computed }
+}
+
+effect fn span(
+  fonts: &Fonts<'_>,
+  installed: &List<List<usize>>,
+  engine: &Engine<'_>,
+  style: StyleId,
+  parent: Option<usize>,
+  inherited: Baseline,
+  preferred: Option<usize>,
+) -> Span
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let metrics = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let mut size = metrics.fontSize
+  let writing = match &(run used_style.keyword(engine, style, Property.WritingMode)) {
+    Keyword.VerticalRl => Writing.VerticalRl
+    Keyword.VerticalLr => Writing.VerticalLr
+    _ => Writing.HorizontalTb
+  }
+
+  // Vertical text aligns on the central baseline by default (#DominantBaselineProperty
+  // keeps `central` for sideways text too).
+  let mut dominant = if parent.isNone() && writing != Writing.HorizontalTb {
+    Baseline.Central
+  } else {
+    inherited
+  }
+  if let Option<TextKeyword>.Some { value } = textKeyword(
+    engine,
+    style,
+    Property.DominantBaseline,
+  ) {
+    if let Option<Baseline>.Some { value: kind } = baselineType(value) {
+      dominant = kind
+    }
+  }
+  let mut alignment = Option<Baseline>.None
+  if let Option<TextKeyword>.Some { value } = textKeyword(
+    engine,
+    style,
+    Property.AlignmentBaseline,
+  ) {
+    alignment = baselineType(value)
+  }
+  let request = Request {
+    weight: weight(engine, style),
+    width: width(engine, style),
+    style: fontStyle(engine, style),
+  }
+  let mut faces = List<Selection>.make()
+  let mut candidates = List<usize>.make()
+
+  // An altGlyph's glyphs come from their SVG font first.
+  if let Option<usize>.Some { value } = preferred {
+    run candidates.append(value)
+    run choose(fonts, &candidates, request, &mut faces)
+  }
+  if let Option<&TextValue>.Some { value: text } = textValue(engine, style, Property.FontFamily) {
+    let items = text.items.asSlice()
+    let mut index: usize = 0
+    while index < items.length {
+      if let Atom.Family { generic: kind, name } = items[index].atom {
+        candidates.clear()
+        if kind == GenericFamily.Named {
+          run fonts.family(text.text(name), &mut candidates)
+        } else if let Option<Generic>.Some { value } = generic(kind) {
+          run fonts.generic(value, &mut candidates)
+        }
+        run choose(fonts, &candidates, request, &mut faces)
+      }
+      index = index + 1
+    }
+  }
+
+  // CSS Fonts 4 #cluster-matching ends with system fallback; ours is every installed family.
+  let mut family: usize = 0
+  while family < installed.length() {
+    run choose(fonts, &installed.asSlice()[family], request, &mut faces)
+    family = family + 1
+  }
+
+  // CSS Fonts 5 #font-size-adjust-prop: the first available font's x-height becomes the
+  // given fraction of the computed size.
+  if let Option<f64>.Some { value: adjust } = engine.textNumber(
+    style,
+    Property.FontSizeAdjust,
+    0.0,
+  ) {
+    if f64.isFinite(adjust) && adjust >= 0.0 && faces.length() > 0 {
+      if let Option<f64>.Some { value: ratio } = aspect(fonts, faces.asSlice()[0].face) {
+        size = size * adjust / ratio
+      }
+    }
+  }
+  let anchor = match &(run used_style.keyword(engine, style, Property.TextAnchor)) {
+    Keyword.Middle => Anchor.Middle
+    Keyword.End => Anchor.End
+    _ => Anchor.Start
+  }
+  return Span {
+    faces: move faces,
+    size: size,
+    anchor: anchor,
+    letterSpacing: spacingValue(engine, style, Property.LetterSpacing)
+      + match kerningLength(engine, style, size) {
+        Option<f64>.Some { value } => value
+        _ => 0.0
+      },
+    wordSpacing: spacingValue(engine, style, Property.WordSpacing),
+    dominant: dominant,
+    alignment: alignment,
+    shift: shiftValue(engine, style, metrics.lineHeight),
+    parent: parent,
+    rtl: (run used_style.keyword(engine, style, Property.Direction)) == Keyword.Rtl,
+    bidi: match &(run used_style.keyword(engine, style, Property.UnicodeBidi)) {
+      Keyword.Embed => Bidi.Embed
+      Keyword.Isolate => Bidi.Isolate
+      Keyword.BidiOverride => Bidi.Override
+      Keyword.IsolateOverride => Bidi.IsolateOverride
+      Keyword.Plaintext => Bidi.Plaintext
+      _ => Bidi.Normal
+    },
+    features: run features(engine, style, size),
+    variations: run axes(engine, style, size),
+    lineHeight: lineHeight(engine, style, metrics.lineHeight),
+    writing: writing,
+    orientation: run orientation(engine, style),
+  }
+}
+
+// --- White space and characters ------------------------------------------------------------
+
+enum Collapse {
+  Collapse,
+  Preserve,
+  PreserveSpaces,
+  PreserveBreaks,
+  Discard,
+}
+
+fn collapse(engine: &Engine<'_>, style: StyleId) -> Collapse {
+  if let Option<&TextValue>.Some { value: text } = textValue(
+    engine,
+    style,
+    Property.WhiteSpaceCollapse,
+  ) {
+    let items = text.items.asSlice()
+    if items.length > 0 {
+      if let Atom.Keyword { value } = items[0].atom {
+        return match value {
+          TextKeyword.Preserve => Collapse.Preserve
+          TextKeyword.PreserveSpaces => Collapse.PreserveSpaces
+          TextKeyword.PreserveBreaks => Collapse.PreserveBreaks
+          TextKeyword.BreakSpaces => Collapse.Preserve
+          TextKeyword.Discard => Collapse.Discard
+          _ => Collapse.Collapse
+        }
+      }
+    }
+  }
+  return Collapse.Collapse
+}
+
+/// Decodes one UTF-8 scalar at `at`, returning it and its byte length.
+fn decode(bytes: &[u8], at: usize) -> [u32; 2] {
+  let lead = u8.toU32(bytes[at])
+  if lead < 0x80 {
+    return [lead, 1]
+  }
+  let count: usize = if lead >= 0xF0 {
+    4
+  } else if lead >= 0xE0 {
+    3
+  } else {
+    2
+  }
+  if at + count > bytes.length {
+    return [0xFFFD, 1]
+  }
+  let mask: u32 = if count == 4 {
+    0x07
+  } else if count == 3 {
+    0x0F
+  } else {
+    0x1F
+  }
+  let mut value = lead & mask
+  let mut index: usize = 1
+  while index < count {
+    value = value * 64 + (u8.toU32(bytes[at + index]) & 0x3F)
+    index = index + 1
+  }
+  return [value, usize.toU32(count)]
+}
+
+effect fn push(gather: &mut Gather, cp: u32, span: usize) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run gather.characters.append(
+    Character {
+      cp: cp,
+      span: span,
+      x: Option<f64>.None,
+      y: Option<f64>.None,
+      dx: 0.0,
+      dy: 0.0,
+      rotate: 0.0,
+      path: gather.path,
+      line: Line.Inside,
+    },
+  )
+  run gather.units.append(
+    if cp >= 0x10000 {
+      2
+    } else {
+      1
+    },
+  )
+}
+
+// CSS Text 4 #white-space-processing on one line: with `collapse`, segment breaks and tabs
+// become spaces and a space after a collapsible space or at the line start is removed;
+// the preserving values keep spaces and, with no line breaking in SVG text, render tabs and
+// segment breaks as spaces.
+effect fn characters(gather: &mut Gather, bytes: &[u8], span: usize, mode: Collapse) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut at: usize = 0
+  while at < bytes.length {
+    let decoded = decode(bytes, at)
+    at = at + u32.toUsize(decoded[1])
+    let cp = decoded[0]
+    let space = cp == 0x20 || cp == 0x09 || cp == 0x0A || cp == 0x0D
+    if !space {
+      run push(&mut gather, cp, span)
+      gather.collapsible = false
+    } else if mode == Collapse.Discard {} else if mode == Collapse.Collapse
+      || (mode == Collapse.PreserveBreaks && cp != 0x0A) {
+      if !gather.collapsible && gather.characters.length() > 0 {
+        run push(&mut gather, 0x20, span)
+        gather.collapsible = true
+      }
+    } else {
+      // A preserved segment break stays for `wrap` to break at; `preserve-spaces`
+      // turns it into a space (CSS Text 4 #white-space-collapsing).
+      run push(
+        &mut gather,
+        if cp == 0x0A && mode != Collapse.PreserveSpaces {
+          0x0A
+        } else {
+          0x20
+        },
+        span,
+      )
+      gather.collapsible = false
+    }
+  }
+}
+
+effect fn walk(
+  graph: &Graph,
+  styles: &StyledGraph<'_>,
+  fonts: &Fonts<'_>,
+  installed: &List<List<usize>>,
+  occurrence: OccurrenceId,
+  parent: Option<usize>,
+  gather: &mut Gather,
+) -> ()
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let entry = graph.occurrences.asSlice()[occurrence.index]
+  let source = entry.source
+  let document = graph.sourceDocument(source)
+  let style = match &styles.nodeStyle(occurrence) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let engine = &styles.catalog.engine
+  if (run used_style.keyword(engine, style, Property.Display)) == Keyword.None {
+    return
+  }
+  let spanIndex = gather.spans.length()
+  let inherited = match parent {
+    Option<usize>.Some { value } => gather.spans.asSlice()[value].dominant
+    Option<usize>.None => Baseline.Alphabetic
+  }
+  let mut alternate = List<u32>.make()
+  let mut preferred = Option<usize>.None
+  if equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"altGlyph") {
+    preferred = run alternateGlyphs(graph, fonts, source, &mut alternate)
+  }
+  run gather.spans.append(run span(fonts, installed, engine, style, parent, inherited, preferred))
+  let position = gather.entries.length()
+  run gather.entries.append(
+    Entry {
+      occurrence: occurrence,
+      node: source.node,
+      style: style,
+      span: spanIndex,
+      start: gather.characters.length(),
+      end: 0,
+    },
+  )
+
+  let outer = gather.path
+  if outer.isNone()
+    && equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"textPath") {
+    gather.path = Option<usize>.Some { value: gather.paths.length() }
+    run gather.paths.append(position)
+  }
+  let mode = collapse(engine, style)
+
+  // SVG 1.1 #TRefElement: the referenced element's character data, without its markup,
+  // replaces the tref's own content; nothing renders when the reference is invalid.
+  if equal(String.utf8Bytes(XmlDocument.localName(document, source.node)), b"tref") {
+    if let Option<SourceId>.Some { value: target } = reference(graph, source) {
+      run referencedText(&mut gather, graph.sourceDocument(target), target.node, spanIndex, mode)
+    }
+    let entries = gather.entries.asMutSlice()
+    entries[position].end = gather.characters.length()
+    gather.path = outer
+    return
+  }
+
+  // A textPath is correctly parented only in the text element (`a` is transparent);
+  // elsewhere its used display is none (SVG2 #TextLayoutAlgorithm, display rules).
+  let name = String.utf8Bytes(XmlDocument.localName(document, source.node))
+  let allowed = gather.pathsAllowed
+  let pathsAllowed = equal(name, b"text") || (equal(name, b"a") && allowed)
+  let mut child = XmlDocument.firstChild(document, source.node)
+  let mut element = entry.firstChild
+  while let Option<XmlNodeId>.Some { value: node } = child {
+    let kind = XmlDocument.nodes(document)[node.index].kind
+    if kind == XmlNodeKind.Text {
+      run characters(
+        &mut gather,
+        String.utf8Bytes(XmlDocument.text(document, node)),
+        spanIndex,
+        mode,
+      )
+    } else if kind == XmlNodeKind.Element && preferred.isNone() {
+      if let Option<OccurrenceId>.Some { value: nested } = element {
+        gather.pathsAllowed = pathsAllowed
+        if graph.occurrences.asSlice()[nested.index].eligible && contentChild(document, node)
+          && (pathsAllowed
+            || !equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"textPath")) {
+          run walk(
+            graph,
+            styles,
+            fonts,
+            installed,
+            nested,
+            Option<usize>.Some { value: spanIndex },
+            &mut gather,
+          )
+        }
+        element = graph.occurrences.asSlice()[nested.index].nextSibling
+      }
+    }
+    child = XmlDocument.nextSibling(document, node)
+  }
+  gather.pathsAllowed = allowed
+
+  // SVG 1.1 #AltGlyphElement: the glyphs replace the characters, and stand for them in
+  // the positioning lists.
+  if preferred.isSome() {
+    let start = gather.entries.asSlice()[position].start
+    let mut units: usize = 0
+    let mut at = start
+    while at < gather.units.length() {
+      units = units + u8.toUsize(gather.units.asSlice()[at])
+      at = at + 1
+    }
+    while gather.characters.length() > start {
+      drop gather.characters.pop()
+      drop gather.units.pop()
+    }
+    let glyphs = alternate.asSlice()
+    let mut k: usize = 0
+    while k < glyphs.length {
+      run push(&mut gather, glyphs[k], spanIndex)
+      let counts = gather.units.asMutSlice()
+      counts[counts.length - 1] = if k == 0 && units > 255 {
+        255
+      } else if k == 0 {
+        usize.toU8(units)
+      } else {
+        0
+      }
+      k = k + 1
+    }
+    gather.collapsible = false
+  }
+  let entries = gather.entries.asMutSlice()
+  entries[position].end = gather.characters.length()
+  gather.path = outer
+}
+
+// The glyph element `node` of an SVG font, as the face that has it and its character.
+fn alternateOf(fonts: &Fonts<'_>, node: XmlNodeId) -> Option<Alternate> {
+  let all = fonts.alternates.asSlice()
+  let mut k: usize = 0
+  while k < all.length {
+    if all[k].node == node.index {
+      return Option<Alternate>.Some { value: all[k] }
+    }
+    k = k + 1
+  }
+  return Option<Alternate>.None
+}
+
+// The glyphRef children of `parent` as characters of one face, or none unless all resolve.
+effect fn glyphRefs(
+  graph: &Graph,
+  fonts: &Fonts<'_>,
+  parent: SourceId,
+  out: &mut List<u32>,
+) -> Option<usize>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let document = graph.sourceDocument(parent)
+  let mut face = Option<usize>.None
+  out.clear()
+  let mut child = XmlDocument.firstChild(document, parent.node)
+  while let Option<XmlNodeId>.Some { value: node } = child {
+    if XmlDocument.nodes(document)[node.index].kind == XmlNodeKind.Element
+      && equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"glyphRef") {
+      let found = match reference(graph, SourceId { document: parent.document, node: node }) {
+        Option<SourceId>.Some { value: target } => alternateOf(fonts, target.node)
+        _ => Option<Alternate>.None
+      }
+      match found {
+        Option<Alternate>.Some { value } => {
+          if let Option<usize>.Some { value: chosen } = face {
+            if chosen != value.face {
+              out.clear()
+              return Option<usize>.None
+            }
+          }
+          face = Option<usize>.Some { value: value.face }
+          run out.append(value.character)
+        }
+        _ => {
+          out.clear()
+          return Option<usize>.None
+        }
+      }
+    }
+    child = XmlDocument.nextSibling(document, node)
+  }
+  return face
+}
+
+// The glyphs an altGlyph names (1.1 #AltGlyphElement): a `glyph` of an SVG font, or an
+// `altGlyphDef` with glyphRef children or with altGlyphItem children, of which the first
+// whose references all resolve applies. Glyphs of the main document's SVG fonts only.
+effect fn alternateGlyphs(
+  graph: &Graph,
+  fonts: &Fonts<'_>,
+  source: SourceId,
+  out: &mut List<u32>,
+) -> Option<usize,>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let main = graph.occurrences.asSlice()[graph.root.index].source.document
+  let target = match reference(graph, source) {
+    Option<SourceId>.Some { value } => value
+    _ => {
+      return Option<usize>.None
+    }
+  }
+  if target.document.index != main.index {
+    return Option<usize>.None
+  }
+  let document = graph.sourceDocument(target)
+  let name = String.utf8Bytes(XmlDocument.localName(document, target.node))
+  if equal(name, b"glyph") {
+    if let Option<Alternate>.Some { value } = alternateOf(fonts, target.node) {
+      run out.append(value.character)
+      return Option<usize>.Some { value: value.face }
+    }
+    return Option<usize>.None
+  }
+  if !equal(name, b"altGlyphDef") {
+    return Option<usize>.None
+  }
+  let mut items = false
+  let mut child = XmlDocument.firstChild(document, target.node)
+  while let Option<XmlNodeId>.Some { value: node } = child {
+    if XmlDocument.nodes(document)[node.index].kind == XmlNodeKind.Element
+      && equal(String.utf8Bytes(XmlDocument.localName(document, node)), b"altGlyphItem") {
+      items = true
+      let face = run glyphRefs(
+        graph,
+        fonts,
+        SourceId { document: target.document, node: node },
+        &mut out.*,
+      )
+      if face.isSome() {
+        return face
+      }
+    }
+    child = XmlDocument.nextSibling(document, node)
+  }
+  if items {
+    return Option<usize>.None
+  }
+  return run glyphRefs(graph, fonts, target, &mut out.*)
+}
+
+/// The same-document element an `href` or `xlink:href` fragment names.
+fn reference(graph: &Graph, source: SourceId) -> Option<SourceId> {
+  let document = graph.sourceDocument(source)
+  let mut href = attribute(document, source.node, "href")
+  if href.length == 0 {
+    href = match (XmlDocument.attribute(
+      document,
+      source.node,
+      "http://www.w3.org/1999/xlink",
+      "href",
+    )
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => value
+      _ => b""
+    }
+  }
+  if href.length < 2 || href[0] != 0x23 {
+    return Option<SourceId>.None
+  }
+  return graph.findId(source.document, Slice.view<u8>(href, 1, href.length - 1))
+}
+
+// Every text node under `node`, in document order.
+effect fn referencedText(
+  gather: &mut Gather,
+  document: &XmlDocument,
+  node: XmlNodeId,
+  span: usize,
+  mode: Collapse,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut child = XmlDocument.firstChild(document, node)
+  while let Option<XmlNodeId>.Some { value } = child {
+    let kind = XmlDocument.nodes(document)[value.index].kind
+    if kind == XmlNodeKind.Text {
+      run characters(&mut gather, String.utf8Bytes(XmlDocument.text(document, value)), span, mode)
+    } else if kind == XmlNodeKind.Element {
+      run referencedText(&mut gather, document, value, span, mode)
+    }
+    child = XmlDocument.nextSibling(document, value)
+  }
+}
+
+// --- Positioning attributes ----------------------------------------------------------------
+
+/// A whitespace- or comma-separated list of lengths or numbers; invalid lists are ignored.
+effect fn list(
+  bytes: &[u8],
+  dimension: Dimension,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  basis: f64,
+  limits: &Limits,
+  out: &mut List<f64>,
+) -> ()
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  out.clear()
+  if bytes.length == 0 {
+    return
+  }
+  let context = match &engine.metrics(style) {
+    Option<Context>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidStyleContext
+    }
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  while !cursor.done(&input) {
+    let parsed = run dimensions.parse(
+      &mut engine.values.numerics,
+      &input,
+      &mut cursor,
+      dimension,
+      true,
+    )
+    let id = match &parsed {
+      Option<ExprId>.Some { value } => value
+      _ => {
+        out.clear()
+        return
+      }
+    }
+    let computed = run dimensions.compute(&mut engine.values.numerics, id, &context)
+    let value = dimensions.evaluate(&engine.values.numerics, computed, basis)
+    if !f64.isFinite(value) {
+      out.clear()
+      return
+    }
+    run out.append(value)
+    drop cursor.comma(&input)
+  }
+}
+
+fn attribute<'d>(document: &'d XmlDocument, node: XmlNodeId, name: string) -> &'d [u8] {
+  return match &(XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+// #TextLayoutAlgorithm "Resolve character positioning": elements in document order, so a
+// descendant's values replace its ancestors' for its own characters. Lists count UTF-16
+// code units; the second unit of a surrogate pair takes no value.
+effect fn position(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  gather: &mut Gather,
+  width: f64,
+  height: f64,
+  limits: &Limits,
+) -> ()
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut values = List<f64>.make()
+  let mut index: usize = 0
+  while index < gather.entries.length() {
+    let entry = gather.entries.asSlice()[index]
+    let source = graph.occurrences.asSlice()[entry.occurrence.index].source
+    let document = graph.sourceDocument(source)
+    let name = String.utf8Bytes(XmlDocument.localName(document, entry.node))
+    if equal(name, b"text") || equal(name, b"tspan") || equal(name, b"textPath")
+      || equal(name, b"tref") {
+      run list(
+        attribute(document, entry.node, "textLength"),
+        Dimension.LengthPercentage,
+        &mut styles.catalog.engine,
+        entry.style,
+        width,
+        limits,
+        &mut values,
+      )
+      if values.length() == 1 && values.asSlice()[0] >= 0.0 {
+        run gather.lengths.append(
+          TextLength {
+            start: entry.start,
+            end: entry.end,
+            length: values.asSlice()[0],
+            glyphs: equal(attribute(document, entry.node, "lengthAdjust"), b"spacingAndGlyphs"),
+            rtl: gather.spans.asSlice()[entry.span].rtl,
+          },
+        )
+      }
+    }
+    index = index + 1
+  }
+  index = 0
+  while index < gather.entries.length() {
+    let entry = gather.entries.asSlice()[index]
+    let document = graph.sourceDocument(graph.occurrences.asSlice()[entry.occurrence.index].source)
+    let engine = &mut styles.catalog.engine
+    let mut which: usize = 0
+    while which < 5 {
+      let name: string = match which {
+        0 => "x"
+        1 => "y"
+        2 => "dx"
+        3 => "dy"
+        _ => "rotate"
+      }
+      let basis = if which == 0 || which == 2 {
+        width
+      } else {
+        height
+      }
+      let dimension = if which == 4 {
+        Dimension.Number
+      } else {
+        Dimension.LengthPercentage
+      }
+      run list(
+        attribute(document, entry.node, name),
+        dimension,
+        &mut engine.*,
+        entry.style,
+        basis,
+        limits,
+        &mut values,
+      )
+      let count = values.length()
+      if count > 0 {
+        let characters = gather.characters.asMutSlice()
+        let units = gather.units.asSlice()
+        let mut unit: usize = 0
+        let mut at = entry.start
+        while at < entry.end && at < characters.length {
+          if unit < count || which == 4 {
+            let value = values.asSlice()[if unit < count {
+              unit
+            } else {
+              count - 1
+            }]
+            match which {
+              0 => {
+                characters[at].x = Option<f64>.Some { value: value }
+              }
+              1 => {
+                characters[at].y = Option<f64>.Some { value: value }
+              }
+              2 => {
+                characters[at].dx = value
+              }
+              3 => {
+                characters[at].dy = value
+              }
+              _ => {
+                characters[at].rotate = value
+              }
+            }
+          }
+          unit = unit + u8.toUsize(units[at])
+          at = at + 1
+        }
+      }
+      which = which + 1
+    }
+    index = index + 1
+  }
+}
+
+// --- Text on a path ---------------------------------------------------------------------
+
+/// The basic shapes and `path`, which a textPath may follow (#TextPathElementHrefAttribute).
+fn shapeElement(name: &[u8]) -> bool {
+  return equal(name, b"path") || equal(name, b"rect") || equal(name, b"circle")
+    || equal(name, b"ellipse")
+    || equal(name, b"line")
+    || equal(name, b"polyline")
+    || equal(name, b"polygon")
+}
+
+/// An occurrence of `target`, preferring the scope of `near`.
+fn occurrenceOf(graph: &Graph, near: OccurrenceId, target: SourceId) -> Option<OccurrenceId> {
+  let scope = graph.occurrences.asSlice()[near.index].scope
+  let mut found = Option<OccurrenceId>.None
+  let occurrences = graph.occurrences.asSlice()
+  let mut index: usize = 0
+  while index < occurrences.length {
+    let source = occurrences[index].source
+    if source.document.index == target.document.index && source.node.index == target.node.index {
+      if occurrences[index].scope == scope {
+        return Option<OccurrenceId>.Some { value: OccurrenceId { index: index } }
+      }
+      if found.isNone() {
+        found = Option<OccurrenceId>.Some { value: OccurrenceId { index: index } }
+      }
+    }
+    index = index + 1
+  }
+  return found
+}
+
+/// startOffset: a length or number in user units, or a percentage of the path length.
+effect fn startOffset(
+  bytes: &[u8],
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  limits: &Limits,
+) -> Offset
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut end = bytes.length
+  while end > 0
+    && (bytes[end - 1] == 0x20 || bytes[end - 1] == 0x09 || bytes[end - 1] == 0x0A
+      || bytes[end - 1] == 0x0D) {
+    end = end - 1
+  }
+  if end > 0 && bytes[end - 1] == 0x25 {
+    let mut values = List<f64>.make()
+    run list(bytes, Dimension.LengthPercentage, &mut engine.*, style, 100.0, limits, &mut values)
+    if values.length() == 1 {
+      return Offset.Fraction { value: values.asSlice()[0] / 100.0 }
+    }
+    return Offset.Length { value: 0.0 }
+  }
+  let mut values = List<f64>.make()
+  run list(bytes, Dimension.LengthPercentage, &mut engine.*, style, 0.0, limits, &mut values)
+  return Offset.Length {
+    value: if values.length() == 1 {
+      values.asSlice()[0]
+    } else {
+      0.0
+    },
+  }
+}
+
+/// The path a textPath element follows: its `path` attribute, else the shape `href` names.
+// The shapes of `shape-inside` or `shape-subtract` on the text element, in its user space
+// (SVG 2 #TextShapeInside). Basic shapes resolve against the viewport. A reference names
+// an SVG shape element, whose own transform applies; others are ignored, as is a box.
+effect fn regions(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  text: OccurrenceId,
+  style: StyleId,
+  property: Property,
+  paths: &mut List<Path>,
+  width: f64,
+  height: f64,
+  limits: &Limits,
+) -> List<Region>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = List<Region>.make()
+  let mut count: usize = 0
+  if let Option<ComputedValue>.Some { value: entry } = &styles.catalog.engine.get(style, property) {
+    if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
+      if let EffectValue.Shapes { sources } = &value {
+        count = sources.length()
+      }
+    }
+  }
+  let viewport = Rect { xMin: 0.0, yMin: 0.0, xMax: width, yMax: height }
+  let mut index: usize = 0
+  while index < count {
+    let mut built = Option<used_clip_shapes.Geometry>.None
+    let mut url = false
+    if let Option<ComputedValue>.Some { value: entry } = &styles.catalog.engine.get(
+      style,
+      property,
+    ) {
+      if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
+        if let EffectValue.Shapes { sources } = &value {
+          match &sources.asSlice()[index] {
+            ClipSource.Shape { shape, reference } => {
+              built = run used_clip_shapes.build(&styles.catalog.engine, &shape, viewport)
+            }
+            ClipSource.Url { url: ignored } => {
+              url = true
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+    if let Option<used_clip_shapes.Geometry>.Some { value: geometry } = move built {
+      run grown(
+        &geometry.path,
+        Transform.identity(),
+        geometry.rule == FillRule.EvenOdd,
+        margin(&styles.catalog.engine, style, property, width),
+        &mut out,
+      )
+    } else if url {
+      if let Option<OccurrenceId>.Some { value: target } = styles.resourceAt(
+        text,
+        property,
+        index,
+      ) {
+        run referenced(
+          graph,
+          &mut styles.*,
+          target,
+          property,
+          &mut paths,
+          width,
+          height,
+          limits,
+          &mut out,
+        )
+      }
+    }
+    index = index + 1
+  }
+  return move out
+}
+
+// The used shape-margin of a shape in `shape-subtract` (SVG 2 #TextShapeMargin); shapes
+// in `shape-inside` take none.
+fn margin(engine: &Engine<'_>, style: StyleId, property: Property, width: f64) -> f64 {
+  if property != Property.ShapeSubtract {
+    return 0.0
+  }
+  return match engine.number(style, Property.ShapeMargin, width) {
+    Option<f64>.Some { value } => value
+    Option<f64>.None => 0.0
+  }
+}
+
+// The region of a referenced shape element, with its own transform, grown by its own
+// shape-margin in `shape-subtract`.
+effect fn referenced(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  target: OccurrenceId,
+  property: Property,
+  paths: &mut List<Path>,
+  width: f64,
+  height: f64,
+  limits: &Limits,
+  out: &mut List<Region>,
+) -> ()
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = graph.occurrences.asSlice()[target.index].source
+  let document = graph.sourceDocument(source)
+  let style = match &styles.nodeStyle(target) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      return
+    }
+  }
+  let shape = run used_geometry.shape(
+    document,
+    source.node,
+    &mut styles.catalog.engine,
+    style,
+    width,
+    height,
+    &mut paths,
+    limits,
+  )
+  let index = match shape.path {
+    Option<usize>.Some { value } => value
+    _ => {
+      return
+    }
+  }
+  let engine = &styles.catalog.engine
+  let mut transform = Transform.identity()
+  if used_transforms.transformed(engine, style) {
+    if let Result.Finite { rect } = bounds.path(&paths.asSlice()[index]) {
+      if let Option<Rect>.Some { value: viewport } = checkedRect(0.0, 0.0, width, height) {
+        if let Option<Matrix>.Some { value: matrix } = used_transforms.element(
+          engine,
+          style,
+          viewport,
+          rect,
+          rect,
+        ) {
+          if let Projection.Affine { value } = transforms.flattened(&matrix) {
+            transform = value
+          }
+        }
+      }
+    }
+  }
+  run grown(
+    &paths.asSlice()[index],
+    transform,
+    false,
+    margin(engine, style, property, width),
+    &mut out,
+  )
+}
+
+effect fn textPath(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  entry: Entry,
+  paths: &mut List<Path>,
+  width: f64,
+  height: f64,
+  limits: &Limits,
+) -> OnPath
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = graph.occurrences.asSlice()[entry.occurrence.index].source
+  let document = graph.sourceDocument(source)
+  let reverse = equal(attribute(document, entry.node, "side"), b"right")
+  let offset = run startOffset(
+    attribute(document, entry.node, "startOffset"),
+    &mut styles.catalog.engine,
+    entry.style,
+    limits,
+  )
+  let data = attribute(document, entry.node, "path")
+  if data.length > 0 {
+    let parsed = run svg.parsePath(data)
+    if parsed.path.length() > 0 {
+      return run OnPath.make(
+        &parsed.path,
+        Transform.identity(),
+        reverse,
+        entry.start,
+        entry.end,
+        offset,
+        Option<f64>.None,
+      )
+    }
+  }
+  let empty = Path.make()
+  let invalid = run OnPath.make(
+    &empty,
+    Transform.identity(),
+    reverse,
+    entry.start,
+    entry.end,
+    offset,
+    Option<f64>.None,
+  )
+  let target = match reference(graph, source) {
+    Option<SourceId>.Some { value } => value
+    _ => {
+      return move invalid
+    }
+  }
+  let targetDocument = graph.sourceDocument(target)
+  if !equal(
+    String.utf8Bytes(XmlDocument.namespaceUri(targetDocument, target.node)),
+    b"http://www.w3.org/2000/svg",
+  )
+    || !shapeElement(String.utf8Bytes(XmlDocument.localName(targetDocument, target.node))) {
+    return move invalid
+  }
+  let occurrence = match occurrenceOf(graph, entry.occurrence, target) {
+    Option<OccurrenceId>.Some { value } => value
+    _ => {
+      return move invalid
+    }
+  }
+  let style = match &styles.nodeStyle(occurrence) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      return move invalid
+    }
+  }
+  let shape = run used_geometry.shape(
+    targetDocument,
+    target.node,
+    &mut styles.catalog.engine,
+    style,
+    width,
+    height,
+    &mut paths,
+    limits,
+  )
+  let index = match shape.path {
+    Option<usize>.Some { value } => value
+    _ => {
+      return move invalid
+    }
+  }
+  let length = run used_path_length.attribute(
+    targetDocument,
+    target.node,
+    &mut styles.catalog.engine,
+    style,
+    limits,
+  )
+
+  // The referenced element's transform is a supplemental transformation (#TextPathElement).
+  let engine = &styles.catalog.engine
+  let mut transform = Transform.identity()
+  if used_transforms.transformed(engine, style) {
+    if let Result.Finite { rect } = bounds.path(&paths.asSlice()[index]) {
+      if let Option<Rect>.Some { value: viewport } = checkedRect(0.0, 0.0, width, height) {
+        if let Option<Matrix>.Some { value: matrix } = used_transforms.element(
+          engine,
+          style,
+          viewport,
+          rect,
+          rect,
+        ) {
+          if let Projection.Affine { value } = transforms.flattened(&matrix) {
+            transform = value
+          }
+        }
+      }
+    }
+  }
+  return run OnPath.make(
+    &paths.asSlice()[index],
+    transform,
+    reverse,
+    entry.start,
+    entry.end,
+    offset,
+    length,
+  )
+}
+
+/// Lays out the `text` element `text` and returns the glyph geometry of each element in its
+/// subtree that renders characters of its own.
+pub effect fn resolve(
+  graph: &Graph,
+  styles: &mut StyledGraph<'_>,
+  text: OccurrenceId,
+  fonts: &Fonts<'_>,
+  paths: &mut List<Path>,
+  width: f64,
+  height: f64,
+  limits: &Limits,
+) -> List<TextPiece>
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let installed = run families(fonts)
+  let mut gather = Gather {
+    entries: List<Entry>.make(),
+    spans: List<Span>.make(),
+    characters: List<Character>.make(),
+    units: List<u8>.make(),
+    lengths: List<TextLength>.make(),
+    collapsible: false,
+    paths: List<usize>.make(),
+    path: Option<usize>.None,
+    pathsAllowed: false,
+  }
+  run walk(graph, &styles.*, fonts, &installed, text, Option<usize>.None, &mut gather)
+
+  // A collapsible space at the end of the line is removed.
+  if gather.collapsible {
+    drop gather.characters.pop()
+    drop gather.units.pop()
+  }
+  run position(graph, &mut styles.*, &mut gather, width, height, limits)
+
+  // SVG 2 #InlineSize: a positive inline-size wraps the text, except on a path. Otherwise
+  // preserved segment breaks render as spaces.
+  let mut wrapping = Option<f64>.None
+  if gather.entries.length() > 0 && gather.paths.length() == 0 {
+    let root = gather.entries.asSlice()[0].style
+
+    // Percentages refer to the viewport's size along the inline axis.
+    let basis = if gather.spans.asSlice()[0].writing == Writing.HorizontalTb {
+      width
+    } else {
+      height
+    }
+    if let Option<f64>.Some { value } = styles.catalog.engine.number(
+      root,
+      Property.InlineSize,
+      basis,
+    ) {
+      if f64.isFinite(value) && value > 0.0 {
+        wrapping = Option<f64>.Some { value: value }
+      }
+    }
+  }
+
+  // A shape-inside other than `auto` sets the content area instead (SVG 2
+  // #TextShapeInside), for horizontal text off a path.
+  let mut shapes = List<Region>.make()
+  let mut holes = List<Region>.make()
+  if gather.entries.length() > 0 && gather.paths.length() == 0
+    && gather.spans.asSlice()[0].writing == Writing.HorizontalTb {
+    let entry = gather.entries.asSlice()[0]
+    shapes = run regions(
+      graph,
+      &mut styles.*,
+      entry.occurrence,
+      entry.style,
+      Property.ShapeInside,
+      &mut paths,
+      width,
+      height,
+      limits,
+    )
+    if shapes.length() > 0 {
+      holes = run regions(
+        graph,
+        &mut styles.*,
+        entry.occurrence,
+        entry.style,
+        Property.ShapeSubtract,
+        &mut paths,
+        width,
+        height,
+        limits,
+      )
+    }
+  }
+  if shapes.length() > 0 {
+    let root = gather.entries.asSlice()[0].style
+    let soft = match textKeyword(&styles.catalog.engine, root, Property.TextWrapMode) {
+      Option<TextKeyword>.Some { value } => value != TextKeyword.Nowrap
+      Option<TextKeyword>.None => true
+    }
+    gather.lengths.clear()
+    let engine = &styles.catalog.engine
+
+    // The text-align shorthand sets text-align-all and text-align-last; text-align-last
+    // auto follows text-align-all, except that justify sets the last line at start.
+    let align = match alignment(engine, root, Property.TextAlignAll) {
+      Option<Align>.Some { value } => value
+      Option<Align>.None => Align.Start
+    }
+    let last = match alignment(engine, root, Property.TextAlignLast) {
+      Option<Align>.Some { value } => value
+      Option<Align>.None => if align == Align.Justify {
+        Align.Start
+      } else {
+        align
+      }
+    }
+    run wrapInAreas(
+      fonts,
+      gather.spans.asSlice(),
+      &mut gather.characters,
+      shapes.asSlice(),
+      holes.asSlice(),
+      soft,
+      align,
+      last,
+    )
+  } else if let Option<f64>.Some { value: inlineSize } = wrapping {
+    let root = gather.entries.asSlice()[0].style
+    let soft = match textKeyword(&styles.catalog.engine, root, Property.TextWrapMode) {
+      Option<TextKeyword>.Some { value } => value != TextKeyword.Nowrap
+      Option<TextKeyword>.None => true
+    }
+
+    // textLength does not apply to wrapped text (SVG 2 #TextElementTextLengthAttribute).
+    gather.lengths.clear()
+    run wrap(fonts, gather.spans.asSlice(), &mut gather.characters, inlineSize, soft)
+  } else {
+    // SVG 2 §11.6.1: with pre or pre-line a preserved line feed is a forced line break
+    // that starts a new line box, without any auto-wrapping. On a path it stays a space.
+    let mut breaks = false
+    if gather.paths.length() == 0 {
+      let all = gather.characters.asSlice()
+      let mut at: usize = 0
+      while at < all.length && !breaks {
+        breaks = all[at].cp == 0x0A
+        at = at + 1
+      }
+    }
+    if breaks {
+      gather.lengths.clear()
+      let unbounded = f64.fromBits(9218868437227405312)
+      run wrap(fonts, gather.spans.asSlice(), &mut gather.characters, unbounded, false)
+    } else {
+      let all = gather.characters.asMutSlice()
+      let mut at: usize = 0
+      while at < all.length {
+        if all[at].cp == 0x0A {
+          all[at].cp = 0x20
+        }
+        at = at + 1
+      }
+    }
+  }
+  let mut onPaths = List<OnPath>.make()
+  let mut which: usize = 0
+  while which < gather.paths.length() {
+    let entry = gather.entries.asSlice()[gather.paths.asSlice()[which]]
+    run onPaths.append(run textPath(graph, &mut styles.*, entry, &mut paths, width, height, limits))
+    which = which + 1
+  }
+
+  // y values are ignored for horizontal text on a path (#TextLayoutAlgorithm).
+  let characters = gather.characters.asMutSlice()
+  which = 0
+  while which < characters.length {
+    if characters[which].path.isSome() {
+      characters[which].y = Option<f64>.None
+    }
+    which = which + 1
+  }
+  let result = run layout(
+    fonts,
+    gather.spans.asSlice(),
+    gather.characters.asSlice(),
+    gather.lengths.asSlice(),
+    onPaths.asSlice(),
+  )
+  let mut pieces = List<TextPiece>.make()
+  let mut index: usize = 0
+  while index < gather.entries.length() {
+    let entry = gather.entries.asSlice()[index]
+    let mut outline = Path.make()
+    let mut cells = Path.make()
+    let mut colors = List<ColorGlyph>.make()
+    run spanGeometry(fonts, &result, entry.span, &mut outline, &mut cells, &mut colors)
+    let mut early = Path.make()
+    let mut late = Path.make()
+    let size = gather.spans.asSlice()[entry.span].size
+    let lines = decoration(&styles.catalog.engine, entry.style, size)
+    if lines.underline || lines.overline || lines.lineThrough {
+      run decorationGeometry(
+        &result,
+        entry.span,
+        size,
+        entry.start,
+        entry.end,
+        lines,
+        &mut early,
+        &mut late,
+      )
+    }
+    run pieces.append(
+      TextPiece {
+        occurrence: entry.occurrence.index,
+        outline: move outline,
+        cells: move cells,
+        early: move early,
+        late: move late,
+        colors: move colors,
+      },
+    )
+    index = index + 1
+  }
+  return move pieces
+}

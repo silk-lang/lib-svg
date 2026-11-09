@@ -1,0 +1,11 @@
+[package]
+name = "svg-render-test-harness"
+version = "0.1.0"
+silk-version = "0.1.0-dev.61+91f335268900"
+
+[dependencies]
+svg_render = { path = "../svg/render", package = "svg-render" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "14fe5d98e7789eda537a2b59955985a0ea0f9e9e", path = "graphics/codec", package = "graphics-codec" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "14fe5d98e7789eda537a2b59955985a0ea0f9e9e", path = "graphics/geometry", package = "graphics-geometry" }
+svg_core = { path = "../svg", package = "svg" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "3138e52b08591c8f5979c42a68dc6bbfd27d05fb", path = "fonts/faces", package = "font-faces" }

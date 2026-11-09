@@ -1,0 +1,259 @@
+//! Rasterize retained clip geometry without consuming fill, stroke or opacity.
+import svg_core.scene { ClipNode, FillRule, RenderError }
+import svg_core.mapping { Mapping }
+import svg_core.mapping
+import svg_core.vector_path
+import svg_geometry.geometry { Path }
+import vector.geometry { Rect, rectAt }
+import vector.geometry_error { GeometryError }
+import vector.projective { Homography }
+import vector.projective
+import vector.flatten as flattening
+import vector.flatten { Line, TOLERANCE }
+import vector.strips { Rasterizer, Coverage, EVENODD, NONZERO }
+import vector.layer { Mask }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.u32
+import silk.num.f32
+import clip_geometry
+import checked
+
+pub effect fn render(
+  nodes: &[ClipNode],
+  paths: &[Path],
+  root: usize,
+  width: u32,
+  height: u32,
+  placement: &Mapping,
+  availablePixels: usize,
+) -> Mask
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut rasterizer = Rasterizer.make()
+  let mut coverage = Coverage.make(width, height)
+  run cover(
+    nodes,
+    paths,
+    root,
+    width,
+    height,
+    placement,
+    availablePixels,
+    &mut rasterizer,
+    &mut coverage,
+  )
+  return run Mask.fromCoverage(&coverage)
+}
+
+/// The part of [`render`]'s mask in columns `x0 .. x1` and rows `y0 .. y1`, as a box-sized mask
+/// (see [`Mask.fromCoverageWithin`]); it fails exactly when `render` does.
+pub effect fn renderWithin(
+  nodes: &[ClipNode],
+  paths: &[Path],
+  root: usize,
+  width: u32,
+  height: u32,
+  placement: &Mapping,
+  availablePixels: usize,
+  x0: u32,
+  y0: u32,
+  x1: u32,
+  y1: u32,
+) -> Mask
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut rasterizer = Rasterizer.make()
+  let mut coverage = Coverage.make(width, height)
+  run cover(
+    nodes,
+    paths,
+    root,
+    width,
+    height,
+    placement,
+    availablePixels,
+    &mut rasterizer,
+    &mut coverage,
+  )
+  return run Mask.fromCoverageWithin(&coverage, x0, y0, x1, y1)
+}
+
+effect fn cover(
+  nodes: &[ClipNode],
+  paths: &[Path],
+  root: usize,
+  width: u32,
+  height: u32,
+  placement: &Mapping,
+  availablePixels: usize,
+  rasterizer: &mut Rasterizer,
+  coverage: &mut Coverage,
+) -> ()
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  run checked.dimensions(width, height)
+  if root >= nodes.length || !placement.isFinite() {
+    fail RenderError.InvalidGeometry
+  }
+  let pixels = u32.toUsize(width) * u32.toUsize(height)
+
+  // References point backward, allowing a bounded reverse reachability walk.
+  // Unrelated clips in the global arena must not consume this layer's budget.
+  let mut needed = List<bool>.make()
+  let mut cursor: usize = 0
+  while cursor <= root {
+    run needed.append(cursor == root)
+    cursor = cursor + 1
+  }
+  while cursor > 0 {
+    cursor = cursor - 1
+    if needed.asSlice()[cursor] {
+      match &nodes[cursor] {
+        ClipNode.Intersect { left, right } => {
+          if left >= cursor || right >= cursor {
+            fail RenderError.InvalidGeometry
+          }
+          let mut flags = needed.asMutSlice()
+          flags[left] = true
+          flags[right] = true
+        }
+        ClipNode.Union { left, right } => {
+          if left >= cursor || right >= cursor {
+            fail RenderError.InvalidGeometry
+          }
+          let mut flags = needed.asMutSlice()
+          flags[left] = true
+          flags[right] = true
+        }
+        _ => {}
+      }
+    }
+  }
+  if pixels > availablePixels {
+    fail RenderError.TooLarge
+  }
+  let viewport = rectAt(0.0, 0.0, u32.toF64(width), u32.toF64(height))
+  let mut leaves = List<List<Line>>.make()
+  let mut index: usize = 0
+  while index <= root {
+    let mut lines = List<Line>.make()
+    if needed.asSlice()[index] {
+      if let ClipNode.Shape { path, transform, rule } = &nodes[index] {
+        if path >= paths.length || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+        let source = run vector_path.convert(&paths[path])
+        let composed = run placement.compose(&transform)
+        match &composed {
+          Mapping.Affine { value } => {
+            run flattening.fillClipped(&source, &value, &viewport, TOLERANCE, &mut lines)
+          }
+          Mapping.Projective { value } => {
+            run projective.fill(&source, &value, viewport, TOLERANCE, &mut lines)
+          }
+        }
+        run checked.lines(lines.asSlice(), width, height)
+      }
+    }
+    run leaves.append(move lines)
+    index = index + 1
+  }
+  let lines = run clip_geometry.combine(nodes, leaves.asSlice(), root, needed.asSlice())
+  run checked.lines(lines.asSlice(), width, height)
+  run rasterizer.fillPolylines(lines.asSlice(), NONZERO, &mut coverage)
+}
+
+/// The winding number of the closed polylines `lines` around (`x`, `y`): each edge that
+/// crosses the horizontal ray to the right counts +1 going down and −1 going up.
+pub fn winding(lines: &[Line], x: f64, y: f64) -> i32 {
+  let mut total: i32 = 0
+  let mut k: usize = 0
+  while k < lines.length {
+    let x0 = f32.toF64(lines[k].x0)
+    let y0 = f32.toF64(lines[k].y0)
+    let x1 = f32.toF64(lines[k].x1)
+    let y1 = f32.toF64(lines[k].y1)
+    if (y0 <= y && y < y1) || (y1 <= y && y < y0) {
+      let at = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+      if at > x {
+        total = if y1 > y0 {
+          total + 1
+        } else {
+          total - 1
+        }
+      }
+    }
+    k = k + 1
+  }
+  return total
+}
+
+/// Whether a fill rule takes a point with winding number `count`.
+pub fn filled(count: i32, rule: FillRule) -> bool {
+  return if rule == FillRule.EvenOdd {
+    count % 2 != 0
+  } else {
+    count != 0
+  }
+}
+
+/// Whether the device point (`x`, `y`) is inside clip node `root`, geometrically, for
+/// hit testing (SVG 2 #PointerEventsProperty: a clip path is a geometric boundary).
+pub effect fn contains(
+  nodes: &[ClipNode],
+  paths: &[Path],
+  root: usize,
+  width: u32,
+  height: u32,
+  placement: &Mapping,
+  x: f64,
+  y: f64,
+) -> bool
+  ! RenderError | GeometryError | OutOfMemoryError
+  ? &mut Allocator {
+  if root >= nodes.length || !placement.isFinite() {
+    fail RenderError.InvalidGeometry
+  }
+  let viewport = rectAt(0.0, 0.0, u32.toF64(width), u32.toF64(height))
+  let mut inside = List<bool>.make()
+  let mut lines = List<Line>.make()
+  let mut index: usize = 0
+  while index <= root {
+    let value = match &nodes[index] {
+      ClipNode.Empty => false
+      ClipNode.Shape { path, transform, rule } => {
+        if path >= paths.length || !transform.isFinite() {
+          fail RenderError.InvalidGeometry
+        }
+        lines.clear()
+        let source = run vector_path.convert(&paths[path])
+        let composed = run placement.compose(&transform)
+        match &composed {
+          Mapping.Affine { value } => {
+            run flattening.fillClipped(&source, &value, &viewport, TOLERANCE, &mut lines)
+          }
+          Mapping.Projective { value } => {
+            run projective.fill(&source, &value, viewport, TOLERANCE, &mut lines)
+          }
+        }
+        filled(winding(lines.asSlice(), x, y), rule)
+      }
+      ClipNode.Intersect { left, right } => {
+        if left >= index || right >= index {
+          fail RenderError.InvalidGeometry
+        }
+        inside.asSlice()[left] && inside.asSlice()[right]
+      }
+      ClipNode.Union { left, right } => {
+        if left >= index || right >= index {
+          fail RenderError.InvalidGeometry
+        }
+        inside.asSlice()[left] || inside.asSlice()[right]
+      }
+    }
+    run inside.append(value)
+    index = index + 1
+  }
+  return inside.asSlice()[root]
+}

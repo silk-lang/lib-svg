@@ -1,0 +1,79 @@
+//! SVG2 secure image documents share the caller's finite resource budget.
+import svg_css.computed { Initials }
+import silk.core.option { Option }
+import svg_fonts.database { FontDatabase }
+import lib as renderer
+import lib { RenderOptions, RenderError, RenderTree }
+import environment { Environment, noHostStyles }
+import svg_core.structure { Options as StructureOptions }
+import svg_core.url { Url, UrlError }
+import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits }
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn parse(data: &[u8], documents: usize) -> RenderTree<'static>
+  ! UrlError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let base = run Url.parseAbsolute(b"https://example.test/outer.svg")
+  let black = Color.srgb(0.0, 0.0, 0.0, 1.0)
+  let fonts = FontDatabase.make()
+  let mut host = Environment {
+    base: &base,
+    media: MediaEnvironment.headless(300.0, 150.0),
+    colors: ColorContext.make(black, [black; 19]),
+    fontFamily: b"\"Test Serif\"",
+    systemFonts: [b"16px \"Test Serif\""; 6],
+    cssLimits: Limits.make(),
+    structure: StructureOptions.defaults(),
+    fonts: &fonts,
+    styles: noHostStyles(),
+  }
+  host.structure.limits.maxDocuments = documents
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  return run renderer.parse(data, &RenderOptions.make(), &host)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/conform.html#ErrorProcessing
+// Embedded documents must not reset a host limit at each image boundary.
+test effect fn embeddedDocumentsShareTheHostDocumentLimit() -> ()
+  ! OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let result = run Effect.result(
+    parse(
+      b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><image width='4' height='4' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/></svg>",
+      1,
+    ),
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let limited = match &result {
+    Result<RenderTree, UrlError | RenderError | OutOfMemoryError>.Failure {
+      error
+    } => match &error {
+      RenderError value => value == RenderError.TooLarge
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(limited, "the parent already consumes the only allowed document")
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn equalImageViewportsReuseTheIndependentDocumentLayout() -> ()
+  ! UrlError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let tree = run parse(
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><image width='4' height='4' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/><image x='4' width='4' height='4' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/></svg>",
+    2,
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    tree.documents.length() == 1 && tree.embedded.length() == 1,
+    "equal source and logical viewport share one retained child despite different placements",
+  )
+}

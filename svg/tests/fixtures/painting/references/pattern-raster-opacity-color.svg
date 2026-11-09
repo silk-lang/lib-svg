@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16">
+  <g opacity=".5">
+    <g opacity=".5" color-interpolation="linearRGB">
+      <rect width="32" height="16" fill="red"/>
+      <rect width="32" height="16" fill="blue" fill-opacity=".5"/>
+    </g>
+  </g>
+</svg>

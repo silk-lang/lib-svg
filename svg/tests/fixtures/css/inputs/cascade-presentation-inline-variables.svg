@@ -1,0 +1,17 @@
+<!-- https://www.w3.org/TR/css-cascade-4/#cascade-sort -->
+<!-- https://www.w3.org/TR/css-variables-1/#substitute-a-var -->
+<!-- https://www.w3.org/TR/css-color-4/#rgb-functions -->
+<!-- https://www.w3.org/TR/css-transforms-1/#funcdef-transform-translate -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="4">
+  <style type="text/css">
+    @namespace s url("http://www.w3.org/2000/svg");
+    s|g > s|rect.base { fill: #ff0000 }
+    #one { fill: #00ff00 !important }
+  </style>
+  <g fill="black">
+    <rect id="one" width="4" height="4" fill="purple" style="fill:blue"/>
+    <rect class="base" x="4" width="4" height="4" fill="blue"/>
+    <rect x="8" width="4" height="4" style="--paint:0 0 100%;fill:rgb(var(--paint))"/>
+    <rect width="4" height="4" style="transform:translate(12px);fill:rgb(255 255 0 / 1)"/>
+  </g>
+</svg>

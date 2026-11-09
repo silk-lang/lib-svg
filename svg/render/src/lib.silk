@@ -1,0 +1,583 @@
+//! Parse, resolve and render SVG with the vector CPU backend.
+pub import svg_core.scene { RenderOptions, RenderError, RenderTree, DisplayList, HitTarget }
+pub import vector.pixmap { Pixmap }
+pub import record { record }
+import record { recorded }
+import svg_core.structure { Graph, StructureError }
+import svg_core.structure
+import svg_core.url { Url }
+import svg_core.resolve
+import svg_core.image_assets
+import svg_core.image_assets { DocumentSource, ImageCache }
+import svg_core.scene { GlyphDocument }
+import svg_core.mask_layer_sources
+import document_images
+import svg_geometry.geometry { Size }
+import svg_raster.cpu
+import vector.geometry_error { GeometryError }
+pub import environment { Environment }
+import environment
+import native_environment
+import svg_core.resources { Resolver, ResourceError, ProcessingMode }
+import svg_core.animation
+import svg_core.document_styles
+import silk.xml.document { XmlDocument, XmlNodeId, XmlSnapshot }
+import silk.collections.bytes { Bytes }
+import svg_core.css_animations
+import svg_core.color_profiles
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.num.u32
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+
+effect fn invalidStructure(error: StructureError) -> Graph
+  ! RenderError {
+  match error {
+    StructureError.InvalidXml => {
+      fail RenderError.InvalidXml
+    }
+    StructureError.InvalidRoot => {
+      fail RenderError.InvalidRoot
+    }
+    StructureError.TooLarge => {
+      fail RenderError.TooLarge
+    }
+  }
+}
+
+struct Budget {
+  documentCount: usize,
+  documents: usize,
+  assets: usize,
+  pixels: usize,
+  occurrences: usize,
+}
+
+fn budget(options: &RenderOptions, host: &Environment<'_, '_>) -> Budget {
+  return Budget {
+    documentCount: host.structure.limits.maxDocuments,
+    documents: host.structure.limits.maxTotalBytes,
+    assets: host.structure.limits.maxTotalBytes,
+    pixels: options.maxPixels,
+    occurrences: host.structure.limits.maxOccurrences,
+  }
+}
+
+effect fn loaded<'a, 'h>(
+  input: Graph,
+  options: &RenderOptions,
+  host: &Environment<'a, 'h>,
+  viewport: Option<Size>,
+  glyph: Option<GlyphDocument>,
+  depth: usize,
+  remaining: &mut Budget,
+) -> RenderTree<'h>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut graph = move input
+
+  // Animated processing modes run declarative animation (SVG 2 #processing-modes), here
+  // sampled once at the requested time.
+  if animates(host) {
+    let timelines = run timelines(&mut graph, host)
+    run applyTimelines(&mut graph, timelines.asSlice(), options.time)
+  }
+  let mut none = List<XmlSnapshot>.make()
+  let mut images = ImageCache.disabled()
+  return run styled(
+    move graph,
+    options,
+    host,
+    viewport,
+    glyph,
+    depth,
+    &mut remaining.*,
+    &mut none,
+    false,
+    &mut images,
+  )
+}
+
+fn animates(host: &Environment<'_, '_>) -> bool {
+  let mode = host.structure.policy.mode
+  return mode == ProcessingMode.Animated || mode == ProcessingMode.SecureAnimated
+}
+
+/// The SMIL timeline of each document of `graph`, from its parsed values.
+effect fn timelines(graph: &mut Graph, host: &Environment<'_, '_>) -> List<animation.Timeline>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  // An mpath's motion path is its target's computed `d`, so documents with mpath
+  // elements are styled once before sampling.
+  let mut targets = List<List<XmlNodeId>>.make()
+  let mut named = false
+  let mut d: usize = 0
+  while d < graph.documents.length() {
+    let found = run animation.motionTargets(&graph.documents.asSlice()[d].document)
+    named = named || found.length() > 0
+    run targets.append(move found)
+    d = d + 1
+  }
+  let mut computed = List<List<animation.MotionPath>>.make()
+  if named {
+    let unanimated = run environment.styles(&mut graph.*, host)
+    d = 0
+    while d < graph.documents.length() {
+      run computed.append(
+        run document_styles.motionPaths(&graph.*, &unanimated, d, targets.asSlice()[d].asSlice()),
+      )
+      d = d + 1
+    }
+  } else {
+    d = 0
+    while d < graph.documents.length() {
+      run computed.append(List<animation.MotionPath>.make())
+      d = d + 1
+    }
+  }
+  let mut found = List<animation.Timeline>.make()
+  d = 0
+  while d < graph.documents.length() {
+    run found.append(
+      run animation.timeline(
+        &graph.documents.asSlice()[d].document,
+        computed.asSlice()[d].asSlice(),
+      ),
+    )
+    d = d + 1
+  }
+  return move found
+}
+
+/// Writes each document's animated values at `time` into the first `timelines.length`
+/// documents of `graph`.
+effect fn applyTimelines(graph: &mut Graph, timelines: &[animation.Timeline], time: f64) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let documents = graph.documents.asMutSlice()
+  let mut d: usize = 0
+  while d < timelines.length && d < documents.length {
+    run timelines[d].apply(&mut documents[d].document, time)
+    d = d + 1
+  }
+}
+
+/// Styles, loads images for and resolves a graph whose animations, if any, are applied.
+effect fn styled<'a, 'h>(
+  input: Graph,
+  options: &RenderOptions,
+  host: &Environment<'a, 'h>,
+  viewport: Option<Size>,
+  glyph: Option<GlyphDocument>,
+  depth: usize,
+  remaining: &mut Budget,
+  snapshots: &mut List<XmlSnapshot>,
+  retain: bool,
+  cache: &mut ImageCache,
+) -> RenderTree<'h>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut graph = move input
+  let mut styles = run environment.styles(&mut graph, host)
+
+  // Documents that styling fetched are recorded before CSS Animations write into them.
+  if retain {
+    run snapshotNew(&graph, &mut snapshots.*)
+  }
+
+  // CSS Animations need the computed animation properties, so they are sampled after a first
+  // cascade and styled again only when one applies.
+  if animates(host) && run css_animations.sample(&mut graph, &styles, options.time) {
+    styles = run environment.styles(&mut graph, host)
+  }
+  if graph.documents.length() > remaining.documentCount
+    || graph.resourceBytes() > remaining.documents
+    || graph.occurrences.length() > remaining.occurrences {
+    fail RenderError.TooLarge
+  }
+  remaining.documentCount = remaining.documentCount - graph.documents.length()
+  remaining.documents = remaining.documents - graph.resourceBytes()
+  remaining.occurrences = remaining.occurrences - graph.occurrences.length()
+
+  // SVG 1.1 colour profiles: icc-color() paints use the profiles they name, and images
+  // become sRGB per their embedded description or `color-profile` property.
+  let profiles = run color_profiles.load(&graph, &styles)
+  color_profiles.applyColors(&mut styles.catalog.engine.values, &profiles)
+  let mut images = run image_assets.loadWith(
+    &graph,
+    remaining.pixels,
+    Intrinsic.replace(cache.*, ImageCache.make()),
+  )
+  run image_assets.loadLayers(
+    &mut images,
+    &graph,
+    run mask_layer_sources.requests(&graph, &styles),
+    remaining.pixels,
+  )
+  cache.* = images.takeCache()
+  run image_assets.applyProfiles(&mut images, &graph, &styles, &profiles)
+  if images.retainedBytes > remaining.assets {
+    fail RenderError.TooLarge
+  }
+  remaining.assets = remaining.assets - images.retainedBytes
+  let mut i: usize = 0
+  while i < images.assets.length() {
+    let image = &images.assets.asSlice()[i].image
+    let count = u32.toUsize(image.width()) * u32.toUsize(image.height())
+    if count > remaining.pixels {
+      fail RenderError.TooLarge
+    }
+    remaining.pixels = remaining.pixels - count
+    i = i + 1
+  }
+  run document_images.prepare(&mut images, host)
+  let mut tree = match &viewport {
+    Option<Size>.Some { value } => run resolve.resolveEmbedded(
+      move images,
+      move graph,
+      move styles,
+      options,
+      &host.cssLimits,
+      host.fonts,
+      value,
+      glyph,
+    )
+    _ => run resolve.resolveWithImages(
+      move images,
+      move graph,
+      move styles,
+      options,
+      &host.cssLimits,
+      host.fonts,
+      host.media.initial.viewportWidth,
+      host.media.initial.viewportHeight,
+    )
+  }
+  i = 0
+  while i < tree.embedded.length() {
+    let entry = &tree.embedded.asSlice()[i]
+    let result = run Effect.result(
+      parseSource(
+        &tree.documents.asSlice()[entry.source],
+        options,
+        host,
+        entry.viewport,
+        entry.glyph,
+        depth + 1,
+        &mut remaining.*,
+      ),
+    )
+    match move result {
+      Result<RenderTree<'h>, RenderError | OutOfMemoryError>.Success { value } => {
+        let entries = tree.embedded.asMutSlice()
+        entries[i].tree = Option<RenderTree<'h>>.some(move value)
+      }
+      Result<RenderTree<'h>, RenderError | OutOfMemoryError>.Failure { error } => match &error {
+        OutOfMemoryError problem => {
+          fail OutOfMemoryError {}
+        }
+        RenderError problem => {
+          if problem == RenderError.TooLarge {
+            fail problem
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+  run Effect.catch<GeometryError>(resolve.finishEmbedded(&mut tree), invalidBounds)
+  return move tree
+}
+
+effect fn invalidBounds(error: GeometryError) -> ()
+  ! RenderError {
+  drop error
+  fail RenderError.InvalidGeometry
+}
+
+effect fn invalidResource(error: ResourceError) -> Graph
+  ! RenderError {
+  if error == ResourceError.TooLarge {
+    fail RenderError.TooLarge
+  }
+  fail RenderError.InvalidXml
+}
+
+effect fn parseSource<'a, 'h>(
+  source: &DocumentSource,
+  options: &RenderOptions,
+  host: &Environment<'a, 'h>,
+  viewport: Size,
+  glyph: Option<GlyphDocument>,
+  depth: usize,
+  remaining: &mut Budget,
+) -> RenderTree<'h>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  if depth > host.structure.limits.maxReferenceDepth {
+    fail RenderError.TooLarge
+  }
+  let base = match &source.response.finalUrl {
+    Option<Url>.Some { value } => &value
+    _ => &source.request
+  }
+  let mut local = environment.embedded(host, base, viewport)
+  local.structure.fragment = source.request.fragment()
+
+  // Glyph documents render in secure static mode (OpenType `SVG ` table), whole: the
+  // glyph element is chosen in resolve, not by a fragment.
+  if glyph.isSome() {
+    local.structure.fragment = Option<&[u8]>.None
+    local.structure.policy.mode = ProcessingMode.SecureStatic
+  }
+  local.structure.limits.maxDocuments = remaining.documentCount
+  local.structure.limits.maxTotalBytes = remaining.documents
+  local.structure.limits.maxOccurrences = remaining.occurrences
+  let graph = run Effect.catch<ResourceError>(
+    Effect.catch<StructureError>(
+      structure.buildResponse(&source.response, &source.request, &local.structure),
+      invalidStructure,
+    ),
+    invalidResource,
+  )
+  return run loaded(
+    move graph,
+    options,
+    &local,
+    Option<Size>.some(viewport),
+    glyph,
+    depth,
+    &mut remaining.*,
+  )
+}
+
+/// Parse XML, compute CSS and retain independent embedded SVG pictures.
+pub effect fn parse<'a, 'h>(
+  data: &[u8],
+  options: &RenderOptions,
+  host: &Environment<'a, 'h>,
+) -> RenderTree<'h>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let graph = run Effect.catch<StructureError>(
+    structure.build(data, host.base, &host.structure),
+    invalidStructure,
+  )
+  let mut remaining = budget(options, host)
+  return run loaded(
+    move graph,
+    options,
+    host,
+    Option<Size>.None,
+    Option<GlyphDocument>.None,
+    0,
+    &mut remaining,
+  )
+}
+
+/// Parse an SVG image in a secure, exact logical viewport, including fractions.
+/// Output overrides and zoom belong to the referencing image's device mapping.
+pub effect fn parseEmbedded<'a, 'h>(
+  data: &[u8],
+  options: &RenderOptions,
+  host: &Environment<'a, 'h>,
+  viewport: Size,
+) -> RenderTree<'h>
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let local = environment.embedded(host, host.base, viewport)
+  let graph = run Effect.catch<StructureError>(
+    structure.build(data, local.base, &local.structure),
+    invalidStructure,
+  )
+  let mut remaining = budget(options, &local)
+  return run loaded(
+    move graph,
+    options,
+    &local,
+    Option<Size>.some(viewport),
+    Option<GlyphDocument>.None,
+    0,
+    &mut remaining,
+  )
+}
+
+/// Records the parsed attributes of the documents of `graph` that `snapshots` lacks.
+effect fn snapshotNew(graph: &Graph, snapshots: &mut List<XmlSnapshot>) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let documents = graph.documents.asSlice()
+  let mut d = snapshots.length()
+  while d < documents.length {
+    run snapshots.append(run XmlDocument.snapshot(&documents[d].document))
+    d = d + 1
+  }
+}
+
+/// An SVG document parsed once and rendered at any number of animation times.
+///
+/// [`parseAnimated`] parses the XML, builds the document graph (fetching referenced
+/// documents) and resolves each SMIL animation's intervals once. Each [`Animated.frame`]
+/// then puts back the parsed attribute values, writes the animated values at the frame's
+/// time, and styles, resolves and records the graph again. A frame renders exactly what
+/// [`parse`] and [`record`] produce for the same data and `RenderOptions.time`, in any time
+/// order.
+///
+/// Raster images and the responses of SVG document images are fetched and decoded once and
+/// kept while frames use them ([`image_assets.ImageCache`]); a frame copies them, converts
+/// their colours and parses embedded SVG images again. This assumes the host's resolver
+/// answers a URL the same way on every frame.
+pub struct Animated {
+  data: Bytes,
+  graph: Option<Graph>,
+  snapshots: List<XmlSnapshot>,
+  timelines: List<animation.Timeline>,
+  images: ImageCache,
+}
+
+effect fn prepared(data: &[u8], host: &Environment<'_, '_>) -> Animated
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut graph = run Effect.catch<StructureError>(
+    structure.build(data, host.base, &host.structure),
+    invalidStructure,
+  )
+  let found = if animates(host) {
+    run timelines(&mut graph, host)
+  } else {
+    List<animation.Timeline>.make()
+  }
+  let mut snapshots = List<XmlSnapshot>.make()
+  run snapshotNew(&graph, &mut snapshots)
+  return Animated {
+    data: run Bytes.copy(data),
+    graph: Option<Graph>.some(move graph),
+    snapshots: move snapshots,
+    timelines: move found,
+    images: ImageCache.make(),
+  }
+}
+
+/// Parses `data` for rendering at many animation times with [`Animated.frame`]. Every frame
+/// must use the same `host`.
+pub effect fn parseAnimated(data: &[u8], host: &Environment<'_, '_>) -> Animated
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  return run prepared(data, host)
+}
+
+impl Animated {
+  /// Whether the document has SMIL animation elements. CSS animations are not counted: they
+  /// are known only once the document is styled.
+  pub fn animated(self: &Animated) -> bool {
+    let mut d: usize = 0
+    while d < self.timelines.length() {
+      if self.timelines.asSlice()[d].animated() {
+        return true
+      }
+      d = d + 1
+    }
+    return false
+  }
+
+  /// The number of image URLs whose fetch results are kept for the next frame: those used in
+  /// the last frame or the one before.
+  pub fn keptImages(self: &Animated) -> usize {
+    return self.images.length()
+  }
+
+  /// The bytes the retained documents hold, which frames do not grow.
+  pub fn retainedBytes(self: &Animated) -> usize {
+    let mut total: usize = 0
+    if let Option<Graph>.Some { value } = &self.graph {
+      let documents = value.documents.asSlice()
+      let mut d: usize = 0
+      while d < documents.length {
+        total = total + XmlDocument.byteLength(&documents[d].document)
+        d = d + 1
+      }
+    }
+    return total
+  }
+
+  /// The display list at `options.time`, with the `host` given to [`parseAnimated`]. A
+  /// frame that fails drops the retained graph; the next frame parses the data again.
+  pub effect fn frame(
+    self: &mut Animated,
+    options: &RenderOptions,
+    host: &Environment<'_, '_>,
+  ) -> DisplayList
+    ! RenderError | OutOfMemoryError
+    ? &mut Resolver | &mut Allocator {
+    if self.graph.isNone() {
+      let fresh = run prepared(Bytes.asSlice(&self.data), host)
+      self.* = move fresh
+    }
+    let mut graph = match Intrinsic.replace(self.graph, Option<Graph>.None) {
+      Option<Graph>.Some { value } => move value
+      _ => {
+        fail RenderError.InvalidRoot
+      }
+    }
+
+    // Documents fetched after the last CSS Animations write still hold parsed values.
+    run snapshotNew(&graph, &mut self.snapshots)
+    let documents = graph.documents.asMutSlice()
+    let saved = self.snapshots.asSlice()
+    let mut d: usize = 0
+    while d < saved.length && d < documents.length {
+      let ignored = run XmlDocument.restore(&mut documents[d].document, &saved[d])
+      drop ignored
+      d = d + 1
+    }
+    drop documents
+    run applyTimelines(&mut graph, self.timelines.asSlice(), options.time)
+    let mut remaining = budget(options, host)
+    let tree = run styled(
+      move graph,
+      options,
+      host,
+      Option<Size>.None,
+      Option<GlyphDocument>.None,
+      0,
+      &mut remaining,
+      &mut self.snapshots,
+      true,
+      &mut self.images,
+    )
+    self.images.sweep()
+    let result = run recorded(move tree)
+    self.graph = Option<Graph>.some(move result.graph)
+    return move result.list
+  }
+}
+
+/// Render a retained display list; callers can reuse it without reparsing XML.
+pub effect fn renderDisplayList(list: &DisplayList) -> Pixmap
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return run cpu.execute(list)
+}
+
+/// The element at the point (`x`, `y`) of the rendered image, in pixels from its top-left
+/// corner: the topmost element whose `pointer-events` region holds the point (SVG 2
+/// §15.5.1), or None over no such element. Clip paths limit regions; masks, filters and
+/// opacity do not.
+pub effect fn hitTest(list: &DisplayList, x: f64, y: f64) -> Option<HitTarget>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  return match run cpu.hitTest(list, x, y) {
+    Option<usize>.Some { value } => Option<HitTarget>.some(list.targets.asSlice()[value])
+    Option<usize>.None => Option<HitTarget>.None
+  }
+}
+
+pub effect fn render(data: &[u8], options: &RenderOptions, host: &Environment<'_, '_>) -> Pixmap
+  ! RenderError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let tree = run parse(data, options, host)
+  let list = run record(move tree)
+  return run renderDisplayList(&list)
+}

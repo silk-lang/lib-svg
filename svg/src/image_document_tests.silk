@@ -1,0 +1,72 @@
+//! SVG2 #ImageElement: shared source bytes are distinct from occurrence viewports.
+import image_assets
+import structure { Options, StructureError }
+import structure
+import resources { Resolver, DataOnly, Limits, Response, ResourceError }
+import silk.core.option { Option }
+import svg_css.tokens { equal }
+import url { Url, UrlError }
+import scene { RenderError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement
+test effect fn repeatedSvgImageReferencesRetainOneSourceBeforeLayout() -> ()
+  ! UrlError | StructureError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(Limits.defaults())
+  let base = run Url.parseAbsolute(b"https://example.test/root.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let graph = run structure.build(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><image width='4' height='4' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/><image width='8' height='8' href='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E'/></svg>",
+    &base,
+    &Options.defaults(),
+  )
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let store = run image_assets.load(&graph, 16000000)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    store.assets.length() == 0 && store.documents.length() == 1,
+    "SVG source bytes are shared before independently sizing occurrences",
+  )
+  run Testing.expect(
+    Bytes.length(&store.documents.asSlice()[0].response.bytes) > 0,
+    "source response remains available for secure per-viewport layout",
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/linking.html#processingURL
+test effect fn embeddedResponseUsesRedirectBaseAndTransportMetadata() -> ()
+  ! UrlError | StructureError | ResourceError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(Limits.defaults())
+  let request = run Url.parseAbsolute(b"https://example.test/image.svg#target")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let redirected = run Url.parseAbsolute(b"https://example.test/assets/final.svg")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let response = Response {
+    bytes: run Bytes.copy(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+      |> Effect.provideMut<Allocator>(&mut allocator),
+    finalUrl: Option<Url>.some(move redirected),
+    mediaType: Option<Bytes>.some(
+      run Bytes.copy(b"image/svg+xml") |> Effect.provideMut<Allocator>(&mut allocator),
+    ),
+    charset: Option<Bytes>.some(
+      run Bytes.copy(b"utf-8") |> Effect.provideMut<Allocator>(&mut allocator),
+    ),
+  }
+  let graph = run structure.buildResponse(&response, &request, &Options.defaults())
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    equal(
+      graph.urls.asSlice()[graph.documents.asSlice()[0].base].bytes(),
+      b"https://example.test/assets/final.svg",
+    ),
+    "response URL is the embedded document's relative-resource base",
+  )
+}

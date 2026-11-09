@@ -1,0 +1,440 @@
+//! Document-level cascade cases; fixtures explicitly choose host metrics, palette and fonts.
+import silk.text.string { String }
+import document_styles { StyledDocument }
+import document_styles
+import stylesheets { Catalog }
+import resources {
+  Resolver,
+  Response,
+  ResourceKind,
+  ResourceError,
+  DataOnly,
+  Limits as ResourceLimits
+}
+import url { Url, UrlError }
+import url_idna
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind, XmlError }
+import svg_css.tokens { Limits, CssError, CssErrorKind, equal }
+import svg_css.computed { HostContext, StyleId, ComputedValue, ComputedError }
+import svg_css.properties { Property }
+import svg_css.values { Value, ValueId, Mode }
+import svg_css.values
+import svg_css.input { Input }
+import svg_css.lexer
+import svg_css.media_features { Environment }
+import svg_css.dimensions { Context }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.text_values { TextValue, Atom, Keyword as TextKeyword }
+import svg_css.value_keywords { Keyword }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.testing.testing { Testing, AssertionError }
+
+effect fn fixture(document: &XmlDocument) -> StyledDocument<'_>
+  ! CssError | UrlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let mut catalog = run Catalog.make()
+  let buffer = run lexer.tokenize(b"serif", &Limits.make())
+  let input = Input.Contiguous { buffer: &buffer, range: buffer.all() }
+  let family = match &run values.parse(
+    &mut catalog.engine.values,
+    Property.FontFamily,
+    &input,
+    Mode.Css,
+  ) {
+    Option<ValueId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.FontFamily }
+    }
+  }
+  let fonts = [
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+    TextValue.make(Property.Font),
+  ]
+  let host = HostContext {
+    dimensions: Context.make(100.0, 100.0, 16.0),
+    colors: ColorContext.make(Color.srgb(0.0, 0.0, 0.0, 1.0), [Color.srgb(0.0, 0.0, 0.0, 1.0); 19]),
+    systemFonts: &fonts,
+    fontFamily: family,
+    revision: 0,
+  }
+  let base = run Url.parseAbsolute(b"https://example.test/art/main.svg")
+  return run document_styles.build(
+    document,
+    move catalog,
+    &host,
+    &Environment.headless(100.0, 100.0),
+    move base,
+    &Limits.make(),
+  )
+}
+
+effect fn urlLimitIsPreserved(data: &[u8]) -> bool
+  ! UrlError | XmlError | ComputedError | OutOfMemoryError
+  ? &mut Resolver | &mut Allocator {
+  let document = run XmlDocument.parse(data)
+  let attempted = run Effect.result(fixture(&document))
+  return match move attempted {
+    Result<StyledDocument, CssError | UrlError | ComputedError | OutOfMemoryError>.Success {
+      value
+    } => false
+    Result<StyledDocument, CssError | UrlError | ComputedError | OutOfMemoryError>.Failure {
+      error
+    } => match move error {
+      CssError limit => limit.kind == CssErrorKind.InputLimit
+      UrlError invalid => {
+        fail move invalid
+      }
+      ComputedError invalid => {
+        fail move invalid
+      }
+      OutOfMemoryError exhausted => {
+        fail move exhausted
+      }
+    }
+  }
+}
+
+// https://url.spec.whatwg.org/#concept-domain-to-ascii
+// Resource exhaustion is not ordinary invalid-URL recovery in either stylesheet entry point.
+test effect fn stylesheetUrlLimitsCannotBeSilentlyIgnored() -> ()
+  ! UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let prefixes: [&[u8]; 2] = [
+    b"<?xml-stylesheet href='https://\xC3\xBC",
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>@import url('https://\xC3\xBC",
+  ]
+  let suffixes: [&[u8]; 2] = [
+    b"/sheet.css'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+    b"/sheet.css');</style></svg>",
+  ]
+  let mut case: usize = 0
+  while case < prefixes.length {
+    let mut data = Bytes.make()
+    run data.append(prefixes[case]) |> Effect.provideMut<Allocator>(&mut allocator)
+    let mut scalar: usize = 0
+    while scalar < url_idna.maxScalars() {
+      run data.append(b"a") |> Effect.provideMut<Allocator>(&mut allocator)
+      scalar = scalar + 1
+    }
+    run data.append(suffixes[case]) |> Effect.provideMut<Allocator>(&mut allocator)
+    let limited = run urlLimitIsPreserved(data.asSlice())
+      |> Effect.provideMut<Resolver>(&mut resolver)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(limited, "PI and @import preserve the IDNA input-limit failure")
+    case = case + 1
+  }
+}
+
+fn named(document: &XmlDocument, result: &StyledDocument<'_>, id: &[u8]) -> Option<StyleId> {
+  let mut i: usize = 0
+  while i < XmlDocument.nodes(document).length {
+    let node = XmlNodeId { index: i }
+    match &(XmlDocument.attribute(document, node, "", "id")
+      |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+      Option<&[u8]>.Some { value } => {
+        if equal(value, id) {
+          return result.nodeStyle(node)
+        }
+      }
+      _ => {}
+    }
+    i = i + 1
+  }
+  return Option<StyleId>.None
+}
+
+fn number(
+  document: &XmlDocument,
+  result: &StyledDocument<'_>,
+  id: &[u8],
+  property: Property,
+  expected: f64,
+) -> bool {
+  return match &named(document, result, id) {
+    Option<StyleId>.Some { value } => match &result.catalog.engine.number(value, property, 100.0) {
+      Option<f64>.Some { value: n } => n == expected
+      _ => false
+    }
+    _ => false
+  }
+}
+
+fn whitespace(
+  document: &XmlDocument,
+  result: &StyledDocument<'_>,
+  id: &[u8],
+  expected: TextKeyword,
+) -> bool {
+  let style = match &named(document, result, id) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  let value = match &result.catalog.engine.get(style, Property.WhiteSpaceCollapse) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      return false
+    }
+  }
+  return match &result.catalog.engine.values.get(value.value).* {
+    Value.Text { value: text } => text.items.length() == 1
+      && match &text.items.asSlice()[0].atom {
+        Atom.Keyword { value: key } => key == expected
+        _ => false
+      }
+    _ => false
+  }
+}
+
+// Pinned SVG2ED dbbc1f8b... #PresentationAttributes and #StyleAttribute.
+// https://svgwg.org/svg2-draft/styling.html#PresentationAttributes
+// https://svgwg.org/svg2-draft/styling.html#StyleAttribute
+// https://www.w3.org/TR/css-cascade-4/#cascade-order
+test effect fn documentPresentationInlineAndImportant() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>rect {stroke-width:3px} .important {stroke-width:9px!important}</style><rect id='sheet' stroke-width='2'/><rect id='inline' stroke-width='2' style='stroke-width:4px'/><rect id='important' class='important' style='stroke-width:4px'/><rect id='inline-important' class='important' style='stroke-width:5px!important'/><g id='invalid' stroke-width='99!important'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&doc, &result, b"sheet", Property.StrokeWidth, 3.0)
+      && number(&doc, &result, b"inline", Property.StrokeWidth, 4.0)
+      && number(&doc, &result, b"important", Property.StrokeWidth, 9.0)
+      && number(&doc, &result, b"inline-important", Property.StrokeWidth, 5.0)
+      && number(&doc, &result, b"invalid", Property.StrokeWidth, 1.0),
+    "presentation order zero, inline specificity and important cascade remain distinct",
+  )
+}
+
+// https://svgwg.org/svg2-draft/styling.html#UAStyleSheet
+test effect fn uaWhitespaceAndAllElementStyles() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<svg xmlns='http://www.w3.org/2000/svg' xml:space='preserve'><defs id='defs' style='display:inline!important'><g id='inherited'/></defs><text id='normal' style='white-space:normal'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut complete = true
+  let mut i: usize = 0
+  while i < XmlDocument.nodes(&doc).length {
+    let has = match &result.nodeStyle(XmlNodeId { index: i }) {
+      Option<StyleId>.Some { value } => true
+      _ => false
+    }
+    if has != (XmlDocument.nodes(&doc)[i].kind == XmlNodeKind.Element) {
+      complete = false
+    }
+    i = i + 1
+  }
+  let hidden = match &named(&doc, &result, b"defs") {
+    Option<StyleId>.Some { value } => match &result.catalog.engine.get(value, Property.Display) {
+      Option<ComputedValue>.Some { value: entry } => match &result.catalog.engine.values.get(
+        entry.value,
+      ).* {
+        Value.Keyword { keyword } => keyword == Keyword.None
+        _ => false
+      }
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(
+    complete && hidden && whitespace(&doc, &result, b"inherited", TextKeyword.PreserveSpaces)
+      && whitespace(&doc, &result, b"normal", TextKeyword.Collapse),
+    "UA important hides definitions; inherited xml:space survives and author whitespace resets it; all elements receive IDs",
+  )
+}
+
+// Pinned CSSOM 24d77393... #add-a-css-style-sheet and PI processing.
+// https://www.w3.org/TR/cssom/#add-a-css-style-sheet
+// https://www.w3.org/TR/cssom/#requirements-on-user-agents-implementing-the-xml-stylesheet-processing-instruction
+// https://svgwg.org/svg2-draft/styling.html#StyleElement
+test effect fn piPreferredSetsNamespaceTypeAndMedia() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<?xml-stylesheet alternate='yes' title='chosen' href='data:text/css,rect%7Bstroke-width:6px%7D'?><?xml-stylesheet title='chosen' media='print' href='data:text/css,rect%7Bstroke-width:90px%7D'?><?xml-stylesheet title='other' href='data:text/css,rect%7Bstroke-width:91px%7D'?><svg xmlns='http://www.w3.org/2000/svg'><style xmlns='urn:foreign'>rect{stroke-width:92px}</style><style type='text/plain'>rect{stroke-width:93px}</style><style media='print'>rect{stroke-width:94px}</style><style title='other'>rect{stroke-width:95px}</style><style type='TEXT/CSS'>rect{stroke-opacity:.5}</style><?xml-stylesheet href='data:text/css,rect%7Bstroke-width:96px%7D'?><rect id='r'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&doc, &result, b"r", Property.StrokeWidth, 6.0)
+      && number(&doc, &result, b"r", Property.StrokeOpacity, 0.5),
+    "first nonalternate title selects set independently of media, earlier matching alternate activates, nonprolog PI and foreign style ignored",
+  )
+}
+
+// https://www.w3.org/TR/css-variables-1/#inheritance
+// https://www.w3.org/TR/selectors-4/#id-selectors
+// https://svgwg.org/svg2-draft/styling.html#PresentationAttributes
+test effect fn dtdIdsCustomPropertiesAndGeometryWhitelist() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<!DOCTYPE svg [<!ATTLIST g key ID #IMPLIED>]><svg xmlns='http://www.w3.org/2000/svg'><style>#target {--size:7px} rect {stroke-width:var(--size,2px)}</style><g key='target' id='g' x='19' cx='18' stroke-WIDTH='17'><rect id='r' x='11'/><text id='t' x='33'/></g><rect xmlns='urn:foreign' id='foreign' x='44' stroke-width='16'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&doc, &result, b"r", Property.StrokeWidth, 7.0)
+      && number(&doc, &result, b"r", Property.X, 11.0)
+      && number(&doc, &result, b"g", Property.X, 0.0)
+      && number(&doc, &result, b"g", Property.Cx, 0.0)
+      && number(&doc, &result, b"g", Property.StrokeWidth, 1.0)
+      && number(&doc, &result, b"t", Property.X, 0.0)
+      && number(&doc, &result, b"foreign", Property.X, 0.0),
+    "DTD ID matching feeds inherited custom properties; presentation names are case-sensitive, SVG-only and element constrained",
+  )
+}
+
+struct Imports {
+  calls: usize
+}
+
+impl Imports {
+  effect fn fetch(self: &mut Self, address: &Url, kind: ResourceKind) -> Response
+    ! ResourceError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    let mut bytes = Bytes.make()
+    if equal(address.bytes(), b"https://example.test/art/sheet.css") {
+      run Bytes.append(
+        &mut bytes,
+        b"@import 'nested.css' supports(stroke-width:1px) screen; @import 'never.css' supports(unknown:yes); @import 'print.css' print;",
+      )
+    } else if equal(address.bytes(), b"https://example.test/art/nested.css") {
+      run Bytes.append(&mut bytes, b"rect {stroke-width:12px}")
+    } else {
+      fail ResourceError.Io
+    }
+    return Response.fromBytes(move bytes)
+  }
+}
+
+impl Resolver for Imports {
+  fetch: Imports.fetch
+}
+
+// https://www.w3.org/TR/css-cascade-4/#conditional-import
+// https://www.w3.org/TR/css-values-4/#relative-urls
+test effect fn documentExternalConditionalImportsRetainBases() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = Imports { calls: 0 }
+  let doc = run XmlDocument.parse(
+    b"<?xml-stylesheet href='sheet.css'?><svg xmlns='http://www.w3.org/2000/svg'><rect id='r'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let style = match &named(&doc, &result, b"r") {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.StrokeWidth }
+    }
+  }
+  let entry = match &result.catalog.engine.get(style, Property.StrokeWidth) {
+    Option<ComputedValue>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.StrokeWidth }
+    }
+  }
+  let retained = match &entry.sourceBuffer {
+    Option<usize>.Some { value } => match &result.catalog.base(value) {
+      Option<&Url>.Some { value: base } => equal(
+        base.bytes(),
+        b"https://example.test/art/nested.css",
+      )
+      _ => false
+    }
+    _ => false
+  }
+  run Testing.expect(
+    resolver.calls == 2 && retained && number(&doc, &result, b"r", Property.StrokeWidth, 12.0),
+    "PI resolves against document URL, imports resolve against sheet URL, disabled conditions never fetch, computed source remains nested sheet",
+  )
+}
+
+// Pinned xml-stylesheet a0e1a519... #pseudo-attributes; CSSOM PI environment encoding.
+// https://www.w3.org/TR/xml-stylesheet/#pseudo-attributes
+// https://www.w3.org/TR/cssom/#requirements-on-user-agents-implementing-the-xml-stylesheet-processing-instruction
+test effect fn piPseudoattributeRecoveryAndCharset() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<?xml-stylesheet type='TEXT&#47;CSS; charset=windows-1252' href='data:text/css,%23%E9%7Bstroke-width:8px%7D' charset='windows-1252'?><?xml-stylesheet href='data:text/css,rect%7Bstroke-width:90px%7D' href='duplicate'?><?xml-stylesheet alternate='yes' href='data:text/css,rect%7Bstroke-width:91px%7D'?><?xml-stylesheet type='text/plain' href='data:text/css,rect%7Bstroke-width:92px%7D'?><svg xmlns='http://www.w3.org/2000/svg'><rect id='&#233;'/></svg><?xml-stylesheet href='data:text/css,rect%7Bstroke-width:93px%7D'?>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let root = XmlDocument.root(&doc)
+  let rect = match &XmlDocument.firstChild(&doc, root) {
+    Option<XmlNodeId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.StrokeWidth }
+    }
+  }
+  let id = match &result.nodeStyle(rect) {
+    Option<StyleId>.Some { value } => value
+    _ => {
+      fail ComputedError { property: Property.StrokeWidth }
+    }
+  }
+  let eight = match &result.catalog.engine.number(id, Property.StrokeWidth, 100.0) {
+    Option<f64>.Some { value } => value == 8.0
+    _ => false
+  }
+  run Testing.expect(
+    eight,
+    "PI charset controls external CSS decoding; duplicate pseudoattributes, untitled alternates, unsupported type and epilog instructions cannot override",
+  )
+}
+
+// https://svgwg.org/svg2-draft/styling.html#StyleElement
+test effect fn embeddedDescendantTextAndPresentationWhitelist() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let doc = run XmlDocument.parse(
+    b"<svg xmlns='http://www.w3.org/2000/svg'><style>rect{<g>stroke-width:10px</g>}</style><rect id='r' stroke-width='3' font-kerning='none' opacity='.4'/><g id='g' opacity='.6' xmlns:q='urn:attribute' q:stroke-width='19'/></svg>",
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run fixture(&doc)
+    |> Effect.provideMut<Resolver>(&mut resolver)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    number(&doc, &result, b"r", Property.StrokeWidth, 10.0)
+      && number(&doc, &result, b"r", Property.Opacity, 0.4)
+      && number(&doc, &result, b"g", Property.Opacity, 0.6)
+      && number(&doc, &result, b"g", Property.StrokeWidth, 1.0),
+    "embedded sheets concatenate descendant text; presentation only accepts no-namespace attributes",
+  )
+}

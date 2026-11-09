@@ -1,0 +1,4 @@
+<!-- https://www.w3.org/TR/2018/CR-SVG2-20181004/pservers.html#LinearGradientNotes; A valid empty server paints none rather than its URL fallback; one stop is solid even outside a radial cone; a zero linear vector uses the final stop including opacity. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="8">
+<defs><linearGradient id="empty"/><radialGradient id="one" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="2" fx="20" fy="20"><stop offset=".7" stop-color="red" stop-opacity=".5"/></radialGradient><linearGradient id="zero" x1=".3" x2=".3" y1=".7" y2=".7" spreadMethod="repeat"><stop stop-color="red"/><stop offset="1" stop-color="blue" stop-opacity=".5"/></linearGradient></defs><rect x="0" y="0" width="24" height="8" fill="white"/><rect x="0" y="0" width="8" height="8" fill="url(#empty) lime"/><rect x="8" y="0" width="8" height="8" fill="url(#one)"/><rect x="16" y="0" width="8" height="8" fill="url(#zero)"/>
+</svg>

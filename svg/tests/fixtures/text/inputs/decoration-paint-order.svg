@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140">
+<g font-family="Noto Sans" font-size="40" fill="blue" stroke="lime" stroke-width="5" stroke-opacity="0.5">
+<text x="10" y="50" text-decoration="underline">test</text>
+<text x="120" y="50" text-decoration="underline" paint-order="stroke">test</text>
+<text x="10" y="110" text-decoration="line-through">test</text>
+</g>
+</svg>

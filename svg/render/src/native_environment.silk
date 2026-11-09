@@ -1,0 +1,411 @@
+import svg_core.structure { Options as StructureOptions }
+//! CLI/benchmark styling policy, not an operating-system appearance query.
+//! The initial face is a real installed serif measured at 16 CSS px. All six
+//! system-font keywords deliberately alias that face/size. The light, contrasting
+//! sRGB palette below is this headless application's policy, not an OS palette.
+//! Text uses the faces in `fonts`: discovery adds the measured face, hosts add more.
+//! Only native discovery uses filesystem services; fromFontBytes remains portable.
+import environment { Environment }
+import environment
+import svg_fonts.database { FontDatabase }
+import svg_core.url { Url }
+import svg_core.font_metrics { FontMetricsError, Orientation }
+import svg_core.font_metrics
+import svg_css.media_features { Environment as MediaEnvironment }
+import svg_css.colors { Color, Context as ColorContext }
+import svg_css.tokens { Limits }
+import svg_core.document_styles
+import svg_core.stylesheets { HostStyles }
+import silk.core.option { Option }
+import read_fonts.lib { FontRef, ReadError }
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.text.string { String, InvalidUtf8 }
+
+pub enum NativeHostError {
+  InvalidInput,
+  InvalidFont,
+  // No configured installed candidate could be read and measured. On Linux,
+  // install fonts-dejavu-core (Debian/Ubuntu) or dejavu-serif-fonts (Fedora),
+  // or supply the actual selected face through fromFontBytes.
+  NoUsableFont,
+}
+
+/// Owns the prepared initial metrics and CSS font configuration, not font data.
+/// Prepare once per viewport; each input supplies its own borrowed document URL.
+pub struct NativeHost {
+  media: MediaEnvironment,
+  font: Bytes,
+  /// Faces for text. Discovery adds the measured initial face.
+  pub fonts: FontDatabase,
+  styles: HostStyles,
+}
+
+impl NativeHost {
+  /// Configures a real standalone sfnt face at its default variation coordinates.
+  /// familyName is the selected face's literal UTF-8 family name, not CSS syntax;
+  /// quotes/backslashes are escaped and empty/control-containing names rejected.
+  /// The caller selects the face and supplies its corresponding family name.
+  /// Font bytes are only borrowed while measuring, never retained or copied.
+  pub effect fn fromFontBytes(
+    fontBytes: &[u8],
+    familyName: &[u8],
+    viewportWidth: f64,
+    viewportHeight: f64,
+  ) -> NativeHost
+    ! NativeHostError | OutOfMemoryError
+    ? &mut Allocator {
+    run viewport(viewportWidth, viewportHeight)
+    run validateFamily(familyName)
+    let parsed = FontRef.new(fontBytes)
+    let face = match &parsed {
+      Result<FontRef, ReadError>.Success { value } => value
+      _ => {
+        fail NativeHostError.InvalidFont
+      }
+    }
+    let metrics = run Effect.catch<FontMetricsError>(
+      font_metrics.fromFont(
+        &face,
+        &[],
+        16.0,
+        viewportWidth,
+        viewportHeight,
+        Orientation.Horizontal,
+      ),
+      metricsFailure,
+    )
+    let font = run fontShorthand(familyName)
+    let mut media = MediaEnvironment.headless(viewportWidth, viewportHeight)
+    media.initial = metrics.dimensions
+
+    // Every document adds the UA sheet first, so it is collected once here.
+    let mut styles = run HostStyles.make(document_styles.uaSheet(), &media, &Limits.make())
+    let shorthand = Bytes.asSlice(&font)
+    run environment.prepareFonts(
+      &mut styles,
+      Slice.view<u8>(shorthand, 5, shorthand.length - 5),
+      &[shorthand, shorthand, shorthand, shorthand, shorthand, shorthand],
+      &media.initial,
+      &headlessPalette(),
+      &Limits.make(),
+    )
+    return NativeHost {
+      media: media,
+      font: move font,
+      fonts: FontDatabase.make(),
+      styles: move styles,
+    }
+  }
+
+  /// All six concrete shorthands intentionally use the same measured 16px face.
+  /// No URL allocation or parsing is performed; the input's base stays borrowed.
+  pub fn environment<'a>(self: &'a Self, base: &'a Url) -> Environment<'a, 'a> {
+    let font = Bytes.asSlice(&self.font)
+    return Environment {
+      base: base,
+      media: self.media,
+      colors: headlessPalette(),
+      fontFamily: Slice.view<u8>(font, 5, font.length - 5),
+      systemFonts: [font, font, font, font, font, font],
+      cssLimits: Limits.make(),
+      structure: StructureOptions.defaults(),
+      fonts: &self.fonts,
+      styles: Option<&'a HostStyles>.some(&self.styles),
+    }
+  }
+}
+
+effect fn viewport(width: f64, height: f64) -> ()
+  ! NativeHostError {
+  if !f64.isFinite(width) || width < 0.0 || !f64.isFinite(height) || height < 0.0 {
+    fail NativeHostError.InvalidInput
+  }
+}
+
+effect fn metricsFailure(error: FontMetricsError) -> never
+  ! NativeHostError {
+  match error {
+    FontMetricsError.InvalidInput => {
+      fail NativeHostError.InvalidInput
+    }
+    _ => {
+      fail NativeHostError.InvalidFont
+    }
+  }
+}
+
+effect fn validateFamily(family: &[u8]) -> ()
+  ! NativeHostError {
+  if family.length == 0 {
+    fail NativeHostError.InvalidInput
+  }
+  let text = String.fromUtf8(family)
+  match &text {
+    Result<string, InvalidUtf8>.Success { value } => {}
+    _ => {
+      fail NativeHostError.InvalidInput
+    }
+  }
+  let mut index: usize = 0
+  while index < family.length {
+    if family[index] < 32 || family[index] == 127 {
+      fail NativeHostError.InvalidInput
+    }
+    index = index + 1
+  }
+}
+
+effect fn fontShorthand(family: &[u8]) -> Bytes
+  ! NativeHostError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut font = Bytes.make()
+  run Bytes.append(&mut font, b"16px \"")
+  let mut start: usize = 0
+  let mut index: usize = 0
+  while index < family.length {
+    let byte = family[index]
+    if byte == 34 || byte == 92 {
+      run Bytes.append(&mut font, Slice.view<u8>(family, start, index - start))
+      run Bytes.append(&mut font, b"\\")
+      start = index
+    }
+    index = index + 1
+  }
+  run Bytes.append(&mut font, Slice.view<u8>(family, start, family.length - start))
+  run Bytes.append(&mut font, b"\"")
+  return move font
+}
+
+// Ordered by svg_css.colors.systemIndex. Every entry is an explicit absolute
+// color; paired text/background values contrast under this light-only policy.
+fn headlessPalette() -> ColorContext {
+  return ColorContext.make(
+    Color.srgb(0.0, 0.0, 0.0, 1.0),
+    [
+      Color.srgb(0.0, 0.25, 0.65, 1.0), // AccentColor
+      Color.srgb(1.0, 1.0, 1.0, 1.0), // AccentColorText
+      Color.srgb(0.75, 0.0, 0.0, 1.0), // ActiveText
+      Color.srgb(0.3, 0.3, 0.3, 1.0), // ButtonBorder
+      Color.srgb(0.94, 0.94, 0.94, 1.0), // ButtonFace
+      Color.srgb(0.0, 0.0, 0.0, 1.0), // ButtonText
+      Color.srgb(1.0, 1.0, 1.0, 1.0), // Canvas
+      Color.srgb(0.0, 0.0, 0.0, 1.0), // CanvasText
+      Color.srgb(1.0, 1.0, 1.0, 1.0), // Field
+      Color.srgb(0.0, 0.0, 0.0, 1.0), // FieldText
+      Color.srgb(0.4, 0.4, 0.4, 1.0), // GrayText
+      Color.srgb(0.0, 0.25, 0.65, 1.0), // Highlight
+      Color.srgb(1.0, 1.0, 1.0, 1.0), // HighlightText
+      Color.srgb(0.0, 0.2, 0.7, 1.0), // LinkText
+      Color.srgb(1.0, 0.9, 0.0, 1.0), // Mark
+      Color.srgb(0.0, 0.0, 0.0, 1.0), // MarkText
+      Color.srgb(0.0, 0.25, 0.65, 1.0), // SelectedItem
+      Color.srgb(1.0, 1.0, 1.0, 1.0), // SelectedItemText
+      Color.srgb(0.4, 0.1, 0.55, 1.0), // VisitedText
+    ],
+  )
+}
+
+// Match svg_core.resources_native: unsupported/portable targets never import
+// filesystem_native. WASI requires the selected path to be available via preopens.
+static if (Intrinsic.targetOperatingSystem() == "windows"
+  && Intrinsic.targetArchitecture() == "x86_64"
+  && Intrinsic.targetAbi() == "msvc"
+  && Intrinsic.profileText("libc") == "system")
+  || Intrinsic.targetOperatingSystem() == "wasi"
+  || (Intrinsic.targetOperatingSystem() == "darwin" && Intrinsic.targetArchitecture() == "aarch64"
+    && Intrinsic.targetAbi() == "apple"
+    && Intrinsic.profileText("libc") == "system")
+  || (Intrinsic.targetOperatingSystem() == "linux" && Intrinsic.targetAbi() == "gnu"
+    && Intrinsic.profileText("libc") == "gnu"
+    && (Intrinsic.targetArchitecture() == "aarch64"
+      || Intrinsic.targetArchitecture() == "x86_64")) {
+  import silk.system.filesystem { FileSystem, FileError, Path }
+  import silk.system.filesystem_native { OsFileSystem }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    import silk.platform.windows.host_input { WindowsHostInput }
+    import silk.system.host_input { HostInput, HostInputError }
+  }
+  import silk.core.option { Option }
+  import silk.testing.testing { Testing, AssertionError }
+
+  struct Candidate {
+    path: &'static [u8],
+    family: &'static [u8],
+  }
+
+  impl NativeHost {
+    /// Tries only these conventional installed serif paths, in declared order.
+    /// Missing, unreadable, or unusable faces advance to the next candidate;
+    /// exhaustion is NoUsableFont, never fabricated metrics. OOM propagates.
+    pub effect fn make(viewportWidth: f64, viewportHeight: f64) -> NativeHost
+      ! NativeHostError | OutOfMemoryError
+      ? &mut Allocator {
+      run viewport(viewportWidth, viewportHeight)
+      static if Intrinsic.targetOperatingSystem() == "windows" {
+        let mut inputs = run Effect.catch<HostInputError>(WindowsHostInput.capture(), noHostInput)
+        let directory = run Effect.catch<HostInputError>(
+          HostInput.variable(b"SystemRoot") |> Effect.provideMut<HostInput>(&mut inputs),
+          noHostInput,
+        )
+        if let Option<Bytes>.Some { value } = &directory {
+          let candidates = [Candidate { path: b"/Fonts/times.ttf", family: b"Times New Roman" }]
+          return run selectAt(Bytes.asSlice(&value), &candidates, viewportWidth, viewportHeight)
+        }
+        fail NativeHostError.NoUsableFont
+      }
+      static if Intrinsic.targetOperatingSystem() == "darwin" {
+        let candidates = [
+          Candidate {
+            path: b"/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+            family: b"Times New Roman",
+          },
+        ]
+        return run select(&candidates, viewportWidth, viewportHeight)
+      } else {
+        // Debian/Ubuntu, Fedora, then common Liberation/Noto package layouts.
+        // WASI hosts may preopen the same paths or use fromFontBytes instead.
+        let candidates = [
+          Candidate {
+            path: b"/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            family: b"DejaVu Serif",
+          },
+          Candidate { path: b"/usr/share/fonts/dejavu/DejaVuSerif.ttf", family: b"DejaVu Serif" },
+          Candidate {
+            path: b"/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+            family: b"Liberation Serif",
+          },
+          Candidate {
+            path: b"/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+            family: b"Liberation Serif",
+          },
+          Candidate {
+            path: b"/usr/share/fonts/liberation-serif/LiberationSerif-Regular.ttf",
+            family: b"Liberation Serif",
+          },
+          Candidate {
+            path: b"/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+            family: b"Noto Serif",
+          },
+          Candidate {
+            path: b"/usr/share/fonts/google-noto/NotoSerif-Regular.ttf",
+            family: b"Noto Serif",
+          },
+          Candidate { path: b"/usr/share/fonts/noto/NotoSerif-Regular.ttf", family: b"Noto Serif" },
+        ]
+        return run select(&candidates, viewportWidth, viewportHeight)
+      }
+    }
+  }
+
+  effect fn select(candidates: &[Candidate], width: f64, height: f64) -> NativeHost
+    ! NativeHostError | OutOfMemoryError
+    ? &mut Allocator {
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      // Only used by the deliberately invalid-candidate test on Windows.
+      let mut inputs = run Effect.catch<HostInputError>(WindowsHostInput.capture(), noHostInput)
+      let cwd = run Effect.catch<HostInputError>(
+        HostInput.workingDirectory() |> Effect.provideMut<HostInput>(&mut inputs),
+        noHostInput,
+      )
+      return run selectAt(Bytes.asSlice(&cwd), candidates, width, height)
+    } else {
+      return run selectAt(b"/", candidates, width, height)
+    }
+  }
+
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    effect fn noHostInput(error: HostInputError) -> never
+      ! NativeHostError {
+      drop error
+      fail NativeHostError.NoUsableFont
+    }
+  }
+
+  effect fn selectAt(root: &[u8], candidates: &[Candidate], width: f64, height: f64) -> NativeHost
+    ! NativeHostError | OutOfMemoryError
+    ? &mut Allocator {
+    let mut files = run OsFileSystem.makeBytes(root)
+    let mut index: usize = 0
+    while index < candidates.length {
+      let candidate = &candidates[index]
+      let selected = run Effect.catch<FileError>(
+        loadCandidate(candidate, width, height) |> Effect.provideMut<FileSystem>(&mut files),
+        skipFile,
+      )
+      match move selected {
+        Option<NativeHost>.Some { value } => {
+          return move value
+        }
+        _ => {}
+      }
+      index = index + 1
+    }
+    fail NativeHostError.NoUsableFont
+  }
+
+  effect fn loadCandidate(candidate: &Candidate, width: f64, height: f64) -> Option<NativeHost>
+    ! FileError | OutOfMemoryError
+    ? &mut FileSystem | &mut Allocator {
+    let path = run Path.fromBytes(candidate.path)
+    let bytes = run FileSystem.readFile(&path)
+    let mut prepared = run Effect.catch<NativeHostError>(
+      prepareCandidate(Bytes.asSlice(&bytes), candidate.family, width, height),
+      skipFont,
+    )
+    if let Option<NativeHost>.Some { value: host } = &mut prepared {
+      drop run host.fonts.add(move bytes)
+    }
+    return move prepared
+  }
+
+  effect fn prepareCandidate(bytes: &[u8], family: &[u8], width: f64, height: f64) -> Option<
+    NativeHost
+  >
+    ! NativeHostError | OutOfMemoryError
+    ? &mut Allocator {
+    let host = run NativeHost.fromFontBytes(bytes, family, width, height)
+    return Option<NativeHost>.Some { value: move host }
+  }
+
+  effect fn skipFile(error: FileError) -> Option<NativeHost> {
+    drop error
+    return Option<NativeHost>.None
+  }
+
+  effect fn skipFont(error: NativeHostError) -> Option<NativeHost> {
+    drop error
+    return Option<NativeHost>.None
+  }
+
+  test effect fn unavailableOrInvalidCandidatesReportNoUsableFont() -> ()
+    ! AssertionError<'static> | OutOfMemoryError {
+    let mut allocator = Allocator.systemAllocatorProvider()
+
+    // A directory cannot be a readable sfnt file. The second candidate also
+    // fails when unreadable; when readable, its empty contents are not a font.
+    let candidates = [
+      Candidate { path: b"/", family: b"Directory" },
+      Candidate { path: b"/dev/null", family: b"Empty" },
+    ]
+    let result = run Effect.result(select(&candidates, 300.0, 150.0))
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    let exhausted = match &result {
+      Result<NativeHost, NativeHostError | OutOfMemoryError>.Failure { error } => match &error {
+        NativeHostError problem => problem == NativeHostError.NoUsableFont
+        OutOfMemoryError problem => {
+          fail OutOfMemoryError {}
+        }
+      }
+      _ => false
+    }
+    run Testing.expect(
+      exhausted,
+      "candidate exhaustion is NoUsableFont, never fabricated fallback metrics",
+    )
+  }
+}

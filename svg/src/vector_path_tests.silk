@@ -1,0 +1,51 @@
+//! Exercise the conversion through stroke geometry, not backend verb packing.
+import vector_path
+import scene { RenderError }
+import svg_geometry.geometry { Path, Point, Size, Arc, Segment }
+import vector.geometry { Affine }
+import vector.stroke { Stroker, Stroke }
+import vector.geometry_error { GeometryError }
+import silk.core.effect { Effect }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathDataClosePathCommand
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/implnote.html#ArcConversionEndpointToCenter
+test effect fn exactArcAfterCloseUsesRestoredStart() -> ()
+  ! RenderError | GeometryError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+
+  // The parser inserts an explicit move after close, so construct this public
+  // path directly to exercise the adapter's own current-point restoration.
+  let mut source = Path.make()
+  let segments = [
+    Segment.MoveTo { to: Point.new(1.0, 0.0) },
+    Segment.LineTo { to: Point.new(9.0, 0.0) },
+    Segment.Close,
+    Segment.ArcTo {
+      arc: Arc {
+        radii: Size.new(1.0, 1.0),
+        rotationDegrees: 0.0,
+        largeArc: false,
+        sweep: true,
+        to: Point.new(0.0, 1.0),
+      },
+    },
+  ]
+  let mut i: usize = 0
+  while i < segments.length {
+    let accepted = run source.append(segments[i]) |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(accepted, "valid finite absolute path")
+    i = i + 1
+  }
+  let path = run vector_path.convert(&source) |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut stroker = Stroker.make()
+  let stroke = Stroke.make(0.2)
+  let bounds = run stroker.bounds(&path, &stroke, &Affine.identity(), 0.000001, true)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run Testing.expect(
+    !bounds.empty && f64.abs(bounds.bounds.yMax - 1.1) <= 0.000002,
+    "quarter-circle stroke reaches y=1.1; using pre-close x=9 would create a different corrected ellipse",
+  )
+}

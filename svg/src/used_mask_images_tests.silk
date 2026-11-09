@@ -1,0 +1,35 @@
+import used_mask_images
+import scene { Color }
+import silk.num.f64
+import silk.testing.testing { Testing, AssertionError }
+
+// https://www.w3.org/TR/css-images-3/#coloring-gradient-line
+test effect fn transitionHintsPlaceTheHalfwayColorAtTheHint() -> ()
+  ! AssertionError<'static> {
+  run Testing.expect(
+    f64.abs(used_mask_images.hintWeight(0.25, 0.25) - 0.5) < 0.000000000001,
+    "the hint position receives the half-way color",
+  )
+  run Testing.expect(
+    f64.abs(used_mask_images.hintWeight(0.7, 0.5) - 0.7) < 0.000000000001,
+    "a midpoint hint is linear interpolation",
+  )
+  run Testing.expect(
+    used_mask_images.hintWeight(0.5, 0.8) < 0.5 && used_mask_images.hintWeight(0.5, 0.2) > 0.5,
+    "a later hint holds the first color longer",
+  )
+}
+
+// https://www.w3.org/TR/css-images-3/#coloring-gradient-line
+test effect fn gradientColorsInterpolateInPremultipliedSpace() -> ()
+  ! AssertionError<'static> {
+  let black = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+  let clear = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.0 }
+  let middle = used_mask_images.mix(black, clear, 0.5)
+  run Testing.expect(
+    middle.r == 0.0 && middle.g == 0.0 && middle.b == 0.0 && middle.a == 0.5,
+    "a transparent stop's color channels do not tint the result",
+  )
+  let none = used_mask_images.mix(clear, clear, 0.5)
+  run Testing.expect(none.a == 0.0, "two transparent stops stay transparent")
+}

@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+<!-- An invalid textPath renders none of its characters; with no path end, later characters stay in place. -->
+<text x="10" y="60" font-family="Noto Sans" font-size="24">Ab<textPath>cd</textPath><tspan>ef</tspan></text>
+</svg>

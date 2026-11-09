@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <!-- No host language matches, so the clipPath is not rendered directly, but references to it still work. -->
+  <clipPath id="c" systemLanguage="zz">
+    <rect x="20" y="20" width="40" height="40"/>
+  </clipPath>
+  <rect width="100" height="100" fill="green" clip-path="url(#c)"/>
+</svg>

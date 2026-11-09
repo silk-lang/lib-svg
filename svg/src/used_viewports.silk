@@ -1,0 +1,517 @@
+//! SVG2 used viewport geometry, independent of CSS transforms and rendering state.
+//! Geometry properties are computed CSS; only viewBox/PAR/reference metadata is XML.
+import silk.text.string { String }
+import scene { RenderError }
+import silk.xml.document { XmlDocument, XmlNodeId }
+import svg_css.computed { Engine, StyleId, ComputedValue }
+import svg_css.properties { Property }
+import svg_css.values { Value }
+import svg_css.value_keywords { Keyword }
+import svg_css.effect_values { EffectValue }
+import svg_css.dimensions { Context, Dimension, ExprId, Store as NumericStore }
+import svg_css.dimensions
+import svg_css.tokens { Limits, CssError, equal }
+import svg_css.lexer
+import svg_css.input { Input }
+import svg_css.value_cursor { Cursor }
+import svg_geometry.geometry { Rect, Transform, Vector, checkedRect, isValidRect, isEmptyRect }
+import svg_geometry.svg { AspectRatio, Alignment }
+import svg_geometry.svg
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.core.option { Option }
+import silk.num.f64
+
+pub struct Clip {
+  // Bounds matter only on selected axes; never substitute enormous finite
+  // bounds for an unconstrained axis when constructing clipping half-planes.
+  pub rectangle: Rect,
+  pub x: bool,
+  pub y: bool,
+}
+
+impl Copy for Clip {}
+
+pub struct Viewport {
+  // Child user rectangle: viewBox if valid, otherwise local physical extents.
+  pub user: Rect,
+  // Child user coordinates -> parent user coordinates, before CSS transform.
+  pub mapping: Transform,
+  // Physical viewport/containing block in parent coordinates, including ref shift.
+  pub physical: Rect,
+  // None is unbounded. Zero extent on a constrained axis is explicitly empty.
+  pub clip: Option<Clip>,
+  pub disabled: bool,
+  // foreignObject establishes a CSS containing block, NOT an SVG viewport.
+  // Its descendants require a new svg fragment before SVG graphics can paint.
+  pub establishesSvgViewport: bool,
+}
+
+impl Copy for Viewport {}
+
+pub enum ElementKind {
+  Svg,
+  Symbol,
+  ForeignObject,
+}
+
+pub union Reference {
+  Missing,
+  Fraction { pub value: f64 },
+  Expression { pub expression: ExprId },
+}
+
+impl Copy for Reference {}
+
+// Cache once per source node. Expression IDs belong to the supplied shared
+// Engine.values.numerics arena and remain immutable across occurrence styles.
+pub struct Metadata {
+  pub kind: ElementKind,
+  pub viewBox: Option<Rect>,
+  pub aspectRatio: AspectRatio,
+  pub refX: Reference,
+  pub refY: Reference,
+}
+
+impl Copy for Metadata {}
+
+fn attribute<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> &'a [u8] {
+  return match &(XmlDocument.attribute(document, node, "", name)
+    |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
+    Option<&[u8]>.Some { value } => value
+    _ => b""
+  }
+}
+
+effect fn rectangle(x: f64, y: f64, w: f64, h: f64) -> Rect
+  ! RenderError {
+  return match &checkedRect(x, y, w, h) {
+    Option<Rect>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+@inlineAlways
+effect fn coordinate(engine: &Engine<'_>, style: StyleId, property: Property, basis: f64) -> f64
+  ! RenderError {
+  return match &engine.number(style, property, basis) {
+    Option<f64>.Some { value } => {
+      if !f64.isFinite(value) {
+        fail RenderError.InvalidGeometry
+      }
+      value
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+// SVG2 geometry.html#Sizing and struct.html#UseLayout: auto is not an override.
+effect fn dimension(
+  engine: &Engine<'_>,
+  style: StyleId,
+  host: Option<StyleId>,
+  property: Property,
+  basis: f64,
+  automatic: f64,
+) -> f64
+  ! RenderError {
+  let mut number = engine.number(style, property, basis)
+  match &host {
+    Option<StyleId>.Some { value } => match &engine.number(value, property, basis) {
+      Option<f64>.Some { value: override } => {
+        if !f64.isFinite(override) {
+          fail RenderError.InvalidGeometry
+        }
+        if override >= 0.0 {
+          number = Option<f64>.Some { value: override }
+        }
+      }
+      _ => {}
+    }
+    _ => {}
+  }
+  return match &number {
+    Option<f64>.Some { value } => {
+      if !f64.isFinite(value) {
+        fail RenderError.InvalidGeometry
+      }
+      if value < 0.0 {
+        automatic
+      } else {
+        value
+      }
+    }
+    _ => automatic
+  }
+}
+
+// Pinned struct.html#SymbolElementRefXAttribute has a narrower grammar table
+// (<length>) than its percentage-keyword prose and the linked marker grammar.
+// Accept the complete number/length/percentage grammar, including CSS math.
+// Percentages/keywords use the extent, NOT viewBox min + extent * fraction.
+pub effect fn parseReference(
+  bytes: &[u8],
+  horizontal: bool,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Reference
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  if bytes.length == 0 {
+    return Reference.Missing
+  }
+  let tokens = run lexer.tokenize(bytes, limits)
+  let input = Input.Contiguous { buffer: &tokens, range: tokens.all() }
+  let mut cursor = Cursor.make(&input)
+  let mut fraction = Option<f64>.None
+  if cursor.ident(&input, b"center") {
+    fraction = Option<f64>.Some { value: 0.5 }
+  } else if cursor.ident(
+    &input,
+    if horizontal {
+      b"left"
+    } else {
+      b"top"
+    },
+  ) {
+    fraction = Option<f64>.Some { value: 0.0 }
+  } else if cursor.ident(
+    &input,
+    if horizontal {
+      b"right"
+    } else {
+      b"bottom"
+    },
+  ) {
+    fraction = Option<f64>.Some { value: 1.0 }
+  }
+  match &fraction {
+    Option<f64>.Some { value } => {
+      return if cursor.done(&input) {
+        Reference.Fraction { value: value }
+      } else {
+        Reference.Missing
+      }
+    }
+    _ => {}
+  }
+  let parsed = run dimensions.parse(
+    &mut numerics.*,
+    &input,
+    &mut cursor,
+    Dimension.LengthPercentage,
+    true,
+  )
+  if !cursor.done(&input) {
+    return Reference.Missing
+  }
+  return match &parsed {
+    Option<ExprId>.Some { value } => Reference.Expression { expression: value }
+    _ => Reference.Missing
+  }
+}
+
+pub effect fn parseMetadata(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  numerics: &mut NumericStore<'_>,
+  limits: &Limits,
+) -> Option<Metadata>
+  ! CssError | OutOfMemoryError
+  ? &mut Allocator {
+  let name = String.utf8Bytes(XmlDocument.localName(document, node))
+  let kind = if equal(name, b"svg") {
+    ElementKind.Svg
+  } else if equal(name, b"symbol") {
+    ElementKind.Symbol
+  } else if equal(name, b"foreignObject") {
+    ElementKind.ForeignObject
+  } else {
+    return Option<Metadata>.None
+  }
+  let mut box = Option<Rect>.None
+  let mut ratio = AspectRatio { alignment: Alignment.XMidYMid, slice: false, defer: false }
+  if kind != ElementKind.ForeignObject {
+    box = svg.viewBox(attribute(document, node, "viewBox"))
+    match &svg.aspectRatio(attribute(document, node, "preserveAspectRatio")) {
+      Option<AspectRatio>.Some { value } => {
+        ratio = value
+      }
+      _ => {}
+    }
+  }
+  let mut refX = Reference.Missing
+  let mut refY = Reference.Missing
+  if kind == ElementKind.Symbol {
+    refX = run parseReference(attribute(document, node, "refX"), true, &mut numerics.*, limits)
+    refY = run parseReference(attribute(document, node, "refY"), false, &mut numerics.*, limits)
+  }
+  return Option<Metadata>.Some {
+    value: Metadata { kind: kind, viewBox: box, aspectRatio: ratio, refX: refX, refY: refY }
+  }
+}
+
+effect fn reference(
+  value: Reference,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  basis: f64,
+) -> Option<f64>
+  ! RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let expression = match &value {
+    Reference.Missing => {
+      return Option<f64>.None
+    }
+    Reference.Fraction { value: fraction } => {
+      return Option<f64>.Some { value: fraction * basis }
+    }
+    Reference.Expression { expression } => expression
+  }
+  let metrics = match &engine.metrics(style) {
+    Option<Context>.Some { value: context } => context
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  let computed = run dimensions.compute(&mut engine.values.numerics, expression, &metrics)
+  let resolved = dimensions.evaluate(&engine.values.numerics, computed, basis)
+  if !f64.isFinite(resolved) {
+    fail RenderError.InvalidGeometry
+  }
+  return Option<f64>.Some { value: resolved }
+}
+
+fn edge(engine: &Engine<'_>, expression: Option<ExprId>, automatic: f64) -> f64 {
+  return match &expression {
+    Option<ExprId>.Some { value } => dimensions.evaluate(&engine.values.numerics, value, 0.0)
+    _ => automatic
+  }
+}
+
+effect fn clipsAxis(engine: &Engine<'_>, style: StyleId, property: Property) -> bool
+  ! RenderError {
+  return match &engine.get(style, property) {
+    Option<ComputedValue>.Some { value } => match &engine.values.get(value.value).* {
+      Value.Keyword { keyword } => keyword == Keyword.Hidden || keyword == Keyword.Scroll
+      _ => {
+        fail RenderError.InvalidGeometry
+      }
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
+// The static renderer has no scrolling mechanism: SVG2 auto must be visible.
+// Overflow clips physical extents; legacy clip rectangles are user-space values.
+// These mappings contain only positive scale/translation, never a CSS transform.
+pub effect fn clipping(
+  engine: &Engine<'_>,
+  style: StyleId,
+  physical: Rect,
+  mapping: Transform,
+) -> Option<Clip>
+  ! RenderError {
+  // Engine already performs CSS computed-value cross-axis coupling. SVG's
+  // non-scrolling auto behavior applies afterward, independently per axis.
+  let clipX = run clipsAxis(engine, style, Property.OverflowX)
+  let clipY = run clipsAxis(engine, style, Property.OverflowY)
+  let mut clip = if clipX || clipY {
+    Option<Clip>.Some { value: Clip { rectangle: physical, x: clipX, y: clipY } }
+  } else {
+    Option<Clip>.None
+  }
+  match &engine.get(style, Property.Clip) {
+    Option<ComputedValue>.Some { value } => match &engine.values.get(value.value).* {
+      Value.Effect { value: effectValue } => match &effectValue {
+        EffectValue.Clip { edges } => {
+          // Auto edges use viewport bounds, even with nonzero viewBox minima
+          // or meet letterboxing. Explicit lengths remain in child user space.
+          let left = match &edges[3] {
+            Option<ExprId>.Some { value: expression } => mapping.dx
+              + mapping.xx * edge(engine, Option<ExprId>.Some { value: expression }, 0.0)
+            _ => physical.xMin
+          }
+          let top = match &edges[0] {
+            Option<ExprId>.Some { value: expression } => mapping.dy
+              + mapping.yy * edge(engine, Option<ExprId>.Some { value: expression }, 0.0)
+            _ => physical.yMin
+          }
+          let right = match &edges[1] {
+            Option<ExprId>.Some { value: expression } => mapping.dx
+              + mapping.xx * edge(engine, Option<ExprId>.Some { value: expression }, 0.0)
+            _ => physical.xMax
+          }
+          let bottom = match &edges[2] {
+            Option<ExprId>.Some { value: expression } => mapping.dy
+              + mapping.yy * edge(engine, Option<ExprId>.Some { value: expression }, 0.0)
+            _ => physical.yMax
+          }
+          if !f64.isFinite(left) || !f64.isFinite(top) || !f64.isFinite(right)
+            || !f64.isFinite(bottom) {
+            fail RenderError.InvalidGeometry
+          }
+          let mut x = left
+          let mut y = top
+          let mut r = right
+          let mut b = bottom
+          if clipX {
+            x = f64.max(x, physical.xMin)
+            r = f64.min(r, physical.xMax)
+          }
+          if clipY {
+            y = f64.max(y, physical.yMin)
+            b = f64.min(b, physical.yMax)
+          }
+
+          // Legacy clip constrains both axes even if overflow constrains one.
+          // Never use Rect.intersection's None to represent an empty clip.
+          clip = Option<Clip>.Some {
+            value: Clip {
+              rectangle: run rectangle(x, y, f64.max(0.0, r - x), f64.max(0.0, b - y)),
+              x: true,
+              y: true,
+            }
+          }
+        }
+        _ => {}
+      }
+      _ => {}
+    }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+  return clip
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#UseLayout
+// Append this to the RIGHT of the use element's CSS transform, not to children.
+pub effect fn useTranslation(engine: &Engine<'_>, style: StyleId, parentViewport: Rect) -> Transform
+  ! RenderError {
+  if !isValidRect(parentViewport) {
+    fail RenderError.InvalidGeometry
+  }
+  return Transform.translation(
+    Vector.new(
+      run coordinate(engine, style, Property.X, parentViewport.width()),
+      run coordinate(engine, style, Property.Y, parentViewport.height()),
+    ),
+  )
+}
+
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#EstablishingANewSVGViewport
+// https://www.w3.org/TR/2018/CR-SVG2-20181004/struct.html#SymbolElement
+// instanceHost is Some ONLY on the direct instance root, never its descendants.
+// For foreignObject, pass user as the containing-block dimensions when entering
+// its nested svg; do not treat arbitrary foreignObject children as SVG graphics.
+pub effect fn nested(
+  metadata: &Metadata,
+  engine: &mut Engine<'_>,
+  style: StyleId,
+  parentViewport: Rect,
+  instanceHost: Option<StyleId>,
+) -> Viewport
+  ! CssError | RenderError | OutOfMemoryError
+  ? &mut Allocator {
+  let symbol = metadata.kind == ElementKind.Symbol
+  let foreign = metadata.kind == ElementKind.ForeignObject
+  if !isValidRect(parentViewport) {
+    fail RenderError.InvalidGeometry
+  }
+  let x = run coordinate(&engine.*, style, Property.X, parentViewport.width())
+  let y = run coordinate(&engine.*, style, Property.Y, parentViewport.height())
+  let host = if foreign {
+    Option<StyleId>.None
+  } else {
+    instanceHost
+  }
+  let w = run dimension(
+    &engine.*,
+    style,
+    host,
+    Property.Width,
+    parentViewport.width(),
+    if foreign {
+      0.0
+    } else {
+      parentViewport.width()
+    },
+  )
+  let h = run dimension(
+    &engine.*,
+    style,
+    host,
+    Property.Height,
+    parentViewport.height(),
+    if foreign {
+      0.0
+    } else {
+      parentViewport.height()
+    },
+  )
+  let mut user = run rectangle(0.0, 0.0, w, h)
+  let mut local = Transform.identity()
+  let mut disabled = w == 0.0 || h == 0.0
+  if symbol {
+    match &instanceHost {
+      Option<StyleId>.None => {
+        disabled = true
+      }
+      _ => {}
+    }
+  }
+  if !foreign {
+    match &metadata.viewBox {
+      Option<Rect>.Some { value: box } => {
+        user = box
+        disabled = disabled || isEmptyRect(box)
+        if !disabled {
+          local = match &svg.viewportWithAspectRatio(box, w, h, metadata.aspectRatio) {
+            Option<Transform>.Some { value } => value
+            _ => {
+              fail RenderError.InvalidGeometry
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+  let mut shiftX = 0.0
+  let mut shiftY = 0.0
+  if symbol && !disabled {
+    match &run reference(metadata.refX, &mut engine.*, style, user.width()) {
+      Option<f64>.Some { value } => {
+        shiftX = local.xx * value + local.dx
+      }
+      _ => {}
+    }
+    match &run reference(metadata.refY, &mut engine.*, style, user.height()) {
+      Option<f64>.Some { value } => {
+        shiftY = local.yy * value + local.dy
+      }
+      _ => {}
+    }
+  }
+  let physical = run rectangle(x - shiftX, y - shiftY, w, h)
+  let mapping = Transform.translation(Vector.new(physical.xMin, physical.yMin)) * local
+  if !mapping.isFinite() {
+    fail RenderError.InvalidGeometry
+  }
+  let clip = run clipping(&engine.*, style, physical, mapping)
+  return Viewport {
+    user: user,
+    mapping: mapping,
+    physical: physical,
+    clip: clip,
+    disabled: disabled,
+    establishesSvgViewport: !foreign,
+  }
+}

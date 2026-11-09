@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <filter id="f" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><feFlood flood-color="green"/><feComposite in2="SourceGraphic" operator="in"/></filter><circle cx="40" cy="40" r="25" fill="blue" filter="url(#f)"/>
+</svg>

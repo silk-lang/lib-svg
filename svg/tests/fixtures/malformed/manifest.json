@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "suite": "own",
+  "mode": "malformed",
+  "cases": [
+    {
+      "id": "xml-mismatched-close",
+      "input": "inputs/xml-mismatched-close.svg",
+      "status": "pass",
+      "reason": "A mismatched end tag is not well-formed XML. The CLI must reject with exit 1 and no PNG, not crash.",
+      "spec": "https://www.w3.org/TR/xml/#sec-well-formed",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "xml-duplicate-attribute",
+      "input": "inputs/xml-duplicate-attribute.svg",
+      "status": "pass",
+      "reason": "Duplicate attribute names violate XML well-formedness; CLI rejection must be exit 1 without output.",
+      "spec": "https://www.w3.org/TR/xml/#uniqattspec",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "xml-truncated",
+      "input": "inputs/xml-truncated.svg",
+      "status": "pass",
+      "reason": "Truncated start tag/document is not well-formed XML and must not produce a partial PNG.",
+      "spec": "https://www.w3.org/TR/xml/#sec-well-formed",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "oversized-output",
+      "input": "inputs/oversized-output.svg",
+      "status": "pass",
+      "reason": "The viewport dimensions request an unallocatable output. This is a renderer resource-limit policy smoke test, not a claim that SVG forbids large viewports; CLI exit 1 and no output are required.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/coords.html#ViewportSpace",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "path-incomplete-coordinate",
+      "input": "inputs/path-incomplete-coordinate.svg",
+      "references": [
+        {
+          "path": "references/path-prefix.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Render all complete segments before the first malformed path command/coordinate, stop processing the invalid suffix, and implicitly close the prefix for filling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathDataErrorHandling",
+      "tolerance": {},
+      "exit_code": 0,
+      "output_present": true
+    },
+    {
+      "id": "path-unknown-command",
+      "input": "inputs/path-unknown-command.svg",
+      "references": [
+        {
+          "path": "references/path-prefix.svg",
+          "relation": "=="
+        }
+      ],
+      "status": "pass",
+      "reason": "Render all complete segments before the first malformed path command/coordinate, stop processing the invalid suffix, and implicitly close the prefix for filling.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathDataErrorHandling",
+      "tolerance": {},
+      "exit_code": 0,
+      "output_present": true
+    },
+    {
+      "id": "path-length-rounded-period",
+      "input": "inputs/path-length-rounded-period.svg",
+      "status": "pass",
+      "reason": "The binary64 coefficient of (2^53+1) times an infinite calibration scale is uncertifiable. Explicit geometry-limit rejection is required instead of silently discarding the residual and painting an incorrect solid line; the SVG itself is valid.",
+      "spec": "https://www.w3.org/TR/2018/CR-SVG2-20181004/paths.html#PathLengthAttribute",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "gzip-bad-crc",
+      "input": "inputs/gzip-bad-crc.svgz",
+      "status": "pass",
+      "reason": "Malformed compression must fail without producing a partial PNG.",
+      "spec": "https://www.rfc-editor.org/rfc/rfc1952.html#section-2.3.1",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "gzip-truncated",
+      "input": "inputs/gzip-truncated.svgz",
+      "status": "pass",
+      "reason": "Malformed compression must fail without producing a partial PNG.",
+      "spec": "https://www.rfc-editor.org/rfc/rfc1952.html#section-2.3.1",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    },
+    {
+      "id": "zlib-bad-adler",
+      "input": "inputs/zlib-bad-adler.svgz",
+      "status": "pass",
+      "reason": "Malformed compression must fail without producing a partial PNG.",
+      "spec": "https://www.rfc-editor.org/rfc/rfc1950.html#section-2.2",
+      "tolerance": {},
+      "exit_code": 1,
+      "output_present": false
+    }
+  ]
+}
