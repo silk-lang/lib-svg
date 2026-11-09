@@ -7,6 +7,6 @@ kind = "library"
 exports = ["program", "execute"]
 
 [dependencies]
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "14fe5d98e7789eda537a2b59955985a0ea0f9e9e", path = "graphics/geometry", package = "graphics-geometry" }
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "14fe5d98e7789eda537a2b59955985a0ea0f9e9e", path = "graphics/codec", package = "graphics-codec" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "14fe5d98e7789eda537a2b59955985a0ea0f9e9e", path = "graphics/vector", package = "graphics-vector" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "89b0d4c417d5171c9780d913768edd82e5a17544", path = "graphics/geometry", package = "graphics-geometry" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "89b0d4c417d5171c9780d913768edd82e5a17544", path = "graphics/codec", package = "graphics-codec" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "89b0d4c417d5171c9780d913768edd82e5a17544", path = "graphics/vector", package = "graphics-vector" }
