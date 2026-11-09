@@ -47,7 +47,7 @@ belong to the pinned graphics/native packages and arrive through Silk fetching.
 
 ## Prerequisites
 
-- Silk **0.1.0-dev.61+91f335268900**, LLVM **22.1.8**, with `SILK_CLANG` an absolute
+- Silk **0.1.0-dev.63+657e3c900f65**, LLVM **22.1.8**, with `SILK_CLANG` an absolute
   path to its Clang executable. `SILK` may select a compiler executable.
 - Node **22 or newer** and `npm ci` for repository-internal tooling. No Python is
   used by builds, normal tests, corpus fetching, conformance or benchmarks.

@@ -2,12 +2,12 @@
 name = "svg-raster"
 description = "CPU execution of backend-neutral SVG display lists"
 version = "0.1.0"
-silk-version = "0.1.0-dev.61+91f335268900"
+silk-version = "0.1.0-dev.63+657e3c900f65"
 kind = "library"
 exports = ["canvas", "cpu", "lower"]
 
 [dependencies]
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "89b0d4c417d5171c9780d913768edd82e5a17544", path = "graphics/geometry", package = "graphics-geometry" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "b1093a18d6333137c9ede3feef8f548790396fdd", path = "graphics/geometry", package = "graphics-geometry" }
 svg_core = { path = "..", package = "svg" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "89b0d4c417d5171c9780d913768edd82e5a17544", path = "graphics/vector", package = "graphics-vector" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "b1093a18d6333137c9ede3feef8f548790396fdd", path = "graphics/vector", package = "graphics-vector" }
 svg_filters = { path = "../filters", package = "svg-filters" }
