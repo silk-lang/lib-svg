@@ -34,7 +34,7 @@ jobs:
       - name: Bootstrap pinned Silk
         run: node scripts/install-silk.mjs
       - name: Fetch exact dependency revisions serially
-        run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+        run: silk check --manifest-path svg/gpu/tests/silk.toml
       - name: Prepare LLVM and lavapipe
         run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs" --linux-gpu
       - name: Install corpus fonts
@@ -60,7 +60,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/install-silk.mjs
-      - run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+      - run: silk check --manifest-path svg/gpu/tests/silk.toml
       - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
       - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -87,7 +87,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/install-silk.mjs
-      - run: silk check --manifest-path svg/gpu/tests/silk.toml --target wasm32-unknown-unknown
+      - run: silk check --manifest-path svg/gpu/tests/silk.toml
       - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
       - name: Install recorded Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
