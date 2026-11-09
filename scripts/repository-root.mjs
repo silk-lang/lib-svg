@@ -21,7 +21,7 @@ export function repositoryRoot(name) {
   }
   if (revisions.size !== 1) throw new Error(`Expected one ${name} revision, got ${[...revisions]}`);
   const directory = resolve(process.env.SILK_HOME || resolve(homedir(), '.silk'), 'git', [...revisions][0]);
-  if (!existsSync(resolve(directory, 'silk.toml'))) throw new Error(`Missing fetched ${name} payload: run silk check --manifest-path svg/gpu/tests/silk.toml first`);
+  if (!existsSync(resolve(directory, 'silk.toml'))) throw new Error(`Missing fetched ${name} payload: run silk check --manifest-path modules/gpu/tests/silk.toml first`);
   return directory;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) console.log(repositoryRoot(process.argv[2] || 'lib-native'));

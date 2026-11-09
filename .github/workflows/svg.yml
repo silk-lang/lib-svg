@@ -28,19 +28,19 @@ jobs:
           path: |
             .cache
             ~/.silk
-            svg/.cache
-            svg/tests/.cache
-          key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock.json', '**/silk.toml', 'svg/*.lock.json', 'svg/tests/suites.lock.json') }}
+            modules/.cache
+            modules/tests/.cache
+          key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock.json', '**/silk.toml', 'modules/*.lock.json', 'modules/tests/suites.lock.json') }}
       - name: Bootstrap pinned Silk
         run: node scripts/install-silk.mjs
       - name: Fetch exact dependency revisions serially
-        run: silk check --manifest-path svg/gpu/tests/silk.toml
+        run: silk check --manifest-path modules/gpu/tests/silk.toml
       - name: Prepare LLVM and lavapipe
         run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs" --linux-gpu
       - name: Install corpus fonts
         run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
-      - run: node svg/scripts/check
-      - run: node svg/scripts/test-gpu
+      - run: node modules/scripts/check
+      - run: node modules/scripts/test-gpu
       - run: node scripts/check-wasm.mjs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -60,13 +60,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/install-silk.mjs
-      - run: silk check --manifest-path svg/gpu/tests/silk.toml
+      - run: silk check --manifest-path modules/gpu/tests/silk.toml
       - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
       - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: svg/tests/.cache/suites
-          key: svg-conformance-${{ hashFiles('svg/tests/suites.lock.json') }}
+          path: modules/tests/.cache/suites
+          key: svg-conformance-${{ hashFiles('modules/tests/suites.lock.json') }}
       - run: node scripts/conformance.mjs
       - uses: actions/upload-artifact@v4
         if: always()
@@ -87,13 +87,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/install-silk.mjs
-      - run: silk check --manifest-path svg/gpu/tests/silk.toml
+      - run: silk check --manifest-path modules/gpu/tests/silk.toml
       - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
       - name: Install recorded Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
-      - run: silk build --release --manifest-path svg/bench/silk.toml
-      - run: node svg/scripts/rust-bench/build
-      - run: node svg/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+      - run: silk build --release --manifest-path modules/bench/silk.toml
+      - run: node modules/scripts/rust-bench/build
+      - run: node modules/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -1,5 +1,5 @@
 //! Internal compatibility coverage retained from nonstd text/xml/src/tests.silk.
-//! Normative XML and namespace cases; URLs are pinned by svg/specs.lock.json.
+//! Normative XML and namespace cases; URLs are pinned by modules/specs.lock.json.
 import silk.xml.document {
   XmlDocument,
   XmlNodeId,

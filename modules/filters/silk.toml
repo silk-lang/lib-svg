@@ -1,0 +1,12 @@
+[package]
+name = "svg-filters"
+description = "The SVG filter graph and its execution"
+version = "0.1.0"
+silk-version = "0.1.0-dev.63+657e3c900f65"
+kind = "library"
+exports = ["program", "execute"]
+
+[dependencies]
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3e4532ee810f7b28d6eb6c7331809de81cdcbc7e", path = "modules/geometry", package = "graphics-geometry" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3e4532ee810f7b28d6eb6c7331809de81cdcbc7e", path = "modules/codec", package = "graphics-codec" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3e4532ee810f7b28d6eb6c7331809de81cdcbc7e", path = "modules/vector", package = "graphics-vector" }

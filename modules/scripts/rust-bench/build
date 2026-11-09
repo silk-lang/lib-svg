@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+// Explicit developer-only Rust build. Resolve from the pinned upstream lock,
+// reject every unpinned dependency before compiling, then build locked/release.
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'smol-toml';
+import { run } from '../../../scripts/internal.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(here, '../../..');
+const revision = '91455ee06d08ac2bfeab2b035ed2cfbfd0a68614';
+const lockHash = 'ce2554b92b74fe4a4f16b7f06af35e9739132bf9cb407cde0e22137c86060227';
+const source = `git+https://github.com/linebender/resvg?rev=${revision}#${revision}`;
+try {
+  const suite = JSON.parse(readFileSync(join(root, 'modules/tests/suites.lock.json'), 'utf8'));
+  if (suite.suites.resvg.revision !== revision) throw new Error('resvg suite pin changed; update the benchmark pin and upstream lock together');
+  const upstreamBytes = readFileSync(join(here, 'upstream.Cargo.lock'));
+  if (createHash('sha256').update(upstreamBytes).digest('hex') !== lockHash) throw new Error('upstream Cargo.lock does not match its pinned source');
+  const upstream = parse(upstreamBytes.toString('utf8'));
+  const lock = join(here, 'Cargo.lock');
+  if (!existsSync(lock)) {
+    const blocks = upstreamBytes.toString('utf8').split('[[package]]');
+    for (let index = 1; index < blocks.length; index++) {
+      const pkg = parse(blocks[index]);
+      if (['resvg', 'usvg'].includes(pkg.name) && !pkg.source) {
+        blocks[index] = blocks[index].replace(/^(version = .*)$/m, `$1\nsource = "${source}"`);
+      }
+    }
+    writeFileSync(lock, blocks.join('[[package]]'));
+  }
+  const cargo = process.env.CARGO || 'cargo';
+  await run(cargo, ['metadata', '--format-version', '1', '--manifest-path', join(here, 'Cargo.toml')], { stdio: ['inherit', 'ignore', 'inherit'] });
+  const key = pkg => JSON.stringify([pkg.name, pkg.version, pkg.source ?? null, pkg.checksum ?? null]);
+  const allowed = new Set(upstream.package.filter(pkg => pkg.source).map(key));
+  for (const pkg of parse(readFileSync(lock, 'utf8')).package) {
+    if (pkg.name === 'svg-reference-bench' && !pkg.source) continue;
+    if (['resvg', 'usvg'].includes(pkg.name) && pkg.source === source && pkg.version === '0.49.0') continue;
+    if (!allowed.has(key(pkg))) throw new Error(`refusing unpinned dependency ${key(pkg)}; remove the generated Cargo.lock and retry`);
+  }
+  await run(cargo, ['build', '--release', '--locked', '--manifest-path', join(here, 'Cargo.toml'), '--target-dir', join(here, 'target')]);
+  console.log(join(here, 'target/release/svg-reference-bench'));
+} catch (error) { console.error(`rust-bench/build: ${error.message}`); process.exitCode = 1; }

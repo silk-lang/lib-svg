@@ -4,28 +4,28 @@ SVG 1.1 / SVG 2 parsing, styling, layout and rendering for Silk. This repository
 was extracted from `silk-lang/nonstd` revision
 `7d6c3693a9ad1fec24127985626ab4224f9f1995`; it retains the complete SVG sources,
 unit tests, reviewed reference corpus, fonts, specifications and benchmark history.
-[Rendering coverage](svg/README.md), [specification decisions](svg/SPECIFICATIONS.md)
-and [remaining limitations](svg/LIMITATIONS.md) distinguish implemented behavior
+[Rendering coverage](modules/README.md), [specification decisions](modules/SPECIFICATIONS.md)
+and [remaining limitations](modules/LIMITATIONS.md) distinguish implemented behavior
 from known failures. Extraction does not promote known failures to passes.
 
 ## Packages and support boundary
 
-Public libraries retain their package names and paths:
+Public libraries live under `modules/` and retain their package names:
 
 | Path | Package |
 | --- | --- |
-| `svg` | `svg` |
-| `svg/render` | `svg-render` |
-| `svg/raster` | `svg-raster` |
-| `svg/filters` | `svg-filters` |
-| `svg/text` | `svg-text` |
-| `svg/gpu` | `svg-gpu` |
+| `modules` | `svg` |
+| `modules/render` | `svg-render` |
+| `modules/raster` | `svg-raster` |
+| `modules/filters` | `svg-filters` |
+| `modules/text` | `svg-text` |
+| `modules/gpu` | `svg-gpu` |
 
 The root `svg-render-test-harness` executable is internal verification tooling,
 not an installed product CLI or stable application interface. It retains native
 file rendering, resource confinement, viewport, font, language, animation and
-fragment options. `svg/tools/wasm` retains the wasm utility and JavaScript host.
-`svg/tests`, `svg/gpu/tests`, `svg/bench`, `xml-compatibility` and `xml-conformance`
+fragment options. `modules/tools/wasm` retains the wasm utility and JavaScript host.
+`modules/tests`, `modules/gpu/tests`, `modules/bench`, `xml-compatibility` and `xml-conformance`
 are internal tests, corpus and diagnostic programs, not public library APIs.
 
 XML is the installed compiler's **`silk.xml`** (`XmlDocument`, `XmlNodeId`, etc.).
@@ -74,8 +74,8 @@ Run from this repository root, after setting `SILK_CLANG` and installing Silk:
 
 ```sh
 npm ci
-node svg/scripts/check
-node svg/scripts/test-gpu
+node modules/scripts/check
+node modules/scripts/test-gpu
 node scripts/check-wasm.mjs
 node scripts/check-xmlconf.mjs --report build/svg/xmlconf.json
 ```
@@ -98,22 +98,22 @@ npm test
 # All reviewed external SVG suites plus XML, with per-suite original viewports/fonts.
 node scripts/conformance.mjs
 # Explicitly regenerate the locked IDNA table, or verify it without source edits.
-node svg/scripts/generate-idna --fetch
-node svg/scripts/generate-idna --fetch --check
+node modules/scripts/generate-idna --fetch
+node modules/scripts/generate-idna --fetch --check
 # Internal command-line rendering; choose your native target's build directory.
 silk build --release --manifest-path svg-render-test-harness/silk.toml
 build/llvm/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o output.png
 # Wasm utility; prints the module path.
-node svg/scripts/build-wasm
+node modules/scripts/build-wasm
 # Benchmark setup and measurement (not part of the rendering gate).
-silk build --release --manifest-path svg/bench/silk.toml
-node svg/scripts/rust-bench/build
-node svg/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
-node svg/scripts/ab /path/to/old/svg-bench /path/to/new/svg-bench --output build/svg/ab.json
+silk build --release --manifest-path modules/bench/silk.toml
+node modules/scripts/rust-bench/build
+node modules/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+node modules/scripts/ab /path/to/old/svg-bench /path/to/new/svg-bench --output build/svg/ab.json
 ```
 
-[Testing](svg/docs/testing.md) documents individual fetch/reftest commands and
-expectation semantics. [Performance](svg/docs/performance.md) preserves historical
+[Testing](modules/docs/testing.md) documents individual fetch/reftest commands and
+expectation semantics. [Performance](modules/docs/performance.md) preserves historical
 measurements and specialized compressed/image/sampling/nested/orientation workflows.
 Reports and downloaded corpora are ignored build/cache artifacts. Full conformance
 and benchmarks run on a schedule or explicit CI dispatch; known pixel differences
@@ -121,7 +121,7 @@ remain explicit reviewed failures, and unexpected passes fail the gate too.
 
 ## Assets and licenses
 
-Committed fixture SVGs, raster payloads and `svg/tests/fonts` are included; normal
+Committed fixture SVGs, raster payloads and `modules/tests/fonts` are included; normal
 builds never regenerate them or depend on UI/example assets. The font directory
 retains each upstream license and provenance. Library licensing remains MIT or
 Apache-2.0; upstream notices are retained in `LICENSE-MIT` and `LICENSE-APACHE`.
@@ -129,7 +129,7 @@ Unicode data embeds its Unicode-3.0 notice. Fetched specifications/test suites k
 their upstream licenses. Tiger is an explicitly fetched AGPL-3.0-or-later benchmark
 input, not a distributed runtime dependency.
 
-Self-contained historical `svg/scripts/*fixtures.py` and `svg-glyph-font.py` are
+Self-contained historical `modules/scripts/*fixtures.py` and `svg-glyph-font.py` are
 optional fixture-authoring tools only. Their committed outputs are used directly;
 Pillow/fontTools are needed only if an author explicitly regenerates those assets.
 They are not invoked by supported build/test/CI paths.

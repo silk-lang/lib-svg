@@ -1,0 +1,14 @@
+[package]
+name = "svg-gpu"
+description = "Draws SVG display lists on the GPU through graphics-gpu-scene"
+version = "0.1.0"
+silk-version = "0.1.0-dev.63+657e3c900f65"
+kind = "library"
+exports = ["scene"]
+
+[dependencies]
+svg_core = { path = "..", package = "svg" }
+svg_raster = { path = "../raster", package = "svg-raster" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3e4532ee810f7b28d6eb6c7331809de81cdcbc7e", path = "modules/vector", package = "graphics-vector" }
+gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3e4532ee810f7b28d6eb6c7331809de81cdcbc7e", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
+webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "2647dff3423cd555b5e6389be4110d8adffcb577", path = "modules/gpu/webgpu", package = "gpu-webgpu" }

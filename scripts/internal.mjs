@@ -27,7 +27,7 @@ export function nativeTarget() {
 export function build(packagePath, { release = false, wasm = false } = {}) {
   const manifest = resolve(root, packagePath, 'silk.toml');
   const target = wasm ? 'wasm32-unknown-unknown' : nativeTarget();
-  const windowsGPU = process.platform === 'win32' && packagePath === 'svg/gpu/tests' && !wasm;
+  const windowsGPU = process.platform === 'win32' && packagePath === 'modules/gpu/tests' && !wasm;
   if (windowsGPU) {
     run(silk, ['check', '--manifest-path', manifest]);
     run('pwsh', ['-NoProfile', '-File', resolve(repositoryRoot('lib-native'), 'scripts/prepare-windows.ps1')]);
