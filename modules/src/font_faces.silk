@@ -1,7 +1,6 @@
 //! @font-face rules (CSS Fonts 4 #font-face-rule): the family, the font sources and the
 //! descriptors that place a downloaded face in font matching.
 import svg_css.tokens { TokenBuffer, TokenRange, Span, Kind, Limits, CssError, insensitive }
-import svg_css.syntax { Declaration }
 import svg_css.syntax
 import svg_fonts.database { Range, FaceStyle }
 import silk.collections.bytes { Bytes }
@@ -190,7 +189,7 @@ effect fn source(buffer: &TokenBuffer, start: usize, end: usize, out: &mut List<
   if let Option<Span>.Some { value } = address(buffer, at, end) {
     let token = &buffer.tokens.asSlice()[at]
     let after = match &token.kind {
-      Kind.Function { name } => token.matching + 1
+      Kind.Function { .. } => token.matching + 1
       _ => at + 1
     }
     let next = skip(buffer, after, end)
@@ -219,7 +218,7 @@ effect fn sources(buffer: &TokenBuffer, range: TokenRange) -> List<Source>
         start = at + 1
         at = at + 1
       }
-      Kind.Function { name } => {
+      Kind.Function { .. } => {
         at = token.matching + 1
       }
       Kind.OpenParen => {
@@ -285,7 +284,7 @@ fn weightValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
     } else {
       Option<f64>.None
     }
-    Kind.Number { value, integer } => if value >= 1.0 && value <= 1000.0 {
+    Kind.Number { value, .. } => if value >= 1.0 && value <= 1000.0 {
       Option<f64>.Some { value: value }
     } else {
       Option<f64>.None
@@ -297,7 +296,7 @@ fn weightValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
 /// A font-width (font-stretch) descriptor value: a keyword or a non-negative percentage.
 fn widthValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
   return match &buffer.tokens.asSlice()[at].kind {
-    Kind.Percentage { value, integer } => if value >= 0.0 {
+    Kind.Percentage { value, .. } => if value >= 0.0 {
       Option<f64>.Some { value: value }
     } else {
       Option<f64>.None
@@ -332,7 +331,7 @@ fn widthValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
 /// An `<angle>` in degrees, within the descriptor's [-90deg, 90deg].
 fn angleValue(buffer: &TokenBuffer, at: usize) -> Option<f64> {
   let degrees = match &buffer.tokens.asSlice()[at].kind {
-    Kind.Dimension { value, integer, unit } => if insensitive(buffer.text(unit), b"deg") {
+    Kind.Dimension { value, unit, .. } => if insensitive(buffer.text(unit), b"deg") {
       value
     } else if insensitive(buffer.text(unit), b"grad") {
       value * 0.9

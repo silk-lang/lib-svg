@@ -54,7 +54,7 @@ effect fn check(tree: &Tree<'_>, selector: &[u8], node: usize, host: usize, expe
       node,
       &mut context,
     ) {
-      Option<Specificity>.Some { value: specificity } => true
+      Option<Specificity>.Some { .. } => true
       _ => false
     }
     _ => {

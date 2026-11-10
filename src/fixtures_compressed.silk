@@ -1,0 +1,284 @@
+//! Independently encode compressed parser vectors and root/reference reftests.
+import fixtures_common { FixtureError }
+import fixtures_common as c
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.deflate { EncodeError }
+import silk.compress.checksum { CompressionChecksum }
+import silk.io.writer { WriterError }
+import silk.json.value { Value, JsonNumber }
+import silk.json.scanner { JsonError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, FileError, Path }
+import silk.text.string { String }
+import silk.num.u8
+
+const PRELUDE: string = "//! SVG 1.1 G.7 #ConformingSVGViewers, RFC 1950 §2.2 and RFC 1952 §2.3.1.\nimport structure { Graph, Options, StructureError, build }\nimport resources { Resolver, DataOnly, Limits as ResourceLimits }\nimport url { Url, UrlError }\nimport silk.core.effect { Effect }\nimport silk.core.result { Result }\nimport silk.mem.allocator { Allocator, OutOfMemoryError }\nimport silk.testing.testing { Testing, AssertionError }\neffect fn source(data: &[u8], maximum: usize) -> Graph ! StructureError | UrlError | OutOfMemoryError ? &mut Allocator {\n  let base = run Url.parseAbsolute(b\"file:///fixtures/input.svgz\")\n  let mut host = DataOnly.make(ResourceLimits.defaults())\n  let mut options = Options.defaults()\n  options.limits.maxTotalBytes = maximum\n  return run build(data, &base, &options) |> Effect.provideMut<Resolver>(&mut host)\n}\neffect fn valid(data: &[u8], documents: usize) -> () ! StructureError | UrlError | OutOfMemoryError | AssertionError<'static> ? &mut Allocator {\n  let graph = run source(data, 67108864)\n  run Testing.expect(graph.documents.length() == documents, \"compressed documents parsed and referenced\")\n}\neffect fn rejects(data: &[u8], maximum: usize, limit: bool) -> () ! AssertionError<'static> ? &mut Allocator {\n  let result = run Effect.result(source(data,maximum))\n  let rejected = match &result {\n    Result<Graph, StructureError | UrlError | OutOfMemoryError>.Success { value } => false\n    Result<Graph, StructureError | UrlError | OutOfMemoryError>.Failure { error } => match &error {\n      StructureError value => if limit { value == StructureError.TooLarge } else { value == StructureError.InvalidXml }\n      _ => false\n    }\n  }\n  run Testing.expect(rejected, \"invalid compression or bounded expansion rejected with the correct error\")\n}\n"
+
+effect fn literal(data: &[u8]) -> String
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let mut result = run String.copy("b\"")
+  let mut i: usize = 0
+  while i < data.length {
+    run result.appendOwned(run c.fmt("\\x{:02x}", &.(data[i])))
+    i = i + 1
+  }
+  run result.append("\"")
+  return move result
+}
+
+effect fn validTest(out: &mut String, name: string, data: &[u8], count: usize) -> ()
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let encoded = run literal(data)
+  run out.appendOwned(
+    run c.fmt(
+      "\ntest effect fn {}() -> () ! StructureError | UrlError | OutOfMemoryError | AssertionError<'static> {{\n  let mut allocator = Allocator.systemAllocatorProvider()\n  run valid({}, {}) |> Effect.provideMut<Allocator>(&mut allocator)\n}}\n",
+      &(name, encoded.view(), count),
+    ),
+  )
+}
+
+effect fn rejectsTest(
+  out: &mut String,
+  name: string,
+  data: &[u8],
+  maximum: usize,
+  limit: bool,
+) -> ()
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let encoded = run literal(data)
+  run out.appendOwned(
+    run c.fmt(
+      "\ntest effect fn {}() -> () ! AssertionError<'static> {{\n  let mut allocator = Allocator.systemAllocatorProvider()\n  run rejects({}, {}, {}) |> Effect.provideMut<Allocator>(&mut allocator)\n}}\n",
+      &(
+        name,
+        encoded.view(),
+        maximum,
+        if limit {
+          "true"
+        } else {
+          "false"
+        }
+      ),
+    ),
+  )
+}
+
+effect fn members(xml: &[u8], split: usize) -> Bytes
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let mut result = run c.compressed(Slice.view<u8>(xml, 0, split), true)
+  let second = run c.compressed(Slice.view<u8>(xml, split, xml.length - split), true)
+  run result.append(second.asSlice())
+  return move result
+}
+
+effect fn parserTests(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | WriterError | FileError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let xml = b"<svg xmlns='http://www.w3.org/2000/svg'><rect id='p' width='2' height='1'/></svg>"
+  let packed = run c.compressed(xml, true)
+  let zlib = run c.compressed(xml, false)
+  let multi = run members(xml, 30)
+  let url = run c.dataUrl(packed.asSlice(), "image/svg+xml")
+  let external = run c.fmt(
+    "<svg xmlns='http://www.w3.org/2000/svg'><use href='{}#p'/></svg>",
+    &.(url.view()),
+  )
+  let mut large = run Bytes.copy(b"<svg xmlns='http://www.w3.org/2000/svg'><!--")
+  let repeated: [u8; 20000] = [65; 20000]
+  run large.append(&repeated)
+  run large.append(b"--><rect id='p' width='2' height='1'/></svg>")
+  let largePacked = run c.compressed(large.asSlice(), true)
+  let mut source = run String.copy(PRELUDE)
+  run validTest(&mut source, "gzipRoot", packed.asSlice(), 1)
+  run validTest(&mut source, "zlibRoot", zlib.asSlice(), 1)
+  run validTest(&mut source, "gzipMembers", multi.asSlice(), 1)
+  run validTest(&mut source, "compressedDataReference", external.ownedUtf8Bytes(), 2)
+  run validTest(&mut source, "streamingOutputChunks", largePacked.asSlice(), 1)
+  let mut bad = run Bytes.copy(packed.asSlice())
+  let crcOffset = bad.length() - 8
+  let changedCrc = u8.bitXor(bad.asSlice()[crcOffset], 1)
+  c.setByte(&mut bad, crcOffset, changedCrc)
+  run rejectsTest(&mut source, "badCrc", bad.asSlice(), 67108864, false)
+  run rejectsTest(
+    &mut source,
+    "truncatedTrailer",
+    Slice.view<u8>(packed.asSlice(), 0, packed.length() - 1),
+    67108864,
+    false,
+  )
+  let mut trailing = run Bytes.copy(packed.asSlice())
+  run trailing.append(b"x")
+  run rejectsTest(&mut source, "trailingGarbage", trailing.asSlice(), 67108864, false)
+  run rejectsTest(
+    &mut source,
+    "expansionLimit",
+    packed.asSlice(),
+    packed.length() + xml.length - 1,
+    true,
+  )
+  run rejectsTest(
+    &mut source,
+    "externalExpansionLimit",
+    external.ownedUtf8Bytes(),
+    external.ownedByteLength() + packed.length() + xml.length - 1,
+    true,
+  )
+  let encoded = run literal(packed.asSlice())
+  run source.appendOwned(
+    run c.fmt(
+      "\ntest effect fn exactExpansionBudget() -> () ! StructureError | UrlError | OutOfMemoryError | AssertionError<'static> {{\n  let mut allocator = Allocator.systemAllocatorProvider()\n  let graph = run source({}, {}) |> Effect.provideMut<Allocator>(&mut allocator)\n  run Testing.expect(graph.documents.length() == 1, \"exact encoded plus decoded budget accepted\")\n}}\n",
+      &(encoded.view(), packed.length() + xml.length),
+    ),
+  )
+  let mut optional = run Bytes.copy(
+    b"\x1f\x8b\x08\x1e\x00\x00\x00\x00\x00\xff\x03\x00abcinput.svg\x00original fixture\x00",
+  )
+  let checksum = CompressionChecksum.crc32(optional.asSlice()) % 65536
+  let mut checksumBytes = Bytes.make()
+  run c.le32(&mut checksumBytes, checksum)
+  run optional.append(Slice.view<u8>(checksumBytes.asSlice(), 0, 2))
+  run optional.append(Slice.view<u8>(packed.asSlice(), 10, packed.length() - 10))
+  run validTest(&mut source, "gzipOptionalHeader", optional.asSlice(), 1)
+  let mut utf16 = run Bytes.copy(b"\xff\xfe")
+  let mut i: usize = 0
+  while i < xml.length {
+    run utf16.append(&[xml[i], 0])
+    i = i + 1
+  }
+  let utf16Packed = run c.compressed(utf16.asSlice(), true)
+  run validTest(&mut source, "gzipUtf16", utf16Packed.asSlice(), 1)
+  run c.text(root, "modules/src/compressed_document_tests.silk", source.view())
+}
+
+effect fn asset(
+  root: &Path,
+  cases: &mut List<Value>,
+  category: string,
+  name: string,
+  data: &[u8],
+  malformed: bool,
+) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let filename = run c.fmt("modules/tests/fixtures/{}/inputs/{}", &(category, name))
+  run c.write(root, filename.view(), data)
+  let suffix: usize = if String.endsWith(name, ".svgz") {
+    5
+  } else {
+    4
+  }
+  let stem = String.slice(name, 0, String.byteLength(name) - suffix)
+  let input = run c.fmt("inputs/{}", &.(name))
+  let reason = if malformed {
+    "Malformed compression must fail without producing a partial PNG."
+  } else {
+    "Compressed root or referenced SVG decodes before XML parsing and renders identically to its uncompressed source."
+  }
+  let spec = if !malformed {
+    "https://www.w3.org/TR/2011/REC-SVG11-20110816/conform.html#ConformingSVGViewers"
+  } else if String.startsWith(name, "zlib") {
+    "https://www.rfc-editor.org/rfc/rfc1950.html#section-2.2"
+  } else {
+    "https://www.rfc-editor.org/rfc/rfc1952.html#section-2.3.1"
+  }
+  let record = run c.caseRecord(
+    stem,
+    input.view(),
+    if malformed {
+      ""
+    } else {
+      "references/compressed-document.svg"
+    },
+    reason,
+    spec,
+  )
+  if malformed {
+    match move record {
+      Value.Object { entries } => {
+        let mut fields = move entries
+        run c.member(
+          &mut fields,
+          "exit_code",
+          Value.Number { value: JsonNumber.Integer { value: 1 } },
+        )
+        run c.member(&mut fields, "output_present", Value.Bool { value: false })
+        run cases.append(Value.Object { entries: move fields })
+      }
+      _ => {}
+    }
+  } else {
+    run cases.append(move record)
+  }
+}
+
+pub effect fn compressed(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | WriterError | FileError | FixtureError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  run parserTests(root)
+  let xml = b"<svg xmlns='http://www.w3.org/2000/svg' width='32' height='16'><g id='tile'><rect width='16' height='16' fill='red'/><rect x='16' width='16' height='16' fill='blue'/></g></svg>"
+  let packed = run c.compressed(xml, true)
+  let zlib = run c.compressed(xml, false)
+  let multi = run members(xml, 90)
+  let url = run c.dataUrl(packed.asSlice(), "image/svg+xml")
+  let external = run c.fmt(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='32' height='16'><use href='{}#tile'/></svg>",
+    &.(url.view()),
+  )
+  run c.write(root, "modules/tests/fixtures/structure/references/compressed-document.svg", xml)
+  let mut cases = List<Value>.make()
+  run asset(root, &mut cases, "structure", "gzip-document.svgz", packed.asSlice(), false)
+  run asset(root, &mut cases, "structure", "zlib-document.svgz", zlib.asSlice(), false)
+  run asset(root, &mut cases, "structure", "gzip-members.svgz", multi.asSlice(), false)
+  run asset(
+    root,
+    &mut cases,
+    "structure",
+    "gzip-external-use.svg",
+    b"<svg xmlns='http://www.w3.org/2000/svg' width='32' height='16'><use href='gzip-document.svgz#tile'/></svg>",
+    false,
+  )
+  run asset(root, &mut cases, "structure", "gzip-data-use.svg", external.ownedUtf8Bytes(), false)
+  run c.saveManifest(
+    root,
+    "modules/tests/fixtures/structure/manifest.json",
+    cases.asSlice(),
+    "",
+    false,
+    false,
+    false,
+  )
+  let mut badCrc = run Bytes.copy(packed.asSlice())
+  let offset = badCrc.length() - 8
+  let changed = u8.bitXor(badCrc.asSlice()[offset], 1)
+  c.setByte(&mut badCrc, offset, changed)
+  let mut badAdler = run Bytes.copy(zlib.asSlice())
+  let adlerOffset = badAdler.length() - 1
+  let changedAdler = u8.bitXor(badAdler.asSlice()[adlerOffset], 1)
+  c.setByte(&mut badAdler, adlerOffset, changedAdler)
+  let mut badCases = List<Value>.make()
+  run asset(root, &mut badCases, "malformed", "gzip-bad-crc.svgz", badCrc.asSlice(), true)
+  run asset(
+    root,
+    &mut badCases,
+    "malformed",
+    "gzip-truncated.svgz",
+    Slice.view<u8>(packed.asSlice(), 0, packed.length() - 1),
+    true,
+  )
+  run asset(root, &mut badCases, "malformed", "zlib-bad-adler.svgz", badAdler.asSlice(), true)
+  run c.saveManifest(
+    root,
+    "modules/tests/fixtures/malformed/manifest.json",
+    badCases.asSlice(),
+    "",
+    false,
+    false,
+    false,
+  )
+}

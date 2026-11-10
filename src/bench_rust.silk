@@ -1,0 +1,199 @@
+//! Developer-only reference build: authenticate upstream lock and reject unpinned packages.
+import bench_support as B
+import task_support as Support
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.toml.value { Toml, Value }
+import silk.toml.scanner { TomlError }
+
+pub fn revision() -> string<'static> {
+  return "91455ee06d08ac2bfeab2b035ed2cfbfd0a68614"
+}
+
+fn upstreamHash() -> string<'static> {
+  return "ce2554b92b74fe4a4f16b7f06af35e9739132bf9cb407cde0e22137c86060227"
+}
+
+fn source() -> string<'static> {
+  return "git+https://github.com/linebender/resvg?rev=91455ee06d08ac2bfeab2b035ed2cfbfd0a68614#91455ee06d08ac2bfeab2b035ed2cfbfd0a68614"
+}
+
+effect fn parse(data: &[u8]) -> Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move run Effect.result(Toml.parse(data)) {
+    Result<Value, TomlError | OutOfMemoryError>.Success { value } => {
+      return move value
+    }
+    Result<Value, TomlError | OutOfMemoryError>.Failure { error } => match move error {
+      OutOfMemoryError value => {
+        fail move value
+      }
+      TomlError value => {
+        drop value
+        run Task.abort("invalid Cargo.lock TOML")
+      }
+    }
+  }
+}
+
+fn text<'a>(package: &'a Value, key: string) -> string<'a> {
+  return Toml.field(package, key)
+    |> Toml.asString
+    |> Option<string<'a>>.unwrapOr("")
+}
+
+effect fn packages<'a>(lock: &'a Value) -> &'a Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move Toml.field(lock, "package") {
+    Option<&'a Value>.Some { value } => {
+      return value
+    }
+    _ => run Task.abort("Cargo.lock has no package array")
+  }
+}
+
+fn samePackage(a: &Value, b: &Value) -> bool {
+  return text(a, "name") == text(b, "name") && text(a, "version") == text(b, "version")
+    && text(a, "source") == text(b, "source")
+    && text(a, "checksum") == text(b, "checksum")
+}
+
+pub effect fn validateLock(lock: &Value, upstream: &Value) -> ()
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let dependencies = run packages(lock)
+  let allowed = run packages(upstream)
+  let mut i: usize = 0
+  while let Option<&Value>.Some { value: package } = Toml.item(dependencies, i) {
+    i = i + 1
+    let name = text(package, "name")
+    let origin = text(package, "source")
+    if name == "svg-reference-bench" && !Toml.field(package, "source").isSome() {
+      continue
+    }
+    if (name == "resvg" || name == "usvg") && origin == source()
+      && text(package, "version") == "0.49.0" {
+      continue
+    }
+    let mut pinned = false
+    let mut j: usize = 0
+    while let Option<&Value>.Some { value: candidate } = Toml.item(allowed, j) {
+      if text(candidate, "source") != "" && samePackage(candidate, package) {
+        pinned = true
+        break
+      }
+      j = j + 1
+    }
+    if !pinned {
+      run Task.abort(
+        "refusing unpinned Cargo dependency; remove the generated Cargo.lock and retry",
+      )
+    }
+  }
+}
+
+effect fn seeded(upstream: string) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut blocks = String.split(upstream, "[[package]]")
+  let mut output = String.make()
+  let mut first = true
+  while let Option<string>.Some { value: block } = blocks.next() {
+    if first {
+      run output.append(block)
+      first = false
+      continue
+    }
+    run output.append("[[package]]")
+    let package = run parse(String.utf8Bytes(block))
+    let name = text(&package, "name")
+    if (name == "resvg" || name == "usvg") && text(&package, "source") == "" {
+      let mut lines = String.split(block, "\n")
+      let mut firstLine = true
+      while let Option<string>.Some { value: line } = lines.next() {
+        if !firstLine {
+          run output.append("\n")
+        }
+        firstLine = false
+        run output.append(line)
+        if String.startsWith(line, "version = ") {
+          run output.append("\nsource = \"")
+          run output.append(source())
+          run output.append("\"")
+        }
+      }
+    } else {
+      run output.append(block)
+    }
+  }
+  return move output
+}
+
+pub effect fn build() -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let suite = run B.loadJson("modules/tests/suites.lock.json")
+  if (run B.str(run B.field(run B.field(run B.field(&suite, "suites"), "resvg"), "revision")))
+    != revision() {
+    run Task.abort("resvg suite pin changed; update the benchmark pin and upstream lock together")
+  }
+  let upstreamBytes = run B.load("modules/scripts/rust-bench/upstream.Cargo.lock")
+  let digest = run B.hash(upstreamBytes.asSlice())
+  if String.view(&digest) != upstreamHash() {
+    run Task.abort("upstream Cargo.lock does not match its pinned source")
+  }
+  let upstream = run parse(upstreamBytes.asSlice())
+  let lock = run B.path("modules/scripts/rust-bench/Cargo.lock")
+  if !run FileSystem.exists(&lock) {
+    let upstreamText = run B.text(run Bytes.copy(upstreamBytes.asSlice()))
+    let seed = run seeded(String.view(&upstreamText))
+    run FileSystem.writeFile(&lock, String.utf8Bytes(String.view(&seed)))
+  }
+  let cargo = run B.variable("CARGO", "cargo")
+  let manifest = run B.path("modules/scripts/rust-bench/Cargo.toml")
+  let manifestArgument = run B.argument(&manifest)
+  run Task.exec(
+    String.view(&cargo),
+    &["metadata", "--format-version", "1", "--manifest-path", String.view(&manifestArgument)],
+  )
+  let generatedBytes = run FileSystem.readFile(&lock)
+  let generated = run parse(generatedBytes.asSlice())
+  run validateLock(&generated, &upstream)
+  let target = run B.path("modules/scripts/rust-bench/target")
+  let targetArgument = run B.argument(&target)
+  run Task.exec(
+    String.view(&cargo),
+    &[
+      "build",
+      "--release",
+      "--locked",
+      "--manifest-path",
+      String.view(&manifestArgument),
+      "--target-dir",
+      String.view(&targetArgument),
+    ],
+  )
+  let binary = run Path.join(
+    &target,
+    if Support.operatingSystem() == "windows" {
+      "release/svg-reference-bench.exe"
+    } else {
+      "release/svg-reference-bench"
+    },
+  )
+  let mut output = StdoutWriter.make()
+  run Writer.writeString(run B.pathText(&binary)) |> Effect.provideMut<Writer>(&mut output)
+  run Writer.writeString("\n") |> Effect.provideMut<Writer>(&mut output)
+}

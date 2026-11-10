@@ -1,5 +1,26 @@
+[package]
+name = "lib-svg-tasks"
+version = "0.1.0"
+silk-version = "0.1.0-dev.64+8214c402307b"
+kind = "executable"
+source = "src"
+main = "tasks.silk"
+
+[dependencies]
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "816162323e5a08dc4fc7967801ad075b5a305911", path = "modules/codec", package = "graphics-codec" }
+
+[native]
+link = [
+  { static-archive = ".cache/lexbor/lib/liblexbor_static.a", os = ["macos", "linux"] },
+  { search-path = ".cache/lexbor/lib", os = "windows" },
+  { library = "lexbor", mode = "dynamic", os = "windows" },
+  { search-path = ".cache/libarchive/lib", os = "windows" },
+  { library = "archive", mode = "dynamic" },
+]
+
 [workspace]
 members = [
+  "bootstrap",
   "modules",
   "modules/filters",
   "modules/raster",
@@ -14,4 +35,4 @@ members = [
   "xml-compatibility",
   "xml-conformance"
 ]
-silk-version = "0.1.0-dev.63+657e3c900f65"
+silk-version = "0.1.0-dev.64+8214c402307b"

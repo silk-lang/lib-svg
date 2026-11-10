@@ -119,10 +119,10 @@ effect fn paint(engine: &Engine<'_>, style: StyleId, property: Property) -> Pain
     Value.Paint { paint: value } => match &value {
       CssPaint.None => Paint.None
       CssPaint.Color { color: absolute } => solid(absolute)
-      CssPaint.IccColor { color: absolute, icc } => solid(absolute)
-      CssPaint.Server { url, fallback } => match &fallback {
+      CssPaint.IccColor { color: absolute, .. } => solid(absolute)
+      CssPaint.Server { fallback, .. } => match &fallback {
         Fallback.Color { color: absolute } => solid(absolute)
-        Fallback.IccColor { color: absolute, icc } => solid(absolute)
+        Fallback.IccColor { color: absolute, .. } => solid(absolute)
         _ => Paint.None
       }
 
@@ -185,7 +185,7 @@ fn clips(engine: &Engine<'_>, style: StyleId) -> bool {
   return match &engine.get(style, Property.ClipPath) {
     Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
       Value.Effect { value } => match &value {
-        EffectValue.ClipPath { source } => true
+        EffectValue.ClipPath { .. } => true
         _ => false
       }
       _ => false

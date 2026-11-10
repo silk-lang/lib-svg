@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "generator": "workloads.mjs",
-  "generator_sha256": "01bdd3eb967ae285fff97e7c8e727b82c0f01bcd0d044da28f1cd2762a51e9e7",
+  "generator": "../../src/bench_geometry.silk",
+  "generator_sha256": "d2a0f1c26f9f1a8e583a002bf2d017aab71bf2e5cff51c0e842c6e52178e81d9",
   "generated_provenance": "Original deterministic SVG geometry authored for this repository; no imported icon or map data.",
   "workloads": {
     "iconset": {

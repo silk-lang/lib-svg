@@ -1,0 +1,215 @@
+//! Bounded native commands. GNU coreutils timeout is required (gtimeout on macOS;
+//! timeout.exe from MSYS2 on Windows). No shell or scripting interpreter is invoked.
+import bench_support as B
+import task_support as Support
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.system.monotonic_clock { MonotonicClock }
+import silk.system.monotonic_clock_native { OsMonotonicClock }
+import silk.system.system_clock { Instant, SystemClock }
+import silk.text.string { String }
+import silk.num.i64
+
+static if Intrinsic.targetOperatingSystem() != "windows" {
+  import silk.system.subprocess { Subprocess }
+}
+
+pub struct Completed {
+  pub status: i32,
+  pub output: Bytes,
+  pub errors: Bytes,
+  pub wall: f64
+}
+
+pub effect fn locate(program: string) -> Path
+  ! TaskError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  if String.contains(program, "/") || String.contains(program, "\\") {
+    return run B.path(program)
+  }
+  let env = run B.variable("PATH", "")
+  let separator = if Support.operatingSystem() == "windows" {
+    ";"
+  } else {
+    ":"
+  }
+  let mut parts = String.split(String.view(&env), separator)
+  while let Option<string>.Some { value: part } = parts.next() {
+    let mut chosen = part
+    if part == "" {
+      chosen = "."
+    }
+    let directory = run B.path(chosen)
+    let candidate = run Path.join(&directory, program)
+    if run FileSystem.exists(&candidate) {
+      return move candidate
+    }
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      let filename = run B.format("{name}.exe", &.{ name: program })
+      let executable = run Path.join(&directory, String.view(&filename))
+      if run FileSystem.exists(&executable) {
+        return move executable
+      }
+    }
+  }
+  let message = run B.format("executable not found: {program}", &.{ program: program })
+  run Task.abort(String.view(&message))
+}
+
+fn nanos(start: &Instant, end: &Instant) -> f64 {
+  return i64.toF64(
+    (SystemClock.seconds(end) - SystemClock.seconds(start)) * 1000000000
+      + SystemClock.nanoseconds(end)
+      - SystemClock.nanoseconds(start),
+  )
+}
+
+pub effect fn execute(
+  program: string,
+  arguments: &[string],
+  timeout: f64,
+  allowFailure: bool,
+) -> Completed
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let limiterName = run B.variable(
+    "SVG_BENCH_TIMEOUT",
+    if Support.operatingSystem() == "darwin" {
+      "gtimeout"
+    } else {
+      "timeout"
+    },
+  )
+  let limiter = run locate(String.view(&limiterName))
+  let executable = run locate(program)
+  let seconds = run B.format("{seconds}s", &.{ seconds: timeout })
+  let mut request = run ChildProcess.request(&limiter)
+  run ChildProcess.addArgument(&mut request, "--signal=TERM")
+  run ChildProcess.addArgument(&mut request, "--kill-after=1s")
+  run ChildProcess.addArgument(&mut request, String.view(&seconds))
+  let executableArgument = run B.argument(&executable)
+  run ChildProcess.addArgument(&mut request, String.view(&executableArgument))
+  let mut i: usize = 0
+  while i < arguments.length {
+    static if Intrinsic.targetOperatingSystem() == "windows" {
+      let bytes = String.utf8Bytes(arguments[i])
+      if String.startsWith(arguments[i], "/UNC/")
+        || (bytes.length >= 3 && bytes[0] == 47 && bytes[2] == 58) {
+        let path = run B.path(arguments[i])
+        let converted = run B.argument(&path)
+        run ChildProcess.addArgument(&mut request, String.view(&converted))
+      } else {
+        run ChildProcess.addArgument(&mut request, arguments[i])
+      }
+    } else {
+      run ChildProcess.addArgument(&mut request, arguments[i])
+    }
+    i = i + 1
+  }
+  static if Intrinsic.targetOperatingSystem() != "windows" {
+    run Subprocess.inheritEnvironment(&mut request)
+  } else {
+    // MSYS2's native timeout resolves its runtime and child through PATH.
+    let keys = [
+      "PATH",
+      "HOME",
+      "USERPROFILE",
+      "SYSTEMROOT",
+      "TEMP",
+      "TMP",
+      "CARGO_HOME",
+      "RUSTUP_HOME",
+      "RUSTFLAGS",
+      "CARGO_ENCODED_RUSTFLAGS",
+      "CARGO_TARGET_DIR",
+      "SILK_CLANG",
+    ]
+    i = 0
+    while i < keys.length {
+      if let Option<Bytes>.Some { value } = move run HostInput.variableNamed(keys[i]) {
+        run ChildProcess.setVariableBytes(&mut request, String.utf8Bytes(keys[i]), value.asSlice())
+      }
+      i = i + 1
+    }
+  }
+  let mut clock = OsMonotonicClock.make()
+  let start = run MonotonicClock.now() |> Effect.provideMut<MonotonicClock>(&mut clock)
+  let outcome = run ChildProcess.submit(&request)
+  let end = run MonotonicClock.now() |> Effect.provideMut<MonotonicClock>(&mut clock)
+  let code = ChildProcess.exitCode(&outcome) |> Option<i32>.unwrapOr(-1)
+  let stderr = ChildProcess.errorBytes(&outcome)
+  if ChildProcess.isSignaled(&outcome) || code == 124 || code == 137 || code == 125 || code == 126
+    || code == 127
+    || (!allowFailure && code != 0) {
+    let errors = run B.text(run Bytes.copy(stderr))
+    let message = run B.format(
+      "{program}: exit {code} (124/137 means deadline exceeded)\n{errors}",
+      &.{ program: program, code: code, errors: String.view(&errors) },
+    )
+    run Task.abort(String.view(&message))
+  }
+  if ChildProcess.outputBytes(&outcome).length > 67108864 || stderr.length > 67108864 {
+    run Task.abort("benchmark command output exceeds 64 MiB")
+  }
+  return Completed {
+    status: code,
+    output: run Bytes.copy(ChildProcess.outputBytes(&outcome)),
+    errors: run Bytes.copy(stderr),
+    wall: nanos(&start, &end),
+  }
+}
+
+pub effect fn version(program: string, args: &[string]) -> String
+  ! OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let attempted = run Effect.result(execute(program, args, 20.0, false))
+  match move attempted {
+    Result<
+      Completed,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Success {
+      value
+    } => {
+      let bytes = if value.output.length() > 0 {
+        move value.output
+      } else {
+        move value.errors
+      }
+      match move run Effect.result(B.text(move bytes)) {
+        Result<String, TaskError | OutOfMemoryError>.Success { value: text } => {
+          return run String.copy(String.trim(String.view(&text)))
+        }
+        Result<String, TaskError | OutOfMemoryError>.Failure { error } => {
+          drop error
+          return run String.copy("unavailable: invalid UTF-8")
+        }
+      }
+    }
+    Result<
+      Completed,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Failure {
+      error
+    } => match move error {
+      TaskError value => {
+        let mut text = run String.copy("unavailable: ")
+        run text.append(String.view(&value.message))
+        return move text
+      }
+      OutOfMemoryError value => {
+        fail move value
+      }
+      _ => {
+        return run String.copy("unavailable: native tool could not be queried")
+      }
+    }
+  }
+}

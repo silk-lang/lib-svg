@@ -49,9 +49,9 @@ remaining performance gap is still required.
 
 ```sh
 silk build --release --manifest-path modules/bench/silk.toml
-node modules/scripts/rust-bench/build
-node modules/scripts/bench --silk /path/to/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
-node modules/scripts/ab /path/to/old/svg-bench /path/to/new/svg-bench --output build/svg/ab.json
+silk task benchmarks rust-build
+silk task benchmarks bench --silk /path/to/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+silk task benchmarks ab /path/to/old/svg-bench /path/to/new/svg-bench --output build/svg/ab.json
 ```
 
 The explicit Rust build pins resvg/usvg/tiny-skia to the corpus revision and
@@ -66,10 +66,11 @@ measurements. Omit `--record-baseline` to compare with that same `--baseline` pa
 Comparing the tracked historical baseline requires its exact configuration and
 workload selection; the harness rejects unlike measurements.
 
-The `modules/` relocation changed the generator's CLI path diagnostics and its source hash,
-not the generated workload bytes. The current manifest records that new provenance; the
-tracked historical baseline retains its original manifest hash. Use a fresh ignored baseline
-for current comparisons rather than rewriting historical measurements.
+The Silk migration changes the canonical generator to `src/bench_geometry.silk`
+and records its new source hash in the workload manifest. Historical measured
+baselines retain their original manifest hashes. Record a fresh ignored baseline
+for current comparisons; the task rejects unlike provenance rather than rewriting
+old measurements or silently treating them as current.
 
 Stage timers exclude file I/O, PNG encoding, checksums and destination
 destruction; end-to-end includes intermediate-tree destruction. Render includes
@@ -344,7 +345,7 @@ remain open.
 Reproduce the compressed-input comparison after building both release benchmarks:
 
 ```sh
-node modules/bench/compressed.mjs \
+silk task benchmarks compressed \
   --silk /path/to/svg-bench --rust /path/to/svg-reference-bench \
   --input modules/bench/.cache/workloads/largemap/largemap.svg \
   --callgrind --output build/svg/compressed-input.json
@@ -397,7 +398,7 @@ It does not claim identical outputs where earlier geometry/paint differences rem
 | stylesheets | 48.746 | 74.623 | 0.653 | yes |
 | tiger | 8.153 | 1.224 | 6.661 | no |
 
-`bench/images.mjs` generates original 512×384 grayscale-block PNG/JPEG inputs,
+`silk task benchmarks images` generates original 512×384 grayscale-block PNG/JPEG inputs,
 with either one image or 64 references to the same data URL. The following
 measurement uses `a8d7ca1`, including the forgiving-Base64 fix and main rebase,
 with one iteration, zero warmup and three alternating fresh-process samples.
@@ -425,10 +426,10 @@ pixmap once per execution; removing that copy is an open performance opportunity
 Reproduction uses Node and the locked `sharp` package for JPEG fixture generation:
 
 ```sh
-node modules/bench/images.mjs --generate build/svg/image-bench-inputs
-node modules/scripts/rust-bench/build
+silk task benchmarks images --generate build/svg/image-bench-inputs
+silk task benchmarks rust-build
 silk build --release --manifest-path modules/bench/silk.toml
-node modules/bench/images.mjs --inputs build/svg/image-bench-inputs \
+silk task benchmarks images --inputs build/svg/image-bench-inputs \
   --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --iterations 1 --warmup 0 --samples 3 --callgrind \
@@ -521,7 +522,7 @@ a more stable measure of the added work. Existing phase 14 gaps remain open.
 | stylesheets/parse | 44.654 | 0.9179 | 1.0001 |
 | tiger/parse | 6.465 | 0.9243 | 1.0000 |
 
-`bench/sampling.mjs` generates original 16×16 RGB PNGs with one large placement
+`silk task benchmarks sampling` generates original 16×16 RGB PNGs with one large placement
 or 64 shared placements, in auto, pixelated and independently expanded smooth
 forms. The single image uses a 27×19 integer intermediate; repeated images use
 3×3 intermediates. New pixelated and expanded-smooth checksums agree in every
@@ -549,8 +550,8 @@ auto, so its A/B measures the cost of implementing the specified extra stage.
 Reproduce the reference comparison:
 
 ```sh
-node modules/bench/sampling.mjs build/svg/sampling-bench-inputs
-node modules/bench/images.mjs --inputs build/svg/sampling-bench-inputs \
+silk task benchmarks sampling build/svg/sampling-bench-inputs
+silk task benchmarks images --inputs build/svg/sampling-bench-inputs \
   --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --samples 3 --iterations 1 --warmup 0 --callgrind \
@@ -589,7 +590,7 @@ Callgrind passes count the **full process**, including startup, untimed work
 and checksum calculation; these are not stage-only instruction counts. The
 reference is resvg/usvg `91455ee06d08ac2bfeab2b035ed2cfbfd0a68614`.
 
-`bench/nested.mjs` generates one image, sixteen placements sharing one viewport,
+`silk task benchmarks nested` generates one image, sixteen placements sharing one viewport,
 and sixteen distinct viewports. Each has an independently positioned inline
 rectangle control. Embedded and inline checksums match for every mode in each
 engine. Cross-engine checksums match for single/shared placements, but differ
@@ -614,8 +615,8 @@ full-process instruction counts remain above resvg. This does not establish phas
 Raw measurements are in ignored `build/svg/nested-reference.json`.
 
 ```sh
-node modules/bench/nested.mjs build/svg/nested-inputs
-node modules/bench/images.mjs --inputs build/svg/nested-inputs \
+silk task benchmarks nested build/svg/nested-inputs
+silk task benchmarks images --inputs build/svg/nested-inputs \
   --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --samples 3 --iterations 1 --warmup 0 --callgrind \
@@ -652,7 +653,7 @@ SVG image sources, so timing that blank output would not measure the same work.
 ## Phase 7 SVG image orientation
 
 Implementation `769618a` extends the computed orientation path to SVG sources.
-`bench/svg_orientation.mjs` supplies 512×384 workloads with one or sixteen
+`silk task benchmarks svg-orientation` supplies 512×384 workloads with one or sixteen
 placements: unrotated sources, quarter-turned sources, and independent SVGs
 whose colored cells are already encoded in the rotated order. The quarter-turn
 and pre-oriented control checksums agree in every stage in Silk. Pinned resvg
@@ -678,8 +679,8 @@ The shared-image cases are faster in these samples, while single-image
 end-to-end work still exceeds resvg. This is not phase-14 parity. Raw samples,
 input/binary hashes, stage checksums and instructions are recorded in ignored
 `build/svg/svg-orientation-reference.json`. Generate the workloads with
-`node modules/bench/svg_orientation.mjs build/svg/svg-orientation-inputs`
-and measure them with `bench/images.mjs` using the same flags as the previous section.
+`silk task benchmarks svg-orientation build/svg/svg-orientation-inputs`
+and measure them with `silk task benchmarks images` using the same flags as the previous section.
 
 A/B uses `ff5ac1b` (the retained-image implementation) as the baseline. All ten
 broad workload checksums agree. Parse-stage native medians and full-process

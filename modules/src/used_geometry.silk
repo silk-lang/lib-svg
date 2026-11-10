@@ -109,8 +109,8 @@ effect fn degenerate(path: &mut Path, x0: f64, y0: f64, x1: f64, y1: f64) -> ()
   if !f64.isFinite(x0) || !f64.isFinite(y0) || !f64.isFinite(x1) || !f64.isFinite(y1) {
     fail RenderError.InvalidGeometry
   }
-  let moved = run path.append(Segment.MoveTo { to: Point.new(x0, y0) })
-  let lined = run path.append(Segment.LineTo { to: Point.new(x1, y1) })
+  drop run path.append(Segment.MoveTo { to: Point.new(x0, y0) })
+  drop run path.append(Segment.LineTo { to: Point.new(x1, y1) })
 }
 
 // The resolver transfers the CSS path arena into `paths` before calling this:
@@ -199,8 +199,8 @@ pub effect fn shape(
     let y1 = run lineCoordinate(document, id, "y1", &mut engine.*, style, height, limits)
     let x2 = run lineCoordinate(document, id, "x2", &mut engine.*, style, width, limits)
     let y2 = run lineCoordinate(document, id, "y2", &mut engine.*, style, height, limits)
-    let moved = run path.append(Segment.MoveTo { to: Point.new(x1, y1) })
-    let lined = run path.append(Segment.LineTo { to: Point.new(x2, y2) })
+    drop run path.append(Segment.MoveTo { to: Point.new(x1, y1) })
+    drop run path.append(Segment.LineTo { to: Point.new(x2, y2) })
   } else {
     return Shape { path: Option<usize>.None, paintable: false }
   }

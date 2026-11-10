@@ -2,7 +2,6 @@
 //! once only when vector geometry is needed; affine object bounds stay analytic.
 import scene { Style, LineCap, LineJoin, RenderError, StrokeSpace }
 import mapping { Mapping }
-import mapping
 import vector_path
 import svg_geometry.geometry { Path, Rect, Transform, isValidRect }
 import svg_geometry.bounds { Result as BoundsResult }

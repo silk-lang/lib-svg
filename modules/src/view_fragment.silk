@@ -135,7 +135,7 @@ fn wordEnd(data: &[u8], at: usize) -> usize {
 
 fn validUtf8(data: &[u8]) -> bool {
   return match &String.fromUtf8(data) {
-    Result<string, InvalidUtf8>.Success { value } => true
+    Result<string, InvalidUtf8>.Success { .. } => true
     _ => false
   }
 }
@@ -228,7 +228,7 @@ effect fn transform(data: &[u8], store: &mut Store<'_>, limits: &Limits) -> Opti
   let legacy = run values.parse(&mut store.*, Property.Transform, &input, Mode.Presentation)
   match &legacy {
     Option<ValueId>.Some { value } => match &store.get(value).* {
-      Value.Transform { value: typed } => {
+      Value.Transform { .. } => {
         return legacy
       }
       _ => {
@@ -240,7 +240,7 @@ effect fn transform(data: &[u8], store: &mut Store<'_>, limits: &Limits) -> Opti
   let css = run values.parse(&mut store.*, Property.Transform, &input, Mode.Css)
   return match &css {
     Option<ValueId>.Some { value } => match &store.get(value).* {
-      Value.Transform { value: typed } => css
+      Value.Transform { .. } => css
       _ => Option<ValueId>.None
     }
     _ => Option<ValueId>.None
@@ -656,7 +656,7 @@ pub effect fn parse<'a>(
         if equal(key, b"t") {
           let parsed = temporal(value)
           match &parsed {
-            Option<TimeSegment>.Some { value: found } => {
+            Option<TimeSegment>.Some { .. } => {
               result.temporal = parsed
             }
             _ => {}
@@ -674,7 +674,7 @@ pub effect fn parse<'a>(
           if root {
             let parsed = spatial(value)
             match &parsed {
-              Option<SpatialView>.Some { value: found } => {
+              Option<SpatialView>.Some { .. } => {
                 result.spatial = parsed
               }
               _ => {}

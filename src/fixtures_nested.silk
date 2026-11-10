@@ -1,0 +1,489 @@
+//! SVG-in-image authoring; expected geometry is independent of renderer layout.
+import fixtures_common { FixtureError }
+import fixtures_common as c
+import fixtures_images as images
+import silk.collections.list { List }
+import silk.json.value { Value }
+import silk.json.scanner { JsonError }
+import silk.io.writer { WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, FileError, Path }
+import silk.text.string { String }
+
+const SPEC: string = "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement"
+
+const MANIFEST: string = "modules/tests/fixtures/images/manifest.json"
+
+effect fn document(body: string, attrs: string) -> String
+  ! WriterError {
+  return run c.fmt("<svg xmlns=\"http://www.w3.org/2000/svg\" {}>{}</svg>\n", &(attrs, body))
+}
+
+effect fn data(body: string, attrs: string) -> String
+  ! OutOfMemoryError | WriterError | FixtureError
+  ? &mut Allocator {
+  let source = run document(body, attrs)
+  return run c.dataUrl(source.ownedUtf8Bytes(), "image/svg+xml")
+}
+
+effect fn add(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  actual: string,
+  reference: string,
+  reason: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let id = run c.fmt("image-nested-{}", &.(name))
+  let filename = run c.fmt("nested-{}", &.(name))
+  run images.add(
+    root,
+    &mut cases,
+    id.view(),
+    filename.view(),
+    12,
+    12,
+    actual,
+    reference,
+    reason,
+    SPEC,
+  )
+}
+
+struct Probe {
+  name: string<'static>,
+  actual: string<'static>,
+  reference: string<'static>,
+  reason: string<'static>
+}
+
+pub effect fn nested(root: &Path) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let mut cases = List<Value>.make()
+  let sourceBody = "<rect x=\"0\" y=\"0\" width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" y=\"0\" width=\"1\" height=\"1\" fill=\"blue\"/>"
+  let url = run data(sourceBody, "width=\"2\" height=\"1\" viewBox=\"0 0 2 1\"")
+  let scoped = run data("<rect width=\"100%\" height=\"100%\"/>", "width=\"2\" height=\"2\"")
+  let percentage = run data(
+    "<rect x=\"0\" y=\"0\" width=\"50%\" height=\"100%\" fill=\"red\"/><rect x=\"50%\" y=\"0\" width=\"50%\" height=\"100%\" fill=\"blue\"/>",
+    "width=\"12\" height=\"12\"",
+  )
+  let overflow = run data(
+    "<rect x=\"-2\" y=\"0\" width=\"6\" height=\"2\" fill=\"red\"/>",
+    "width=\"2\" height=\"2\" overflow=\"visible\"",
+  )
+  let fixed = run data(
+    "<rect x=\"0\" y=\"0\" width=\"2\" height=\"2\" fill=\"red\"/>",
+    "width=\"2\" height=\"2\"",
+  )
+  let recursiveBody = run c.fmt("<image width=\"8\" height=\"4\" href=\"{}\"/>", &.(url.view()))
+  let recursive = run data(recursiveBody.view(), "width=\"8\" height=\"4\"")
+  let deferred = run data(
+    sourceBody,
+    "width=\"2\" height=\"1\" viewBox=\"0 0 2 1\" preserveAspectRatio=\"xMaxYMax meet\"",
+  )
+  let gradientBody = "<defs><linearGradient id=\"g\"><stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient></defs><rect width=\"8\" height=\"4\" fill=\"url(#g)\"/>"
+  let gradient = run data(gradientBody, "width=\"8\" height=\"4\"")
+  let overflowSource = run data(
+    "<rect x=\"-2\" width=\"6\" height=\"2\" fill=\"red\" opacity=\".5\"/>",
+    "width=\"2\" height=\"2\" overflow=\"visible\"",
+  )
+  let external = run document(
+    "<rect x=\"0\" y=\"0\" width=\"2\" height=\"2\" fill=\"red\"/><image width=\"2\" height=\"2\" href=\"nested-external.svg\"/>",
+    "width=\"2\" height=\"2\" viewBox=\"0 0 2 2\"",
+  )
+  let blue = run document(
+    "<rect x=\"0\" y=\"0\" width=\"2\" height=\"2\" fill=\"blue\"/>",
+    "width=\"2\" height=\"2\"",
+  )
+  run c.text(root, "modules/tests/fixtures/images/inputs/nested-external.svg", blue.view())
+  run c.text(root, "modules/tests/fixtures/images/inputs/nested-secure-source.svg", external.view())
+  let probes = [
+    Probe {
+      name: "intrinsic",
+      actual: "<image x=\"1\" y=\"2\" href=\"@url@\"/>",
+      reference: "<rect x=\"1\" y=\"2\" width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"2\" y=\"2\" width=\"1\" height=\"1\" fill=\"blue\"/>",
+      reason: "Absolute root dimensions provide intrinsic size; the embedded SVG is an independent document.",
+    },
+    Probe {
+      name: "meet",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"8\" href=\"@url@\"/>",
+      reference: "<rect x=\"1\" y=\"3\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"3\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "Default xMidYMid meet fits the intrinsic two-to-one ratio into the image positioning rectangle.",
+    },
+    Probe {
+      name: "none",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"8\" preserveAspectRatio=\"none\" href=\"@url@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"4\" height=\"8\" fill=\"red\"/><rect x=\"5\" y=\"1\" width=\"4\" height=\"8\" fill=\"blue\"/>",
+      reason: "The embedded root preserveAspectRatio is treated as none; the image attribute controls fitting.",
+    },
+    Probe {
+      name: "style-isolation",
+      actual: "<style>rect {fill:lime}</style><image x=\"1\" y=\"1\" width=\"6\" height=\"6\" fill=\"red\" href=\"@scoped@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"6\" height=\"6\" fill=\"black\"/>",
+      reason: "Outer selectors and inherited fill must not enter the separate embedded document.",
+    },
+    Probe {
+      name: "percentage-viewport",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"4\" preserveAspectRatio=\"none\" href=\"@percentage@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"1\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "Percentages in the independent document resolve against its image-rendering viewport.",
+    },
+    Probe {
+      name: "secure-external",
+      actual: "<image x=\"1\" y=\"1\" width=\"6\" height=\"6\" href=\"nested-secure-source.svg\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"6\" height=\"6\" fill=\"red\"/>",
+      reason: "The outer static document may fetch the SVG; its embedded document is secure-static and cannot fetch a sibling SVG.",
+    },
+    Probe {
+      name: "shared-viewports",
+      actual: "<image x=\"1\" y=\"1\" width=\"4\" height=\"2\" href=\"@url@\"/><image x=\"1\" y=\"5\" width=\"8\" height=\"4\" href=\"@url@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\" fill=\"red\"/><rect x=\"3\" y=\"1\" width=\"2\" height=\"2\" fill=\"blue\"/><rect x=\"1\" y=\"5\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "The same resource renders at two occurrence-specific viewport sizes without sharing the wrong layout.",
+    },
+    Probe {
+      name: "rotated",
+      actual: "<image width=\"8\" height=\"4\" transform=\"translate(10 1) rotate(90)\" href=\"@url@\"/>",
+      reference: "<rect x=\"6\" y=\"1\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"6\" y=\"5\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "The image document and its viewport clips follow a non-axis-aligned affine placement.",
+    },
+    Probe {
+      name: "projective",
+      actual: "<image width=\"8\" height=\"4\" style=\"@projective@\" href=\"@url@\"/>",
+      reference: "<g style=\"@projective@\"><rect x=\"0\" y=\"0\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"4\" y=\"0\" width=\"4\" height=\"4\" fill=\"blue\"/></g>",
+      reason: "Projective image placement transforms both child geometry and physical viewport clip planes.",
+    },
+    Probe {
+      name: "overflow-visible",
+      actual: "<image x=\"4\" y=\"4\" width=\"2\" height=\"2\" overflow=\"visible\" href=\"@overflow@\"/>",
+      reference: "<rect x=\"2\" y=\"4\" width=\"6\" height=\"2\" fill=\"red\"/>",
+      reason: "Visible overflow on both image and document root preserves content beyond the image viewport.",
+    },
+    Probe {
+      name: "no-viewbox",
+      actual: "<image x=\"1\" y=\"1\" width=\"6\" height=\"6\" href=\"@fixed@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\" fill=\"red\"/>",
+      reason: "Without a viewBox the new SVG viewport does not scale fixed user-unit geometry.",
+    },
+    Probe {
+      name: "overflow-hidden",
+      actual: "<image x=\"4\" y=\"4\" width=\"2\" height=\"2\" overflow=\"hidden\" href=\"@overflow@\"/>",
+      reference: "<rect x=\"4\" y=\"4\" width=\"2\" height=\"2\" fill=\"red\"/>",
+      reason: "Hidden overflow on the image clips independently of visible overflow on its document root.",
+    },
+    Probe {
+      name: "recursive-data",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"4\" href=\"@recursive@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"1\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "Secure embedded documents permit nested data images and retain their independent layouts.",
+    },
+    Probe {
+      name: "group-opacity",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"4\" opacity=\".5\" href=\"@url@\"/>",
+      reference: "<g opacity=\".5\"><rect x=\"1\" y=\"1\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"1\" width=\"4\" height=\"4\" fill=\"blue\"/></g>",
+      reason: "Image opacity is applied once to the isolated embedded document output.",
+    },
+    Probe {
+      name: "defer",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"8\" preserveAspectRatio=\"defer xMinYMin meet\" href=\"@deferred@\"/>",
+      reference: "<rect x=\"1\" y=\"5\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"5\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "SVG 1.1 defer uses the explicitly supplied child aspect-ratio alignment before SVG2 viewport layout.",
+    },
+    Probe {
+      name: "ignore-root-par",
+      actual: "<image x=\"1\" y=\"1\" width=\"8\" height=\"8\" preserveAspectRatio=\"xMinYMin meet\" href=\"@deferred@\"/>",
+      reference: "<rect x=\"1\" y=\"1\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"5\" y=\"1\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+      reason: "Without defer, image alignment wins over the child root aspect-ratio attribute.",
+    },
+    Probe {
+      name: "in-pattern",
+      actual: "<defs><pattern id=\"p\" patternUnits=\"userSpaceOnUse\" width=\"4\" height=\"2\"><image width=\"4\" height=\"2\" href=\"@url@\"/></pattern></defs><rect width=\"12\" height=\"12\" fill=\"url(#p)\"/>",
+      reference: "<defs><pattern id=\"p\" patternUnits=\"userSpaceOnUse\" width=\"4\" height=\"2\"><rect x=\"0\" y=\"0\" width=\"2\" height=\"2\" fill=\"red\"/><rect x=\"2\" y=\"0\" width=\"2\" height=\"2\" fill=\"blue\"/></pattern></defs><rect width=\"12\" height=\"12\" fill=\"url(#p)\"/>",
+      reason: "Embedded commands also execute in retained pattern pictures at tile resolution.",
+    },
+    Probe {
+      name: "in-mask",
+      actual: "<defs><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"12\" height=\"12\" style=\"mask-type:alpha\"><image x=\"1\" y=\"2\" width=\"8\" height=\"4\" href=\"@url@\"/></mask></defs><rect width=\"12\" height=\"12\" fill=\"lime\" mask=\"url(#m)\"/>",
+      reference: "<defs><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"12\" height=\"12\" style=\"mask-type:alpha\"><rect x=\"1\" y=\"2\" width=\"8\" height=\"4\" fill=\"white\"/></mask></defs><rect width=\"12\" height=\"12\" fill=\"lime\" mask=\"url(#m)\"/>",
+      reason: "An embedded image supplies alpha coverage as content of an SVG mask.",
+    },
+    Probe {
+      name: "gradient-projective",
+      actual: "<image width=\"8\" height=\"4\" style=\"@projective@\" href=\"@gradient@\"/>",
+      reference: "<g style=\"@projective@\">@gradientBody@</g>",
+      reason: "Child gradient sampling composes the image placement instead of retaining source-device coordinates.",
+    },
+    Probe {
+      name: "in-overflow-pattern",
+      actual: "<defs><pattern id=\"p\" overflow=\"visible\" patternUnits=\"userSpaceOnUse\" width=\"4\" height=\"2\"><image x=\"3\" width=\"2\" height=\"2\" overflow=\"visible\" href=\"@overflowSource@\"/></pattern></defs><rect width=\"12\" height=\"12\" fill=\"url(#p)\"/>",
+      reference: "<defs><pattern id=\"p\" overflow=\"visible\" patternUnits=\"userSpaceOnUse\" width=\"4\" height=\"2\"><rect x=\"1\" width=\"6\" height=\"2\" fill=\"red\" opacity=\".5\"/></pattern></defs><rect width=\"12\" height=\"12\" fill=\"url(#p)\"/>",
+      reason: "Pattern overflow enumeration includes child document painting beyond the image positioning rectangle, including overlapping alpha.",
+    },
+  ]
+  let keys = [
+    "@url@",
+    "@scoped@",
+    "@percentage@",
+    "@overflow@",
+    "@fixed@",
+    "@recursive@",
+    "@deferred@",
+    "@gradient@",
+    "@gradientBody@",
+    "@overflowSource@",
+    "@projective@",
+  ]
+  let values = [
+    url.view(),
+    scoped.view(),
+    percentage.view(),
+    overflow.view(),
+    fixed.view(),
+    recursive.view(),
+    deferred.view(),
+    gradient.view(),
+    gradientBody,
+    overflowSource.view(),
+    "transform-origin:0 0;transform:matrix3d(1,0,0,.04,0,1,0,0,0,0,1,0,0,0,0,1)",
+  ]
+  let mut i: usize = 0
+  while i < 20 {
+    let p = &probes[i]
+    let mut actual = run String.copy(p.actual)
+    let mut reference = run String.copy(p.reference)
+    let mut k: usize = 0
+    while k < 11 {
+      actual = run images.replace(actual.view(), keys[k], values[k])
+      reference = run images.replace(reference.view(), keys[k], values[k])
+      k = k + 1
+    }
+    run add(root, &mut cases, p.name, actual.view(), reference.view(), p.reason)
+    i = i + 1
+  }
+  let resources = ["nested-external.svg", "nested-secure-source.svg"]
+  i = 0
+  while i < 2 {
+    let reference = run c.fmt("references/control-{}", &.(resources[i]))
+    let output = run c.fmt("modules/tests/fixtures/images/{}", &.(reference.view()))
+    let input = run c.fmt("inputs/{}", &.(resources[i]))
+    let id = run c.fmt(
+      "image-nested-control-{}",
+      &.(String.slice(resources[i], 0, String.byteLength(resources[i]) - 4)),
+    )
+    run c.text(root, output.view(), blue.view())
+    run cases.append(
+      run c.caseRecord(
+        id.view(),
+        input.view(),
+        reference.view(),
+        "Direct static rendering validates the resource content and that external image loading works outside secure embedded mode.",
+        SPEC,
+      ),
+    )
+    i = i + 1
+  }
+  run c.saveManifest(root, MANIFEST, cases.asSlice(), "image-nested-", false, false, false)
+}
+
+// Explicit clockwise source rotations, rather than sharing renderer transforms.
+const ROWS: [[string<'static>; 6]; 4] = [
+  ["red", "lime", "blue", "cyan", "magenta", "yellow"],
+  ["magenta", "blue", "red", "yellow", "cyan", "lime"],
+  ["yellow", "magenta", "cyan", "blue", "lime", "red"],
+  ["lime", "cyan", "yellow", "red", "blue", "magenta"],
+]
+
+effect fn cells(turn: usize, flip: bool, x: usize, y: usize, width: usize, height: usize) -> String
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let columns: usize = if turn % 2 == 0 {
+    2
+  } else {
+    3
+  }
+  let mut result = String.make()
+  let mut i: usize = 0
+  while i < 6 {
+    let row = i / columns
+    let column = i % columns
+    let source = row * columns
+      + if flip {
+        columns - 1 - column
+      } else {
+        column
+      }
+    run result.appendOwned(
+      run c.fmt(
+        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>",
+        &(x + column * width, y + row * height, width, height, ROWS[turn][source]),
+      ),
+    )
+    i = i + 1
+  }
+  return move result
+}
+
+effect fn svgCase(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  actual: string,
+  reference: string,
+  reason: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let id = run c.fmt("image-svg-orientation-{}", &.(name))
+  let filename = run c.fmt("svg-orientation-{}", &.(name))
+  run images.add(
+    root,
+    &mut cases,
+    id.view(),
+    filename.view(),
+    16,
+    12,
+    actual,
+    reference,
+    reason,
+    "https://www.w3.org/TR/css-images-3/#the-image-orientation",
+  )
+}
+
+pub effect fn svgOrientation(root: &Path) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let source = run cells(0, false, 0, 0, 1, 1)
+  let url = run data(source.view(), "width=\"2\" height=\"3\" viewBox=\"0 0 2 3\"")
+  let mut cases = List<Value>.make()
+  let mut turn: usize = 0
+  while turn < 4 {
+    let mut f: usize = 0
+    while f < 2 {
+      let suffix = if f == 1 {
+        "-flip"
+      } else {
+        ""
+      }
+      let name = run c.fmt("{}{}", &(turn * 90, suffix))
+      let actual = run c.fmt(
+        "<image x=\"2\" y=\"2\" href=\"{}\" style=\"image-orientation:{}deg{}\"/>",
+        &(
+          url.view(),
+          turn * 90,
+          if f == 1 {
+            " flip"
+          } else {
+            ""
+          }
+        ),
+      )
+      let reference = run cells(turn, f == 1, 2, 2, 1, 1)
+      run svgCase(
+        root,
+        &mut cases,
+        name.view(),
+        actual.view(),
+        reference.view(),
+        "SVG content images use oriented intrinsic dimensions; horizontal flipping follows clockwise rotation.",
+      )
+      f = f + 1
+    }
+    turn = turn + 1
+  }
+  let stretched = run c.fmt(
+    "<image x=\"2\" y=\"2\" width=\"9\" height=\"4\" preserveAspectRatio=\"none\" href=\"{}\" style=\"image-orientation:90deg\"/>",
+    &.(url.view()),
+  )
+  let stretchedRef = run cells(1, false, 2, 2, 3, 2)
+  run svgCase(
+    root,
+    &mut cases,
+    "stretched",
+    stretched.view(),
+    stretchedRef.view(),
+    "The independent SVG viewport is negotiated before orientation, and final width/height address the oriented axes.",
+  )
+  let autoHeight = run c.fmt(
+    "<image x=\"2\" y=\"2\" width=\"6\" href=\"{}\" style=\"image-orientation:90deg\"/>",
+    &.(url.view()),
+  )
+  let autoRef = run cells(1, false, 2, 2, 2, 2)
+  run svgCase(
+    root,
+    &mut cases,
+    "auto-height",
+    autoHeight.view(),
+    autoRef.view(),
+    "Auto height is derived from the reciprocal intrinsic aspect ratio after a quarter turn.",
+  )
+  let percentage = run data("<rect width=\"50%\" height=\"100%\" fill=\"red\"/>", "")
+  let percentageImage = run c.fmt(
+    "<image x=\"2\" y=\"2\" width=\"6\" height=\"4\" href=\"{}\" style=\"image-orientation:90deg\"/>",
+    &.(percentage.view()),
+  )
+  run svgCase(
+    root,
+    &mut cases,
+    "percentage-viewport",
+    percentageImage.view(),
+    "<rect x=\"2\" y=\"2\" width=\"6\" height=\"2\" fill=\"red\"/>",
+    "A quarter turn supplies the independent document a 4 by 6 logical viewport before rotating its percentage geometry.",
+  )
+  let shared = run c.fmt(
+    "<g style=\"image-orientation:90deg\"><image width=\"4\" height=\"6\" href=\"{0}\" style=\"image-orientation:none\"/><image x=\"6\" width=\"6\" height=\"4\" href=\"{0}\"/></g>",
+    &.(url.view()),
+  )
+  let left = run cells(0, false, 0, 0, 2, 2)
+  let right = run cells(1, false, 6, 0, 2, 2)
+  let sharedRef = run c.concat(&[left.view(), right.view()])
+  run svgCase(
+    root,
+    &mut cases,
+    "shared-inherited",
+    shared.view(),
+    sharedRef.view(),
+    "Different inherited orientations share the same raw 4 by 6 layout while retaining separate placements.",
+  )
+  let ratio = run data(source.view(), "viewBox=\"0 0 2 3\"")
+  let ratioImage = run c.fmt(
+    "<image x=\"2\" y=\"2\" width=\"6\" href=\"{}\" style=\"image-orientation:90deg\"/>",
+    &.(ratio.view()),
+  )
+  run svgCase(
+    root,
+    &mut cases,
+    "viewbox-auto-height",
+    ratioImage.view(),
+    autoRef.view(),
+    "A viewBox-only natural ratio is inverted before resolving auto height, without inventing intrinsic dimensions.",
+  )
+  let projective = "transform-origin:0 0;transform:matrix3d(1,0,0,.025,0,1,0,0,0,0,1,0,0,0,0,1)"
+  let projectiveImage = run c.fmt(
+    "<image x=\"2\" y=\"2\" width=\"9\" height=\"4\" preserveAspectRatio=\"none\" href=\"{}\" style=\"image-orientation:90deg;{}\"/>",
+    &(url.view(), projective),
+  )
+  let positions: [[usize; 2]; 6] = [[2, 0], [2, 1], [1, 0], [1, 1], [0, 0], [0, 1]]
+  let mut projected = String.make()
+  let mut i: usize = 0
+  while i < 6 {
+    run projected.appendOwned(
+      run c.fmt(
+        "<rect x=\"{}\" y=\"{}\" width=\"3\" height=\"2\" fill=\"{}\"/>",
+        &(2 + 3 * positions[i][0], 2 + 2 * positions[i][1], ROWS[0][i]),
+      ),
+    )
+    i = i + 1
+  }
+  let projectiveRef = run c.fmt("<g style=\"{}\">{}</g>", &(projective, projected.view()))
+  run svgCase(
+    root,
+    &mut cases,
+    "projective",
+    projectiveImage.view(),
+    projectiveRef.view(),
+    "CSS transforms follow image orientation; retained child clips compose through perspective. The independent cell reference preserves source painting order (SVG2 render.html#RenderingOrder).",
+  )
+  run c.saveManifest(root, MANIFEST, cases.asSlice(), "image-svg-orientation-", false, false, false)
+}

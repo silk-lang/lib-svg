@@ -265,7 +265,7 @@ static if (Intrinsic.targetOperatingSystem() == "windows"
           fail ResourceError.TooLarge
         }
       }
-      DirectoryInfo directory => {
+      DirectoryInfo _ => {
         fail ResourceError.Io
       }
     }

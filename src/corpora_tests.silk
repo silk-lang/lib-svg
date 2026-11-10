@@ -1,0 +1,1014 @@
+import task_support as Support
+import corpora { CorpusFailure }
+import corpora as C
+import corpora_specs as Specs
+import corpora_suites as Suites
+import corpora_references as References
+import corpora_reftests as Reftests
+import corpora_png as Png
+import corpora_html as Html
+import corpora_encoding as Encoding
+import corpora_xml as Xml
+import fixtures_common as Fixtures
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.deflate { EncodeError }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessRequest, ProcessOutcome, ProcessError }
+import silk.system.filesystem { FileSystem, Path }
+import silk.system.filesystem_machine { MachineFileSystem }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String, Split }
+import silk.testing.testing { Testing, AssertionError }
+import silk.num.usize
+import silk.num.u8
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+type TestFailure = CorpusFailure | AssertionError<'static> | EncodeError
+
+fn failed<T, E>(result: Result<T, E>) -> bool {
+  return match move result {
+    Result<T, E>.Success { value } => {
+      drop value
+      false
+    }
+    Result<T, E>.Failure { error } => {
+      drop error
+      true
+    }
+  }
+}
+
+fn same(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut i: usize = 0
+  while i < a.length {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+effect fn parse(text: string) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  return run Json.parse(String.utf8Bytes(text))
+}
+
+effect fn check(result: &Value, expected: bool) -> ()
+  ! AssertionError<'static> {
+  run Testing.expect(
+    C.boolField(result, "match", !expected) == expected,
+    "comparison result matches the pixel contract",
+  )
+}
+
+effect fn scalarCases() -> ()
+  ! TestFailure
+  ? &mut Allocator {
+  let bad = ["../escape", "/absolute", "a/../../escape", "a\\escape", "a/./b", "", "a//b", "a\0b"]
+  let mut i: usize = 0
+  while i < bad.length {
+    run Testing.expect(
+      failed(run Effect.result(C.relativePath(bad[i]))),
+      "unsafe suite path is rejected",
+    )
+    i = i + 1
+  }
+  run C.relativePath("safe/path.svg")
+  let pin = run parse("{\"z\":{\"b\":2},\"a\":[1,true,null,\"é\"]}")
+  let actual = run Suites.receiptPin(&pin)
+  let expected = run C.digest(b"{\"a\": [1, true, null, \"\\u00e9\"], \"z\": {\"b\": 2}}")
+  run Testing.expect(
+    String.view(&actual) == String.view(&expected),
+    "receipt hash preserves sorted ASCII Python JSON",
+  )
+  let rgba = Png.Rgba { width: 1, height: 1, data: run Bytes.copy(&[100, 50, 25, 128]) }
+  let near = Png.Rgba { width: 1, height: 1, data: run Bytes.copy(&[105, 50, 25, 130]) }
+  run check(&run Reftests.compareRgba(&rgba, &near, 0, 0, 0), false)
+  run check(&run Reftests.compareRgba(&rgba, &near, 5, 0, 0), true)
+  run check(&run Reftests.compareRgba(&rgba, &near, 0, 1, 0), true)
+  run check(&run Reftests.compareRgba(&rgba, &near, 0, 0, 5), true)
+  let opaque = Png.Rgba { width: 1, height: 1, data: run Bytes.copy(&[105, 50, 25, 255]) }
+  run check(&run Reftests.compareRgba(&rgba, &opaque, 0, 0, 255), false)
+  let invisible = Png.Rgba { width: 1, height: 1, data: run Bytes.copy(&[100, 50, 25, 0]) }
+  let invisibleOther = Png.Rgba { width: 1, height: 1, data: run Bytes.copy(&[101, 50, 25, 0]) }
+  run check(&run Reftests.compareRgba(&invisible, &invisibleOther, 0, 0, 255), false)
+  run Testing.expect(
+    (run Reftests.outcome("fail", true)) == "unexpected-pass"
+      && (run Reftests.outcome("spec-difference", false)) == "spec-difference",
+    "known failures never hide improvements",
+  )
+  run Testing.expect(
+    failed(run Effect.result(Reftests.outcome("skip", true))),
+    "skips never claim a pixel comparison",
+  )
+  let commands = run parse("[\"renderer\",\"--input={input}\",\"{output}\",\"{root}\"]")
+  let argv = run Reftests.rendererArgv(&commands, "a path/'x.svg", "out;name.png", "root here")
+  let renderArgs = List<String>.asSlice(&argv)
+  run Testing.expect(
+    String.view(&renderArgs[1]) == "--input=a path/'x.svg"
+      && String.view(&renderArgs[2]) == "out;name.png",
+    "renderer substitutions preserve argv without shell interpretation",
+  )
+  let invalid = run parse("[\"renderer\",\"{input}\"]")
+  run Testing.expect(
+    failed(run Effect.result(Reftests.rendererArgv(&invalid, "x", "y", "z"))),
+    "renderer requires both placeholders",
+  )
+  let valid = run parse(
+    "{\"id\":\"a\",\"status\":\"pass\",\"reason\":\"reviewed pixels\",\"spec\":\"https://www.w3.org/TR/SVG2/painting.html#FillProperties\"}",
+  )
+  run References.validateExpectation(&valid)
+  let tolerances = [
+    "{\"channel\":-1,\"reason\":\"x\"}",
+    "{\"channel\":256,\"reason\":\"x\"}",
+    "{\"pixels\":1.5,\"reason\":\"x\"}",
+    "{\"unknown\":1,\"reason\":\"x\"}",
+    "{\"channel\":1}",
+  ]
+  i = 0
+  while i < tolerances.length {
+    let mut invalid = run Json.copy(&valid)
+    run C.put(&mut invalid, "tolerance", run parse(tolerances[i]))
+    run Testing.expect(
+      failed(run Effect.result(References.validateExpectation(&invalid))),
+      "invalid or unreasoned tolerances are rejected",
+    )
+    i = i + 1
+  }
+  let encoded = run Fixtures.png(1, 1, 6, &[0, 100, 50, 25, 0], &[])
+  let decoded = run Png.decode(Bytes.asSlice(&encoded))
+  run Testing.expect(
+    same(Bytes.asSlice(&decoded.data), &[100, 50, 25, 0]),
+    "PNG comparator preserves invisible straight RGB channels",
+  )
+  let partial = run Fixtures.png(1, 1, 6, &[0, 100, 50, 25, 128], &[])
+  let decodedPartial = run Png.decode(Bytes.asSlice(&partial))
+  run Testing.expect(
+    same(Bytes.asSlice(&decodedPartial.data), &[100, 50, 25, 128]),
+    "PNG comparator never premultiplies channels",
+  )
+  run Testing.expect(
+    failed(run Effect.result(Png.decode(b"not a png"))),
+    "invalid PNG is a runner error",
+  )
+  let href = run References.decodeHref("space%20name-%zz-%E2%82.svg")
+  run Testing.expect(
+    String.view(&href) == "space name-%zz-�.svg",
+    "reference decoding preserves malformed escapes and replaces incomplete UTF8",
+  )
+  let links = run Html.links(
+    b"<html><head><template><link rel=match href='a&amp;b.svg'></template></head><body><svg><link rel=mismatch href='second.svg'/></svg></body>",
+  )
+  run Testing.expect(
+    List<Html.Link>.length(&links) == 2
+      && String.view(&List<Html.Link>.asSlice(&links)[0].href) == "a&b.svg",
+    "HTML5 discovery includes template contents, foreign elements and entity decoding",
+  )
+  let encodedXml = run Encoding.decodeXml(
+    b"<?xml version='1.0' encoding='windows-1252'?><svg xmlns='http://www.w3.org/2000/svg'><text>\x80</text></svg>",
+  )
+  run Testing.expect(
+    String.contains(unsafe String.fromUtf8Unchecked(Bytes.asSlice(&encodedXml)), "€"),
+    "XML uses WHATWG encoding labels and normalization",
+  )
+  run Xml.eligible(Bytes.asSlice(&encodedXml))
+  run Xml.eligible(
+    b"<?xml version='1.1'?><s:svg xmlns:s='http://www.w3.org/2000/sv&#103;'><![CDATA[<script>]]><!-- <script/> --><g class='ok'/></s:svg>",
+  )
+  let excluded = [
+    "<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>",
+    "<svg xmlns='http://www.w3.org/2000/svg' onload='x'/>",
+    "<svg xmlns='http://www.w3.org/2000/svg'><foreignObject/></svg>",
+    "<svg xmlns='http://www.w3.org/2000/svg' class='x&#160;reftest-wait'/>",
+    "<!DOCTYPE svg><svg xmlns='http://www.w3.org/2000/svg'/>",
+    "<svg/>",
+  ]
+  i = 0
+  while i < excluded.length {
+    run Testing.expect(
+      failed(run Effect.result(Xml.eligible(String.utf8Bytes(excluded[i])))),
+      "unsupported WPT requirements are never silently rendered",
+    )
+    i = i + 1
+  }
+}
+
+test effect fn corpusPathsPixelsExpectationsHtmlAndEncoding() -> ()
+  ! TestFailure {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run scalarCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+struct DownloadProcess {
+  calls: usize,
+  changed: bool,
+  failing: bool
+}
+
+effect fn fakeDownload(request: &ProcessRequest, changed: bool) -> ProcessOutcome
+  ! CorpusFailure
+  ? &mut Allocator {
+  let arguments = unsafe String.fromUtf8Unchecked(ChildProcess.arguments(request))
+  let mut parts = String.split(arguments, "\0")
+  let mut destination = String.slice(arguments, 0, 0)
+  let mut url = destination
+  let mut previous = destination
+  while true {
+    let part = match Split.next(&mut parts) {
+      Option<string>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    if previous == "--output" {
+      destination = part
+    }
+    if previous == "--url" {
+      url = part
+    }
+    previous = part
+  }
+  if destination == "" || !String.startsWith(url, "https://") {
+    run C.reject("invalid downloader fixture invocation")
+  }
+  let path = run nativePath(destination)
+  let mut filesystem = run MachineFileSystem.make()
+  run FileSystem.writeFile(
+    &path,
+    if changed {
+      b"changed"
+    } else {
+      b"original"
+    },
+  )
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+  return ChildProcess.exited(0, run Bytes.copy(String.utf8Bytes(url)), Bytes.make())
+}
+
+impl ChildProcess for DownloadProcess {
+  effect fn execute(self: &mut Self, request: &ProcessRequest) -> ProcessOutcome
+    ! ProcessError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    if self.failing {
+      return ChildProcess.exited(22, Bytes.make(), Bytes.make())
+    }
+    let result = run Effect.result(fakeDownload(request, self.changed))
+    return match move result {
+      Result<ProcessOutcome, CorpusFailure>.Success { value } => move value
+      Result<ProcessOutcome, CorpusFailure>.Failure { error } => {
+        drop error
+        ChildProcess.exited(23, Bytes.make(), Bytes.make())
+      }
+    }
+  }
+}
+
+effect fn nativePath(value: string) -> Path
+  ! CorpusFailure
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.fromNativeBytes(String.utf8Bytes(value))
+  } else {
+    return run Path.make(value)
+  }
+}
+
+effect fn specCases(directory: &Path, process: &mut DownloadProcess) -> ()
+  ! TestFailure
+  ? &mut FileSystem | &mut Allocator {
+  let lock = run Path.join(directory, "spec-lock.json")
+  let cache = run Path.join(directory, "spec-cache")
+  let curl = run Path.join(directory, "curl")
+  let urls = run parse("{\"one\":\"https://example.org/one\",\"two\":\"https://example.org/two\"}")
+  let mut options = Specs.defaults()
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "initial baseline requires explicit update",
+  )
+  options.update = true
+  let fetched = run Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(fetched == 2, "explicit update fetches every baseline entry")
+  let baseline = run FileSystem.readFile(&lock)
+  let records = run Specs.loadLock(&lock, &urls)
+  let hash = run C.digest(b"original")
+  run Testing.expect(
+    (run C.text(run C.field(&records, "one"), "sha256")) == String.view(&hash),
+    "baseline stores observed bytes SHA256",
+  )
+  options.update = false
+  options.offline = true
+  let calls = process.calls
+  drop run Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(process.calls == calls, "offline verification makes no network requests")
+  let cached = run Path.join(&cache, String.view(&hash))
+  run FileSystem.writeFile(&cached, b"tampered")
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "tampered offline spec cache fails closed",
+  )
+  options.offline = false
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    )
+      && process.calls == calls,
+    "corrupt cache is not silently repaired online",
+  )
+  run FileSystem.removeFile(&cached)
+  process.changed = true
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "changed upstream bytes cannot update an existing pin",
+  )
+  let unchanged = run FileSystem.readFile(&lock)
+  run Testing.expect(
+    same(Bytes.asSlice(&baseline), Bytes.asSlice(&unchanged)) && !run FileSystem.exists(&cached),
+    "failed verification leaves baseline and cache untouched",
+  )
+  options.update = true
+  process.failing = true
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "failed explicit update reports failure",
+  )
+  let unchangedUpdate = run FileSystem.readFile(&lock)
+  run Testing.expect(
+    same(Bytes.asSlice(&baseline), Bytes.asSlice(&unchangedUpdate)),
+    "failed update preserves prior baseline",
+  )
+  process.failing = false
+  process.changed = false
+  options.update = false
+  run List<String>.append(&mut options.only, run String.copy("one"))
+  let selectedCalls = process.calls
+  drop run Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    process.calls == selectedCalls + 1,
+    "only selection fetches one missing document",
+  )
+  options.update = true
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "partial baseline updates are forbidden",
+  )
+  options.offline = true
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Specs.synchronize(&lock, &cache, &curl, &urls, &options)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "offline update is forbidden",
+  )
+}
+
+fn octal(header: &mut [u8], begin: usize, width: usize, number: usize) -> () {
+  let mut value = number
+  let mut index = width - 1
+  header[begin + index] = 0
+  while index > 0 {
+    index = index - 1
+    header[begin + index] = 48 + usize.toU8(value % 8)
+    value = value / 8
+  }
+}
+
+effect fn tarMember(
+  output: &mut Bytes,
+  name: string,
+  kind: u8,
+  content: &[u8],
+  declared: usize,
+) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut header: [u8; 512] = [0; 512]
+  let bytes = String.utf8Bytes(name)
+  let mut i: usize = 0
+  while i < bytes.length {
+    header[i] = bytes[i]
+    i = i + 1
+  }
+  octal(&mut header, 100, 8, 420)
+  octal(&mut header, 108, 8, 0)
+  octal(&mut header, 116, 8, 0)
+  octal(&mut header, 124, 12, declared)
+  octal(&mut header, 136, 12, 0)
+  i = 148
+  while i < 156 {
+    header[i] = 32
+    i = i + 1
+  }
+  header[156] = kind
+  header[157] = 97
+  let magic = b"ustar\000"
+  i = 0
+  while i < magic.length {
+    header[257 + i] = magic[i]
+    i = i + 1
+  }
+  let mut checksum: usize = 0
+  i = 0
+  while i < 512 {
+    checksum = checksum + u8.toUsize(header[i])
+    i = i + 1
+  }
+  octal(&mut header, 148, 7, checksum)
+  header[155] = 32
+  run Bytes.append(&mut output, &header)
+  run Bytes.append(&mut output, content)
+  let padding: [u8; 512] = [0; 512]
+  if content.length % 512 != 0 {
+    run Bytes.append(&mut output, Slice.view<u8>(&padding, 0, 512 - content.length % 512))
+  }
+}
+
+effect fn archiveCases(directory: &Path) -> ()
+  ! TestFailure
+  ? &mut FileSystem | &mut Allocator {
+  let path = run Path.join(directory, "suite.tar")
+  let destination = run Path.join(directory, "extracted")
+  let include = run parse("[\"svg\"]")
+  let mut tar = Bytes.make()
+  run tarMember(&mut tar, "pinned/", 53, b"", 0)
+  run tarMember(&mut tar, "pinned/svg/a.svg", 48, b"svg", 3)
+  run tarMember(&mut tar, "pinned/other/b", 48, b"ignored", 7)
+  let ending: [u8; 1024] = [0; 1024]
+  run Bytes.append(&mut tar, &ending)
+  run FileSystem.writeFile(&path, Bytes.asSlice(&tar))
+  let hashes = run Suites.extractArchive(
+    &path,
+    Option<&Path>.some(&destination),
+    "pinned/",
+    &include,
+  )
+  let digest = run C.digest(b"svg")
+  run Testing.expect(
+    (run C.text(&hashes, "svg/a.svg")) == String.view(&digest)
+      && (run C.entries(&hashes)).length == 1,
+    "archive hashes only the selected scope",
+  )
+  let unpacked = run FileSystem.readFile(&run Path.join(&destination, "svg/a.svg"))
+  run Testing.expect(same(Bytes.asSlice(&unpacked), b"svg"), "archive publishes selected content")
+  let gzip = run Fixtures.compressed(Bytes.asSlice(&tar), true)
+  run FileSystem.writeFile(&path, Bytes.asSlice(&gzip))
+  let compressedHashes = run Suites.extractArchive(&path, Option<&Path>.none(), "pinned/", &include)
+  run Testing.expect(
+    (run C.text(&compressedHashes, "svg/a.svg")) == String.view(&digest),
+    "gzip and plain tar have identical authenticated inventories",
+  )
+  let all = run parse("[\"\"]")
+  let names = ["../outside", "safe/link", "safe/link", "safe/a", "wrong/a", "safe/huge"]
+  let kinds: [u8; 6] = [48, 50, 49, 48, 48, 48]
+  let mut i: usize = 0
+  while i < names.length {
+    let mut malicious = Bytes.make()
+    run tarMember(
+      &mut malicious,
+      names[i],
+      kinds[i],
+      b"",
+      if i == 5 {
+        134217729
+      } else {
+        0
+      },
+    )
+    if i == 3 {
+      run tarMember(&mut malicious, names[i], kinds[i], b"", 0)
+    }
+    run Bytes.append(&mut malicious, &ending)
+    run FileSystem.writeFile(&path, Bytes.asSlice(&malicious))
+    run Testing.expect(
+      failed(
+        run Effect.result(
+          Suites.extractArchive(
+            &path,
+            Option<&Path>.none(),
+            if i == 4 {
+              "pinned/"
+            } else {
+              ""
+            },
+            &all,
+          ),
+        ),
+      ),
+      "archive rejects traversal, links, duplicates, unpinned prefixes and oversized members before allocation",
+    )
+    i = i + 1
+  }
+}
+
+effect fn suiteCases(directory: &Path, process: &mut DownloadProcess) -> ()
+  ! TestFailure
+  ? &mut FileSystem | &mut Allocator {
+  let cache = run Path.join(directory, "suite-cache")
+  let curl = run Path.join(directory, "curl")
+  let mut record = run parse("{\"path\":\"a.svg\",\"url\":\"https://example.org/a\"}")
+  let hash = run C.digest(b"original")
+  run C.setText(&mut record, "sha256", String.view(&hash))
+  let mut files = C.array()
+  run C.append(&mut files, move record)
+  let mut entry = C.object()
+  run C.put(&mut entry, "files", move files)
+  let mut curated = C.array()
+  run C.append(&mut curated, move entry)
+  let mut suite = run parse(
+    "{\"archive\":{\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}}",
+  )
+  run C.put(&mut suite, "curated", move curated)
+  let mut suites = C.object()
+  run C.put(&mut suites, "resvg", move suite)
+  let mut lock = C.object()
+  run C.put(&mut lock, "suites", move suites)
+  let extracted = run Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, false)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  let calls = process.calls
+  drop run Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, true)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(process.calls == calls, "curated cache reuse performs no network")
+  let downloads = run Path.join(&cache, "downloads")
+  let cached = run Path.join(&downloads, String.view(&hash))
+  run FileSystem.writeFile(&cached, b"tampered")
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, true)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "receipt reuse rehashes source downloads",
+  )
+  run FileSystem.writeFile(&cached, b"original")
+  let resource = run Path.join(&extracted, "a.svg")
+  run FileSystem.writeFile(&resource, b"modified")
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, true)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "receipt reuse rehashes extracted resources",
+  )
+  run FileSystem.writeFile(&resource, b"original")
+  let receiptPath = run Path.join(&extracted, ".receipt.json")
+  let mut receipt = run C.readJson(&receiptPath)
+  run C.put(&mut receipt, "files", C.object())
+  run C.writeJson(&receiptPath, &receipt)
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, true)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "receipt cannot omit locked inventory",
+  )
+  run FileSystem.removeFile(&receiptPath)
+  run Testing.expect(
+    failed(
+      run Effect.result(
+        Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, true)
+          |> Effect.provideMut<ChildProcess>(&mut process),
+      ),
+    ),
+    "incomplete extracted cache requires explicit removal",
+  )
+}
+
+effect fn filesystemCases(directory: &Path) -> ()
+  ! TestFailure
+  ? &mut FileSystem | &mut Allocator {
+  let mut process = DownloadProcess { calls: 0, changed: false, failing: false }
+  run specCases(directory, &mut process)
+  run archiveCases(directory)
+  run suiteCases(directory, &mut process)
+}
+
+test effect fn pinnedSpecSuiteAndSafeArchiveWorkflows() -> ()
+  ! TestFailure {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut filesystem = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let parent = run Path.make(
+    if Support.operatingSystem() == "windows" {
+      "/C:/Windows/Temp"
+    } else {
+      "/tmp"
+    },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let temporary = run FileSystem.temporaryDirectory(&parent, "svg-corpora-test-")
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run Effect.result(filesystemCases(&temporary.path))
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.releaseIgnored(move temporary)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move result {
+    Result<(), TestFailure>.Success { .. } => {}
+    Result<(), TestFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+}
+
+struct TestHost {
+  root: String
+}
+
+impl HostInput for TestHost {
+  effect fn argumentCount(self: &mut Self) -> usize
+    ! HostInputError {
+    return 0
+  }
+
+  effect fn argument(self: &mut Self, index: usize) -> Option<Bytes>
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    return Option<Bytes>.none()
+  }
+
+  effect fn variable(self: &mut Self, name: &[u8]) -> Option<Bytes>
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    if same(name, b"PATH") || same(name, b"SILK_PROJECT_ROOT") {
+      return Option<Bytes>.some(run Bytes.copy(String.utf8Bytes(String.view(&self.root))))
+    }
+    return Option<Bytes>.none()
+  }
+
+  effect fn workingDirectory(self: &mut Self) -> Bytes
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    return run Bytes.copy(String.utf8Bytes(String.view(&self.root)))
+  }
+}
+
+struct RenderProcess {
+  body: Bytes,
+  code: i32,
+  produce: bool,
+  calls: usize
+}
+
+effect fn renderOutput(request: &ProcessRequest, body: &[u8]) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let arguments = unsafe String.fromUtf8Unchecked(ChildProcess.arguments(request))
+  let mut parts = String.split(arguments, "\0")
+  let mut last = String.slice(arguments, 0, 0)
+  while true {
+    let part = match Split.next(&mut parts) {
+      Option<string>.Some { value } => value
+      _ => {
+        break
+      }
+    }
+    if part != "" {
+      last = part
+    }
+  }
+  let path = run nativePath(last)
+  let mut filesystem = run MachineFileSystem.make()
+  run FileSystem.writeFile(&path, body) |> Effect.provideMut<FileSystem>(&mut filesystem)
+}
+
+impl ChildProcess for RenderProcess {
+  effect fn execute(self: &mut Self, request: &ProcessRequest) -> ProcessOutcome
+    ! ProcessError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    if self.produce {
+      let result = run Effect.result(renderOutput(request, Bytes.asSlice(&self.body)))
+      if failed(move result) {
+        return ChildProcess.exited(90, Bytes.make(), Bytes.make())
+      }
+    }
+    return ChildProcess.exited(
+      self.code,
+      Bytes.make(),
+      run Bytes.copy(b"fixture renderer diagnostics"),
+    )
+  }
+}
+
+effect fn manifest(mode: string, entry: &Value) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut result = run parse("{\"version\":1,\"suite\":\"own\"}")
+  run C.setText(&mut result, "mode", mode)
+  let mut cases = C.array()
+  run C.append(&mut cases, run Json.copy(entry))
+  run C.put(&mut result, "cases", move cases)
+  return move result
+}
+
+effect fn ownCases(directory: &Path) -> ()
+  ! TestFailure
+  ? &mut FileSystem | &mut Allocator {
+  let own = run Path.join(directory, "own")
+  run FileSystem.createDirectoriesRecursively(&own)
+  let input = run Path.join(&own, "input.svg")
+  let reference = run Path.join(&own, "ref.png")
+  let manifestPath = run Path.join(&own, "manifest.json")
+  run FileSystem.writeFile(&input, b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+  let png = run Fixtures.png(1, 1, 6, &[0, 255, 0, 0, 255], &[])
+  run FileSystem.writeFile(&reference, Bytes.asSlice(&png))
+  let valid = run parse(
+    "{\"id\":\"a\",\"input\":\"input.svg\",\"references\":[{\"path\":\"ref.png\",\"relation\":\"==\"}],\"status\":\"pass\",\"reason\":\"independent reference\",\"spec\":\"https://www.w3.org/TR/SVG2/painting.html#FillProperties\"}",
+  )
+  run C.writeJson(&manifestPath, &run manifest("reference", &valid))
+  drop run References.loadOwnManifest(&manifestPath, false)
+  let extra = run Path.join(&own, "unlisted.svg")
+  run FileSystem.writeFile(&extra, b"<svg/>")
+  run Testing.expect(
+    failed(run Effect.result(References.loadOwnManifest(&manifestPath, false))),
+    "own inventory cannot silently omit a fixture",
+  )
+  run FileSystem.removeFile(&extra)
+  let mut duplicate = run manifest("reference", &valid)
+  let mut duplicateCases = C.array()
+  run C.append(&mut duplicateCases, run Json.copy(&valid))
+  run C.append(&mut duplicateCases, run Json.copy(&valid))
+  run C.put(&mut duplicate, "cases", move duplicateCases)
+  run C.writeJson(&manifestPath, &duplicate)
+  run Testing.expect(
+    failed(run Effect.result(References.loadOwnManifest(&manifestPath, false))),
+    "own manifest rejects duplicate case IDs and inputs",
+  )
+  let mut selfReference = run Json.copy(&valid)
+  run C.put(
+    &mut selfReference,
+    "references",
+    run parse("[{\"path\":\"input.svg\",\"relation\":\"==\"}]"),
+  )
+  run C.writeJson(&manifestPath, &run manifest("reference", &selfReference))
+  run Testing.expect(
+    failed(run Effect.result(References.loadOwnManifest(&manifestPath, false))),
+    "own fixtures cannot compare input against itself",
+  )
+  let mut badInput = run Json.copy(&valid)
+  run C.setText(&mut badInput, "input", "../outside.svg")
+  run C.writeJson(&manifestPath, &run manifest("reference", &badInput))
+  run Testing.expect(
+    failed(run Effect.result(References.loadOwnManifest(&manifestPath, false))),
+    "own inputs cannot escape their manifest",
+  )
+  run C.writeJson(&manifestPath, &run manifest("reference", &valid))
+  let mut host = TestHost { root: run String.copy(References.pathText(directory)) }
+  let mut process = RenderProcess {
+    body: run Bytes.copy(Bytes.asSlice(&png)),
+    code: 0,
+    produce: true,
+    calls: 0,
+  }
+  let mut options = run Reftests.defaults()
+  options.suite = run String.copy("own")
+  options.manifest = run String.copy(References.pathText(&manifestPath))
+  options.validate = true
+  let unused = run Path.join(directory, "unused")
+  let report = run Reftests.runSuite(directory, &unused, &unused, &unused, &options)
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  let renderedCases = C.wholeNumber(Json.field(&report, "rendered_cases"))
+    |> Option<i64>.unwrapOr(-1)
+  let passedCases = C.wholeNumber(Json.field(&report, "passed_cases")) |> Option<i64>.unwrapOr(-1)
+  run Testing.expect(
+    (run C.text(&report, "mode")) == "validate-only" && renderedCases == 0 && passedCases == 0
+      && process.calls == 0,
+    "manifest validation never claims rendered or passed cases",
+  )
+  let runner = run Path.join(directory, "runner")
+  run FileSystem.createDirectoriesRecursively(&runner)
+  let runnerInput = run Path.join(&runner, "input.svg")
+  run FileSystem.writeFile(&runnerInput, b"<svg/>")
+  run FileSystem.writeFile(&run Path.join(&runner, "ref.png"), Bytes.asSlice(&png))
+  let different = run Fixtures.png(1, 1, 6, &[0, 0, 255, 0, 255], &[])
+  run FileSystem.writeFile(&run Path.join(&runner, "different.png"), Bytes.asSlice(&different))
+  run FileSystem.writeFile(&run Path.join(&runner, "renderer"), b"native process provider fixture")
+  run FileSystem.writeFile(
+    &run Path.join(
+      &runner,
+      if Support.operatingSystem() == "darwin" {
+        "gtimeout"
+      } else {
+        "timeout"
+      },
+    ),
+    b"native process provider fixture",
+  )
+  host.root = run String.copy(References.pathText(&runner))
+  let command = run parse("[\"renderer\",\"{input}\",\"{output}\"]")
+  let mut entry = run Json.copy(&valid)
+  run C.put(
+    &mut entry,
+    "references",
+    run parse(
+      "[{\"path\":\"different.png\",\"relation\":\"==\"},{\"path\":\"ref.png\",\"relation\":\"==\"},{\"path\":\"different.png\",\"relation\":\"!=\"}]",
+    ),
+  )
+  let passed = run Reftests.runCase(
+    &entry,
+    &valid,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&passed, "outcome")) == "pass" && C.boolField(&passed, "rendered", false),
+    "alternative equality references and all mismatches preserve their combined rule",
+  )
+  let mut failExpectation = run Json.copy(&valid)
+  run C.setText(&mut failExpectation, "status", "fail")
+  let improvement = run Reftests.runCase(
+    &entry,
+    &failExpectation,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&improvement, "outcome")) == "unexpected-pass",
+    "fixed expected failure is a gate failure",
+  )
+  process.code = 1
+  process.produce = false
+  let error = run Reftests.runCase(
+    &entry,
+    &failExpectation,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&error, "outcome")) == "error" && !C.boolField(&error, "rendered", true),
+    "renderer failure is never an expected pixel mismatch",
+  )
+  process.code = 124
+  let timeout = run Reftests.runCase(
+    &entry,
+    &failExpectation,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&timeout, "outcome")) == "error",
+    "native deadline expiration is a runner error",
+  )
+  let mut malformed = run Json.copy(&valid)
+  run C.put(&mut malformed, "references", C.array())
+  run C.put(&mut malformed, "exit_code", C.integer(1))
+  run C.put(&mut malformed, "output_present", Value.Bool { value: false })
+  process.code = 1
+  let rejected = run Reftests.runMalformedCase(
+    &malformed,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&rejected, "outcome")) == "pass",
+    "malformed rejection requires exact exit one without output",
+  )
+  process.code = 2
+  let wrongCode = run Reftests.runMalformedCase(
+    &malformed,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&wrongCode, "outcome")) == "error",
+    "arbitrary process failure is not valid malformed rejection",
+  )
+  process.code = 1
+  process.produce = true
+  let wrongOutput = run Reftests.runMalformedCase(
+    &malformed,
+    &runner,
+    &command,
+    1.0,
+    &runner,
+    Option<&Path>.none(),
+  )
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+  run Testing.expect(
+    (run C.text(&wrongOutput, "outcome")) == "error",
+    "malformed rejection must not publish output",
+  )
+  run FileSystem.removeFile(&reference)
+  run C.writeJson(&manifestPath, &run manifest("malformed", &malformed))
+  drop run References.loadOwnManifest(&manifestPath, true)
+  run C.put(&mut malformed, "output_present", Value.Bool { value: true })
+  run C.writeJson(&manifestPath, &run manifest("malformed", &malformed))
+  run Testing.expect(
+    failed(run Effect.result(References.loadOwnManifest(&manifestPath, true))),
+    "malformed manifest rejects contradictory exit and output contracts",
+  )
+}
+
+test effect fn ownManifestsAndNativeRendererFailureContracts() -> ()
+  ! TestFailure {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut filesystem = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let parent = run Path.make(
+    if Support.operatingSystem() == "windows" {
+      "/C:/Windows/Temp"
+    } else {
+      "/tmp"
+    },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let temporary = run FileSystem.temporaryDirectory(&parent, "svg-own-test-")
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let result = run Effect.result(ownCases(&temporary.path))
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.releaseIgnored(move temporary)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move result {
+    Result<(), TestFailure>.Success { .. } => {}
+    Result<(), TestFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+}

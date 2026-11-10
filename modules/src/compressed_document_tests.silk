@@ -32,7 +32,7 @@ effect fn rejects(data: &[u8], maximum: usize, limit: bool) -> ()
   ? &mut Allocator {
   let result = run Effect.result(source(data, maximum))
   let rejected = match &result {
-    Result<Graph, StructureError | UrlError | OutOfMemoryError>.Success { value } => false
+    Result<Graph, StructureError | UrlError | OutOfMemoryError>.Success { .. } => false
     Result<Graph, StructureError | UrlError | OutOfMemoryError>.Failure { error } => match &error {
       StructureError value => if limit {
         value == StructureError.TooLarge

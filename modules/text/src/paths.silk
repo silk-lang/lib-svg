@@ -1,6 +1,6 @@
 //! Glyph geometry in user space: outlines for painting and glyph cells for the bounding box.
 import layout { Layout, PlacedGlyph, Instance, fontOf, spanInstance }
-import font_outline.outline { Outlines, Recorder, Op }
+import font_outline.outline { Outlines, Recorder }
 import svg_fonts.database { Fonts }
 import svg_geometry.geometry { Path, Point, Segment, Transform }
 import read_fonts.lib { FontRef, ReadError, TableProvider }

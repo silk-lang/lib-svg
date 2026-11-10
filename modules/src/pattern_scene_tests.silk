@@ -1,7 +1,7 @@
 //! SVG2 CR2018 pservers #PaintServerTemplates, #PatternNotes and coords
 //! #ObjectBoundingBox. These exercise the real styled graph -> retained picture seam.
 import resolve
-import scene { RenderTree, RenderOptions, RenderError, Paint, PaintInstance }
+import scene { RenderTree, RenderOptions, RenderError, Paint }
 import structure { Options, StructureError }
 import structure
 import document_styles

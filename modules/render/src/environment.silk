@@ -12,7 +12,6 @@ import svg_css.computed { HostContext, ComputedError }
 import svg_css.dimensions { Context as DimensionContext }
 import svg_css.media_features { Environment as MediaEnvironment }
 import svg_css.colors { Context as ColorContext, Color, Identity }
-import silk.num.u64
 import svg_css.tokens { Limits, CssError }
 import svg_css.tokens
 import svg_css.lexer

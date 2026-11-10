@@ -118,7 +118,7 @@ pub fn strokeOnly(style: Style) -> Style {
   let mut result = style
   result.fill = Paint.None
   result.stroke = match &style.stroke {
-    Paint.Solid { color } => style.stroke
+    Paint.Solid { .. } => style.stroke
     Paint.CurrentColor => Paint.Solid { color: style.color }
     _ => Paint.None
   }
@@ -155,8 +155,8 @@ fn endPoint(segment: Segment) -> Option<Point> {
   return match &segment {
     Segment.MoveTo { to } => Option<Point>.some(to)
     Segment.LineTo { to } => Option<Point>.some(to)
-    Segment.QuadraticTo { control, to } => Option<Point>.some(to)
-    Segment.CubicTo { control1, control2, to } => Option<Point>.some(to)
+    Segment.QuadraticTo { to, .. } => Option<Point>.some(to)
+    Segment.CubicTo { to, .. } => Option<Point>.some(to)
     Segment.ArcTo { arc } => Option<Point>.some(arc.to)
     Segment.Close => Option<Point>.None
   }

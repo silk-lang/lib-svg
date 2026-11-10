@@ -16,7 +16,7 @@ import silk.xml.document {
   XmlReason,
   XmlLimits,
 }
-import svg_css.tokens { Limits, CssError, CssErrorKind, TokenRange, Span, equal, insensitive }
+import svg_css.tokens { Limits, CssError, CssErrorKind, TokenRange, equal, insensitive }
 import svg_css.encoding { Encoding }
 import svg_css.encoding
 import svg_css.effect_values { EffectValue, ClipSource, Image, Filter }
@@ -298,7 +298,7 @@ effect fn sheets(document: &XmlDocument, limits: &Limits) -> List<Sheet>
           if supported && (!alt || pseudo(&attributes, "title").length != 0) {
             let hasHref = match &(attributes.get("href")
               |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
-              Option<&[u8]>.Some { value } => true
+              Option<&[u8]>.Some { .. } => true
               _ => false
             }
             if hasHref {
@@ -924,7 +924,6 @@ pub effect fn build<'a>(
   let mut context = MatchContext.make(XmlDocument.root(document).index, NO_ELEMENT)
   let mut i: usize = 0
   while i < nodes.length {
-    let node = XmlNodeId { index: i }
     if nodes[i].kind != XmlNodeKind.Element {
       run nodeStyles.append(Option<StyleId>.None)
     } else {
@@ -973,7 +972,7 @@ effect fn sourceBase(
 fn hasReference(store: &Store<'_>, id: ValueId) -> bool {
   match &store.get(id).* {
     Value.Paint { paint } => match &paint {
-      Paint.Server { url, fallback } => {
+      Paint.Server { url, .. } => {
         return store.text(url).length > 0
       }
       _ => {}
@@ -988,7 +987,7 @@ fn hasReference(store: &Store<'_>, id: ValueId) -> bool {
         }
         _ => {}
       }
-      EffectValue.Masks { layers, resetBorder } => {
+      EffectValue.Masks { layers, .. } => {
         let mut layer: usize = 0
         while layer < layers.length() {
           if let Image.Url { url } = &layers.asSlice()[layer].image {
@@ -1269,7 +1268,7 @@ pub effect fn buildGraph<'a>(
           let mut reference = Bytes.make()
           match &catalog.engine.values.get(entry.value).* {
             Value.Paint { paint } => match &paint {
-              Paint.Server { url, fallback } => {
+              Paint.Server { url, .. } => {
                 run reference.append(catalog.engine.values.text(url))
               }
               _ => {}
@@ -1284,7 +1283,7 @@ pub effect fn buildGraph<'a>(
                 }
                 _ => {}
               }
-              EffectValue.Masks { layers, resetBorder } => {
+              EffectValue.Masks { layers, .. } => {
                 let mut layer: usize = 0
                 while layer < layers.length() {
                   let mut urlBytes = Bytes.make()

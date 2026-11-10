@@ -57,14 +57,14 @@ test effect fn secureModesRejectExternalRequestsBeforeHostDispatch() -> ()
       let blocked = match &result {
         Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
           ResourceError reason => reason == ResourceError.BlockedLocation
-          OutOfMemoryError exhausted => {
+          OutOfMemoryError _ => {
             fail OutOfMemoryError {}
           }
         }
         _ => false
       }
       let allowed = match &result {
-        Result<Response, ResourceError | OutOfMemoryError>.Success { value } => true
+        Result<Response, ResourceError | OutOfMemoryError>.Success { .. } => true
         _ => false
       }
       if modes[m] == ProcessingMode.SecureStatic || modes[m] == ProcessingMode.SecureAnimated {
@@ -121,7 +121,7 @@ test effect fn hostResponsesCannotBypassTheConsumerByteLimit() -> ()
     match &result {
       Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
         ResourceError reason => reason == ResourceError.TooLarge
-        OutOfMemoryError exhausted => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }

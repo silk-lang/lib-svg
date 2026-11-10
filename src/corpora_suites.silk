@@ -1,0 +1,882 @@
+import corpora { CorpusError, CorpusFailure }
+import corpora
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value, JsonEntry }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.mem.pointer { Pointer }
+import silk.system.filesystem { FileSystem, Path }
+import silk.system.child_process { ChildProcess }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.i64
+import silk.num.isize
+import silk.num.usize
+import silk.num.u8
+import silk.core.ownership { Drop }
+import silk.core.order { Order, Ordering }
+import silk.collections.hash { Hash, HashKey, HashSeed }
+import silk.collections.hash_set { HashSet }
+import silk.crypto.sha2 { Sha256 }
+
+const MAX_DOWNLOAD: usize = 536870912
+
+const MAX_MEMBER: usize = 134217728
+
+const MAX_EXTRACTED: usize = 2147483648
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.host_path as WindowsHostPath
+  @foreign(noCapture: ("oldPath", "newPath"))
+  unsafe extern "C" fn MoveFileExW(
+    oldPath: ?[*]const u16,
+    newPath: ?[*]const u16,
+    flags: u32,
+  ) -> i32
+} else {
+  @foreign(noCapture: ("oldPath", "newPath"))
+  unsafe extern "C" fn rename(oldPath: ?[*]const u8, newPath: ?[*]const u8) -> i32
+}
+
+extern "C" struct Archive {}
+
+extern "C" struct ArchiveEntry {}
+
+unsafe extern "C" fn archive_read_new() -> ?*mut Archive
+
+unsafe extern "C" fn archive_read_support_filter_gzip(archive: *mut Archive) -> i32
+
+unsafe extern "C" fn archive_read_support_format_tar(archive: *mut Archive) -> i32
+
+@foreign(noCapture: ("module", "option", "value"))
+unsafe extern "C" fn archive_read_set_format_option(
+  archive: *mut Archive,
+  module: ?[*]const u8,
+  option: ?[*]const u8,
+  value: ?[*]const u8,
+) -> i32
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  @foreign(noCapture: .("filename"))
+  unsafe extern "C" fn archive_read_open_filename_w(
+    archive: *mut Archive,
+    filename: ?[*]const u16,
+    blockSize: usize,
+  ) -> i32
+}
+
+@foreign(noCapture: .("filename"))
+unsafe extern "C" fn archive_read_open_filename(
+  archive: *mut Archive,
+  filename: ?[*]const u8,
+  blockSize: usize,
+) -> i32
+
+@foreign(noCapture: .("entry"))
+unsafe extern "C" fn archive_read_next_header(
+  archive: *mut Archive,
+  entry: *mut ?*mut ArchiveEntry,
+) -> i32
+
+unsafe extern "C" fn archive_entry_pathname_utf8(entry: *mut ArchiveEntry) -> ?[*]const u8
+
+unsafe extern "C" fn archive_entry_filetype(entry: *mut ArchiveEntry) -> u32
+
+unsafe extern "C" fn archive_entry_size(entry: *mut ArchiveEntry) -> i64
+
+unsafe extern "C" fn archive_entry_hardlink(entry: *mut ArchiveEntry) -> ?[*]const u8
+
+@foreign(noCapture: .("buffer"))
+unsafe extern "C" fn archive_read_data(
+  archive: *mut Archive,
+  buffer: ?[*]mut u8,
+  size: usize,
+) -> isize
+
+unsafe extern "C" fn archive_read_data_skip(archive: *mut Archive) -> i32
+
+unsafe extern "C" fn archive_read_free(archive: *mut Archive) -> i32
+
+struct ArchiveOwner {
+  handle: *mut Archive
+}
+
+impl Drop for ArchiveOwner {
+  fn drop(self: &mut Self) -> () {
+    let _closed = unsafe archive_read_free(self.handle)
+  }
+}
+
+struct NameKey {
+  name: String
+}
+
+impl NameKey {
+  fn sameName(left: &NameKey, right: &NameKey) -> bool {
+    return String.view(&left.name) == String.view(&right.name)
+  }
+
+  fn hashName(value: &NameKey, seed: &HashSeed) -> u64 {
+    let text = String.view(&value.name)
+    return HashKey.hash(&text, seed)
+  }
+}
+
+impl HashKey for NameKey {
+  equals: NameKey.sameName
+
+  hash: NameKey.hashName
+}
+
+effect fn archiveName(pointer: ?[*]const u8) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  if Pointer.isNullMany(pointer) {
+    run corpora.reject("archive path is not UTF-8")
+  }
+  let bytes = unsafe Intrinsic.pointerRequalify<?[*]const u8, [*]const u8>(pointer)
+  let mut length: usize = 0
+  while (unsafe Pointer.read(unsafe Pointer.at(bytes, length))) != 0 {
+    length = length + 1
+    if length > 1048576 {
+      run corpora.reject("archive path too long")
+    }
+  }
+  let slice = unsafe Pointer.borrowMany(&pointer, bytes, length)
+  return match String.fromUtf8(slice) {
+    Result<string, InvalidUtf8>.Success { value } => run String.copy(value)
+    _ => {
+      fail CorpusError { message: run String.copy("archive path is not UTF-8") }
+    }
+  }
+}
+
+fn trimSlash(name: string) -> string {
+  let bytes = String.utf8Bytes(name)
+  let mut length = bytes.length
+  while length > 0 && bytes[length - 1] == 47 {
+    length = length - 1
+  }
+  return String.slice(name, 0, length)
+}
+
+fn selected(name: string, prefix: string) -> bool {
+  let normalized = trimSlash(prefix)
+  if normalized == "" || name == normalized {
+    return true
+  }
+  let length = String.utf8Bytes(normalized).length
+  return String.startsWith(name, normalized) && String.utf8Bytes(name).length > length
+    && String.utf8Bytes(name)[length] == 47
+}
+
+pub effect fn extractArchive(
+  archive: &Path,
+  destination: Option<&Path>,
+  stripPrefix: string,
+  include: &Value,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let raw = unsafe archive_read_new()
+  if Pointer.isNull(raw) {
+    fail OutOfMemoryError {}
+  }
+  let owner = ArchiveOwner {
+    handle: unsafe Intrinsic.pointerRequalify<?*mut Archive, *mut Archive>(raw),
+  }
+  if unsafe archive_read_support_filter_gzip(owner.handle) != 0
+    || unsafe archive_read_support_format_tar(owner.handle) != 0 {
+    run corpora.reject("cannot initialize archive reader")
+  }
+  if unsafe archive_read_set_format_option(
+    owner.handle,
+    Pointer.fromSlice(b"tar\0"),
+    Pointer.fromSlice(b"hdrcharset\0"),
+    Pointer.fromSlice(b"UTF-8\0"),
+  )
+    != 0 {
+    run corpora.reject("cannot configure UTF-8 archive paths")
+  }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    let filename = match move run WindowsHostPath.wide(archive) {
+      Option<List<u16>>.Some { value } => move value
+      _ => {
+        fail CorpusError { message: run String.copy("invalid native archive path") }
+      }
+    }
+    if unsafe archive_read_open_filename_w(
+      owner.handle,
+      Pointer.fromSlice(List<u16>.asSlice(&filename)),
+      65536,
+    )
+      != 0 {
+      run corpora.reject("cannot open suite archive")
+    }
+  } else {
+    let mut filename = run corpora.nativePath(archive)
+    run Bytes.append(&mut filename, b"\0")
+    if unsafe archive_read_open_filename(
+      owner.handle,
+      Pointer.fromSlice(Bytes.asSlice(&filename)),
+      65536,
+    )
+      != 0 {
+      run corpora.reject("cannot open suite archive")
+    }
+  }
+  let prefixes = run corpora.values(include)
+  let mut hashes = List<JsonEntry>.make()
+  let mut names = HashSet<NameKey>.make(Hash.seed(0))
+  let mut total: usize = 0
+  while true {
+    let mut entry = Pointer.null<ArchiveEntry>()
+    let code = unsafe archive_read_next_header(owner.handle, Pointer.fromMutRef(&mut entry))
+    if code == 1 {
+      break
+    }
+    if code != 0 || Pointer.isNull(entry) {
+      run corpora.reject("invalid suite archive header")
+    }
+    let current = unsafe Intrinsic.pointerRequalify<?*mut ArchiveEntry, *mut ArchiveEntry>(entry)
+    let ownedName = run archiveName(unsafe archive_entry_pathname_utf8(current))
+    let mut name = trimSlash(String.view(&ownedName))
+    run corpora.relativePath(name)
+    if stripPrefix != "" {
+      if name == trimSlash(stripPrefix) {
+        if unsafe archive_read_data_skip(owner.handle) != 0 {
+          run corpora.reject("truncated suite archive")
+        }
+        continue
+      }
+      if !String.startsWith(name, stripPrefix) {
+        run corpora.reject("archive member outside pinned prefix")
+      }
+      let length = String.utf8Bytes(stripPrefix).length
+      name = String.slice(name, length, String.utf8Bytes(name).length - length)
+    }
+    let mut included = false
+    let mut index: usize = 0
+    while index < prefixes.length {
+      let prefix = Json.asString(Option<&Value>.some(&prefixes[index]))
+        |> Option<string>.unwrapOr("\0")
+      if prefix == "\0" {
+        run corpora.reject("invalid suite include prefix")
+      }
+      if selected(name, prefix) {
+        included = true
+      }
+      index = index + 1
+    }
+    let kind = unsafe archive_entry_filetype(current)
+    if !included || kind == 16384 {
+      if unsafe archive_read_data_skip(owner.handle) != 0 {
+        run corpora.reject("truncated suite archive")
+      }
+      continue
+    }
+    if kind != 32768 || !Pointer.isNullMany(unsafe archive_entry_hardlink(current)) {
+      run corpora.reject("archive links/special files are forbidden")
+    }
+    run corpora.relativePath(name)
+    if run HashSet<NameKey>.insert(&mut names, NameKey { name: run String.copy(name) }) {
+      run corpora.reject("duplicate archive member")
+    }
+    let signedSize = unsafe archive_entry_size(current)
+    if signedSize < 0 || signedSize > 134217728 {
+      run corpora.reject("archive exceeds extraction size limit")
+    }
+    let size = i64.toUsize(signedSize)
+    if size > MAX_MEMBER || total > MAX_EXTRACTED - size {
+      run corpora.reject("archive exceeds extraction size limit")
+    }
+    total = total + size
+    let writing = Option<&Path>.isSome(&destination)
+    let mut body = Bytes.make()
+    if writing {
+      run Bytes.reserveExact(&mut body, size)
+    }
+    let mut hash = Sha256.make()
+    let mut consumed: usize = 0
+    let mut buffer: [u8; 65536] = [0; 65536]
+    while true {
+      let amount = unsafe archive_read_data(
+        owner.handle,
+        Pointer.fromMutSlice(&mut buffer),
+        buffer.length,
+      )
+      if amount < 0 {
+        run corpora.reject("invalid archive member data")
+      }
+      if amount == 0 {
+        break
+      }
+      let count = isize.toUsize(amount)
+      if count > size - consumed {
+        run corpora.reject("archive member exceeds declared size")
+      }
+      let chunk = Slice.view<u8>(&buffer, 0, count)
+      Sha256.update(&mut hash, chunk)
+      if writing {
+        run Bytes.append(&mut body, chunk)
+      }
+      consumed = consumed + count
+    }
+    if consumed != size {
+      run corpora.reject("truncated archive member")
+    }
+    let rawDigest = Sha256.finish(move hash)
+    let digest = run corpora.hexDigest(&rawDigest)
+    match &destination {
+      Option<&Path>.Some { value } => {
+        let path = run corpora.contained(value, name)
+        run FileSystem.writeFileWithParents(&path, Bytes.asSlice(&body))
+      }
+      _ => {}
+    }
+    run List<JsonEntry>.append(
+      &mut hashes,
+      run corpora.member(name, run corpora.stringValue(String.view(&digest))),
+    )
+  }
+  return Value.Object { entries: move hashes }
+}
+
+pub effect fn download(record: &Value, cache: &Path, curl: &Path, offline: bool) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let hash = run corpora.text(record, "sha256")
+  if !corpora.validHex(hash, 64) {
+    run corpora.reject("invalid SHA-256 pin")
+  }
+  run FileSystem.createDirectoriesRecursively(cache)
+  let target = run corpora.contained(cache, hash)
+  if run FileSystem.exists(&target) {
+    let bytes = run FileSystem.readFile(&target)
+    let actual = run corpora.digest(Bytes.asSlice(&bytes))
+    if String.view(&actual) != hash {
+      run corpora.reject("hash mismatch in cached download; remove corrupted cache explicitly")
+    }
+    return move target
+  }
+  if offline {
+    run corpora.reject("offline cache miss")
+  }
+  let fetched = run corpora.download(
+    run corpora.text(record, "url"),
+    cache,
+    curl,
+    "536870912",
+    "120",
+    "read-fonts-svg-suites/1",
+  )
+  if Bytes.length(&fetched.body) > MAX_DOWNLOAD {
+    run corpora.reject("suite download exceeds size limit")
+  }
+  let actual = run corpora.digest(Bytes.asSlice(&fetched.body))
+  if String.view(&actual) != hash {
+    run corpora.reject("hash mismatch; use --update only after reviewing upstream")
+  }
+  run corpora.atomicWrite(&target, Bytes.asSlice(&fetched.body))
+  return move target
+}
+
+pub effect fn loadLock(path: &Path) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let lock = run corpora.readJson(path)
+  if (corpora.wholeNumber(Json.field(&lock, "version")) |> Option<i64>.unwrapOr(0)) != 1 {
+    run corpora.reject("unsupported suite lock")
+  }
+  let suites = run corpora.field(&lock, "suites")
+  let entries = run corpora.entries(suites)
+  if entries.length != 3 {
+    run corpora.reject("incomplete suite lock")
+  }
+  let names = ["resvg", "w3c-svg11", "wpt"]
+  let mut index: usize = 0
+  while index < names.length {
+    let name = names[index]
+    let suite = run corpora.field(suites, name)
+    if name != "w3c-svg11" && !corpora.validHex(run corpora.text(suite, "revision"), 40) {
+      run corpora.reject("revision must be a full commit SHA")
+    }
+    run validateRecord(run corpora.field(suite, "archive"))
+    match Json.field(suite, "curated") {
+      Option<&Value>.Some { value } => {
+        let cases = run corpora.values(value)
+        if name == "resvg" && (cases.length == 0 || cases.length > 200) {
+          run corpora.reject("resvg curated subset must contain 1–200 cases")
+        }
+        let mut at: usize = 0
+        while at < cases.length {
+          let files = run corpora.values(run corpora.field(&cases[at], "files"))
+          let mut file: usize = 0
+          while file < files.length {
+            run validateRecord(&files[file])
+            file = file + 1
+          }
+          at = at + 1
+        }
+      }
+      _ => {
+        if name == "resvg" {
+          run corpora.reject("resvg curated subset missing")
+        }
+      }
+    }
+    index = index + 1
+  }
+  return move lock
+}
+
+effect fn validateRecord(record: &Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  if !corpora.validHex(run corpora.text(record, "sha256"), 64)
+    || !String.startsWith(run corpora.text(record, "url"), "https://") {
+    run corpora.reject("invalid download pin")
+  }
+  match Json.field(record, "path") {
+    Option<&Value>.Some { value: _ } => {
+      run corpora.relativePath(run corpora.text(record, "path"))
+    }
+    _ => {}
+  }
+}
+
+pub effect fn suiteDirectory(cache: &Path, suite: &Value, full: bool) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let mut relative = run String.copy(
+    run corpora.text(run corpora.field(suite, "archive"), "sha256"),
+  )
+  if full {
+    run String.append(&mut relative, "/full")
+  } else {
+    run String.append(&mut relative, "/curated")
+  }
+  return run corpora.contained(cache, String.view(&relative))
+}
+
+effect fn sourceInventory(
+  suite: &Value,
+  staging: Option<&Path>,
+  downloads: &Path,
+  curl: &Path,
+  full: bool,
+  offline: bool,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if full {
+    let archive = run download(run corpora.field(suite, "archive"), downloads, curl, offline)
+    return run extractArchive(
+      &archive,
+      staging,
+      run corpora.text(suite, "strip_prefix"),
+      run corpora.field(suite, "include"),
+    )
+  }
+  let mut hashes = corpora.object()
+  let cases = run corpora.values(run corpora.field(suite, "curated"))
+  let mut index: usize = 0
+  while index < cases.length {
+    let files = run corpora.values(run corpora.field(&cases[index], "files"))
+    let mut at: usize = 0
+    while at < files.length {
+      let source = run download(&files[at], downloads, curl, offline)
+      let name = run corpora.text(&files[at], "path")
+      match &staging {
+        Option<&Path>.Some { value } => {
+          let destination = run corpora.contained(value, name)
+          let bytes = run FileSystem.readFile(&source)
+          run FileSystem.writeFileWithParents(&destination, Bytes.asSlice(&bytes))
+        }
+        _ => {}
+      }
+      run corpora.put(
+        &mut hashes,
+        name,
+        run corpora.stringValue(run corpora.text(&files[at], "sha256")),
+      )
+      at = at + 1
+    }
+    index = index + 1
+  }
+  return move hashes
+}
+
+pub effect fn verifyReceipt(root: &Path, receipt: &Value) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let files = run corpora.entries(run corpora.field(receipt, "files"))
+  let mut index: usize = 0
+  while index < files.length {
+    let name = String.view(&files[index].key)
+    let target = run corpora.contained(root, name)
+    let bytes = run FileSystem.readFile(&target)
+    let actual = run corpora.digest(Bytes.asSlice(&bytes))
+    let expected = Json.asString(Option<&Value>.some(&files[index].value))
+      |> Option<string>.unwrapOr("")
+    if String.view(&actual) != expected {
+      run corpora.reject("hash mismatch for extracted resource")
+    }
+    index = index + 1
+  }
+}
+
+pub effect fn fetchSuite(
+  lock: &Value,
+  name: string,
+  cache: &Path,
+  curl: &Path,
+  full: bool,
+  offline: bool,
+) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if name != "resvg" && !full {
+    run corpora.reject("suite has no curated subset; use --full explicitly")
+  }
+  let suite = run corpora.field(run corpora.field(lock, "suites"), name)
+  let target = run suiteDirectory(cache, suite, full)
+  let receiptPath = run corpora.contained(&target, ".receipt.json")
+  let pin = run receiptPin(suite)
+  let downloads = run Path.join(cache, "downloads")
+  if run FileSystem.exists(&receiptPath) {
+    let receipt = run corpora.readJson(&receiptPath)
+    if (run corpora.text(&receipt, "pin")) != String.view(&pin) {
+      run corpora.reject(
+        "suite receipt does not match lock; remove stale extracted cache explicitly",
+      )
+    }
+    let inventory = run sourceInventory(
+      suite,
+      Option<&Path>.none(),
+      &downloads,
+      curl,
+      full,
+      offline,
+    )
+    let expected = run receiptPin(&inventory)
+    let actual = run receiptPin(run corpora.field(&receipt, "files"))
+    if String.view(&actual) != String.view(&expected) {
+      run corpora.reject("suite receipt inventory differs from pinned source inventory")
+    }
+    run verifyReceipt(&target, &receipt)
+    return move target
+  }
+  let parent = match run Path.parent(&target) {
+    Option<Path>.Some { value } => move value
+    _ => {
+      fail CorpusError { message: run String.copy("invalid suite cache") }
+    }
+  }
+  run FileSystem.createDirectoriesRecursively(&parent)
+  let temporary = run FileSystem.temporaryDirectory(&parent, ".suite-")
+  let staging = run Path.join(&temporary.path, "suite")
+  run FileSystem.createDirectory(&staging)
+  let attempted = run Effect.result(
+    stageSuite(suite, name, String.view(&pin), &staging, &target, &downloads, curl, full, offline),
+  )
+  run FileSystem.releaseIgnored(move temporary)
+  match move attempted {
+    Result<(), CorpusFailure>.Success { .. } => {}
+    Result<(), CorpusFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+  return move target
+}
+
+effect fn stageSuite(
+  suite: &Value,
+  name: string,
+  pin: string,
+  staging: &Path,
+  target: &Path,
+  downloads: &Path,
+  curl: &Path,
+  full: bool,
+  offline: bool,
+) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let hashes = run sourceInventory(
+    suite,
+    Option<&Path>.some(staging),
+    downloads,
+    curl,
+    full,
+    offline,
+  )
+  let mut receipt = corpora.object()
+  run corpora.put(&mut receipt, "pin", run corpora.stringValue(pin))
+  run corpora.put(&mut receipt, "suite", run corpora.stringValue(name))
+  run corpora.put(&mut receipt, "files", move hashes)
+  let receiptPath = run Path.join(staging, ".receipt.json")
+  run corpora.writeJson(&receiptPath, &receipt)
+  if run FileSystem.exists(target) {
+    run corpora.reject("incomplete cache exists; remove it explicitly")
+  }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    let source = match move run WindowsHostPath.wide(staging) {
+      Option<List<u16>>.Some { value } => move value
+      _ => {
+        fail CorpusError { message: run String.copy("invalid native source path") }
+      }
+    }
+    let destination = match move run WindowsHostPath.wide(target) {
+      Option<List<u16>>.Some { value } => move value
+      _ => {
+        fail CorpusError { message: run String.copy("invalid native destination path") }
+      }
+    }
+    if unsafe MoveFileExW(
+      Pointer.fromSlice(List<u16>.asSlice(&source)),
+      Pointer.fromSlice(List<u16>.asSlice(&destination)),
+      0,
+    )
+      == 0 {
+      run corpora.reject("cannot publish suite cache")
+    }
+  } else {
+    let mut sourceName = run Bytes.copy(Path.rawBytes(staging))
+    let mut targetName = run Bytes.copy(Path.rawBytes(target))
+    run Bytes.append(&mut sourceName, b"\0")
+    run Bytes.append(&mut targetName, b"\0")
+    if unsafe rename(
+      Pointer.fromSlice(Bytes.asSlice(&sourceName)),
+      Pointer.fromSlice(Bytes.asSlice(&targetName)),
+    )
+      != 0 {
+      run corpora.reject("cannot publish suite cache")
+    }
+  }
+}
+
+pub effect fn receiptPin(value: &Value) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut encoded = String.make()
+  run canonical(&mut encoded, value)
+  return run corpora.digest(String.utf8Bytes(String.view(&encoded)))
+}
+
+struct SortedEntry<'a> {
+  key: string<'a>,
+  value: &'a Value
+}
+
+impl<'a> Order for SortedEntry<'a> {
+  fn compare(left: &Self, right: &Self) -> Ordering {
+    if corpora.before(left.key, right.key) {
+      return Ordering.Less
+    }
+    if corpora.before(right.key, left.key) {
+      return Ordering.Greater
+    }
+    return Ordering.Equal
+  }
+}
+
+effect fn canonical<'a>(output: &mut String, value: &'a Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  match &value.* {
+    Value.Object { entries } => {
+      let mut sorted = List<SortedEntry<'a>>.make()
+      let mut index: usize = 0
+      while index < List<JsonEntry>.length(&entries) {
+        let entry = &List<JsonEntry>.asSlice(&entries)[index]
+        run List<SortedEntry<'a>>.append(
+          &mut sorted,
+          SortedEntry<'a> { key: String.view(&entry.key), value: &entry.value },
+        )
+        index = index + 1
+      }
+      run List<SortedEntry<'a>>.sort(&mut sorted)
+      run String.append(&mut output, "{")
+      index = 0
+      while index < List<SortedEntry<'a>>.length(&sorted) {
+        if index != 0 {
+          run String.append(&mut output, ", ")
+        }
+        let entry = &List<SortedEntry<'a>>.asSlice(&sorted)[index]
+        run asciiQuoted(&mut output, entry.key)
+        run String.append(&mut output, ": ")
+        run canonical(&mut output, entry.value)
+        index = index + 1
+      }
+      run String.append(&mut output, "}")
+    }
+    Value.Array { values } => {
+      run String.append(&mut output, "[")
+      let mut index: usize = 0
+      while index < List<Value>.length(&values) {
+        if index != 0 {
+          run String.append(&mut output, ", ")
+        }
+        run canonical(&mut output, &List<Value>.asSlice(&values)[index])
+        index = index + 1
+      }
+      run String.append(&mut output, "]")
+    }
+    Value.String { text } => {
+      run asciiQuoted(&mut output, String.view(&text))
+    }
+    _ => {
+      run corpora.encode(&mut output, value)
+    }
+  }
+}
+
+effect fn asciiQuoted(output: &mut String, text: string) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut quoted = String.make()
+  run corpora.quoted(&mut quoted, text)
+  let bytes = String.utf8Bytes(String.view(&quoted))
+  let mut index: usize = 0
+  let mut start: usize = 0
+  while index < bytes.length {
+    if bytes[index] < 127 {
+      index = index + 1
+      continue
+    }
+    run String.append(&mut output, String.slice(String.view(&quoted), start, index - start))
+    let first = bytes[index]
+    let mut scalar = u8.toUsize(first)
+    let mut count: usize = 1
+    if first >= 240 {
+      scalar = scalar - 240
+      count = 4
+    } else if first >= 224 {
+      scalar = scalar - 224
+      count = 3
+    } else if first >= 192 {
+      scalar = scalar - 192
+      count = 2
+    }
+    let mut offset: usize = 1
+    while offset < count {
+      scalar = scalar * 64 + u8.toUsize(bytes[index + offset]) - 128
+      offset = offset + 1
+    }
+    if scalar > 65535 {
+      let supplementary = scalar - 65536
+      run unicodeEscape(&mut output, 55296 + supplementary / 1024)
+      run unicodeEscape(&mut output, 56320 + supplementary % 1024)
+    } else {
+      run unicodeEscape(&mut output, scalar)
+    }
+    index = index + count
+    start = index
+  }
+  run String.append(&mut output, String.slice(String.view(&quoted), start, bytes.length - start))
+}
+
+effect fn unicodeEscape(output: &mut String, scalar: usize) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let hex = b"0123456789abcdef"
+  let bytes: [u8; 6] = [
+    92,
+    117,
+    hex[scalar / 4096 % 16],
+    hex[scalar / 256 % 16],
+    hex[scalar / 16 % 16],
+    hex[scalar % 16],
+  ]
+  run String.append(&mut output, unsafe String.fromUtf8Unchecked(&bytes))
+}
+
+effect fn updateRecord(
+  record: &Value,
+  oldRevision: string,
+  revision: string,
+  cache: &Path,
+  curl: &Path,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let url = run corpora.replaceAll(run corpora.text(record, "url"), oldRevision, revision)
+  let downloaded = run corpora.download(
+    String.view(&url),
+    cache,
+    curl,
+    "536870912",
+    "120",
+    "read-fonts-svg-suites/1",
+  )
+  if Bytes.length(&downloaded.body) > MAX_DOWNLOAD {
+    run corpora.reject("suite download exceeds size limit")
+  }
+  let hash = run corpora.digest(Bytes.asSlice(&downloaded.body))
+  let mut result = run Json.copy(record)
+  run corpora.setText(&mut result, "url", String.view(&url))
+  run corpora.setText(&mut result, "sha256", String.view(&hash))
+  run corpora.put(&mut result, "bytes", corpora.integer(Bytes.length(&downloaded.body)))
+  return move result
+}
+
+pub effect fn updateSuite(
+  lock: &mut Value,
+  name: string,
+  revision: string,
+  cache: &Path,
+  curl: &Path,
+) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if name != "w3c-svg11" && !corpora.validHex(revision, 40) {
+    run corpora.reject("--update requires --revision with a reviewed full commit SHA")
+  }
+  if name == "w3c-svg11" && revision != "" {
+    run corpora.reject("W3C suite is the dated 20110816 release, not a git revision")
+  }
+  let mut suites = run Json.copy(run corpora.field(&lock.*, "suites"))
+  let suite = run corpora.field(&suites, name)
+  let mut old = ""
+  if name != "w3c-svg11" {
+    old = run corpora.text(suite, "revision")
+  }
+  let mut updated = run Json.copy(suite)
+  run FileSystem.createDirectoriesRecursively(cache)
+  if name != "w3c-svg11" {
+    run corpora.setText(&mut updated, "revision", revision)
+    let prefix = run corpora.replaceAll(run corpora.text(suite, "strip_prefix"), old, revision)
+    run corpora.setText(&mut updated, "strip_prefix", String.view(&prefix))
+  }
+  let archive = run updateRecord(run corpora.field(suite, "archive"), old, revision, cache, curl)
+  run corpora.put(&mut updated, "archive", move archive)
+  if corpora.has(suite, "curated") {
+    let cases = run corpora.values(run corpora.field(suite, "curated"))
+    let mut curated = corpora.array()
+    let mut index: usize = 0
+    while index < cases.length {
+      let sourceFiles = run corpora.values(run corpora.field(&cases[index], "files"))
+      let mut files = corpora.array()
+      let mut at: usize = 0
+      while at < sourceFiles.length {
+        run corpora.append(
+          &mut files,
+          run updateRecord(&sourceFiles[at], old, revision, cache, curl),
+        )
+        at = at + 1
+      }
+      let mut entry = run Json.copy(&cases[index])
+      run corpora.put(&mut entry, "files", move files)
+      run corpora.append(&mut curated, move entry)
+      index = index + 1
+    }
+    run corpora.put(&mut updated, "curated", move curated)
+  }
+  drop suite
+  run corpora.put(&mut suites, name, move updated)
+  run corpora.put(&mut lock, "suites", move suites)
+}

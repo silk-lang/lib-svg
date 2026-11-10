@@ -1,0 +1,189 @@
+// Lexbor 2.5 ABI: upstream source/lexbor/{dom,html}/interfaces headers.
+// HTML tree construction (including script raw text, foreign content and templates) stays native.
+import corpora { CorpusError, CorpusFailure }
+import corpora
+import silk.collections.list { List }
+import silk.core.ownership { Drop }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.mem.pointer { Pointer }
+import silk.text.string { String, InvalidUtf8 }
+import silk.core.result { Result }
+import silk.core.option { Option }
+import silk.num.usize
+
+extern "C" struct Node {
+  events: ?*mut u8,
+  localName: usize,
+  prefix: usize,
+  namespace: usize,
+  document: ?*mut u8,
+  next: ?*mut Node,
+  previous: ?*mut Node,
+  parent: ?*mut Node,
+  firstChild: ?*mut Node,
+  lastChild: ?*mut Node,
+  user: ?*mut u8,
+  kind: u32,
+}
+
+extern "C" struct Element {
+  node: Node,
+  upperName: usize,
+  qualifiedName: usize,
+  isValue: ?*mut u8,
+  firstAttribute: ?*mut u8,
+  lastAttribute: ?*mut u8,
+  idAttribute: ?*mut u8,
+  classAttribute: ?*mut u8,
+  style: ?*mut u8,
+  list: ?*mut u8,
+  customState: u32,
+}
+
+extern "C" struct Template {
+  element: Element,
+  content: ?*mut Node
+}
+
+extern "C" struct Document {}
+
+unsafe extern "C" fn lxb_html_document_create() -> ?*mut Document
+
+unsafe extern "C" fn lxb_html_document_destroy(document: *mut Document) -> ?*mut Document
+
+unsafe extern "C" fn lxb_dom_document_scripting_set_noi(
+  document: *mut Document,
+  scripting: u8,
+) -> ()
+
+@foreign(noCapture: .("bytes"))
+unsafe extern "C" fn lxb_html_document_parse(
+  document: *mut Document,
+  bytes: ?[*]const u8,
+  length: usize,
+) -> u32
+
+@foreign(noCapture: .("length"))
+unsafe extern "C" fn lxb_dom_element_local_name(element: *mut Element, length: *mut usize) ->
+  ?[*]const u8
+
+@foreign(noCapture: ("name", "length"))
+unsafe extern "C" fn lxb_dom_element_get_attribute(
+  element: *mut Element,
+  name: ?[*]const u8,
+  nameLength: usize,
+  length: *mut usize,
+) -> ?[*]const u8
+
+struct Owner {
+  document: *mut Document
+}
+
+impl Drop for Owner {
+  fn drop(self: &mut Self) -> () {
+    let _destroyed = unsafe lxb_html_document_destroy(self.document)
+  }
+}
+
+pub struct Link {
+  pub href: String,
+  pub relation: String
+}
+
+effect fn nativeText(pointer: ?[*]const u8, length: usize) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  if Pointer.isNullMany(pointer) {
+    return String.make()
+  }
+  let bytes = unsafe Intrinsic.pointerRequalify<?[*]const u8, [*]const u8>(pointer)
+  let borrowed = unsafe Pointer.borrowMany(&pointer, bytes, length)
+  return match String.fromUtf8(borrowed) {
+    Result<string, InvalidUtf8>.Success { value } => run String.copy(value)
+    _ => {
+      fail CorpusError { message: run String.copy("HTML parser returned invalid UTF-8") }
+    }
+  }
+}
+
+effect fn attribute(element: *mut Element, name: string) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut length: usize = 0
+  let raw = String.utf8Bytes(name)
+  let pointer = unsafe lxb_dom_element_get_attribute(
+    element,
+    Pointer.fromSlice(raw),
+    raw.length,
+    Pointer.fromMutRef(&mut length),
+  )
+  return run nativeText(pointer, length)
+}
+
+pub effect fn links(bytes: &[u8]) -> List<Link>
+  ! CorpusFailure
+  ? &mut Allocator {
+  let raw = unsafe lxb_html_document_create()
+  if Pointer.isNull(raw) {
+    fail OutOfMemoryError {}
+  }
+  let owner = Owner {
+    document: unsafe Intrinsic.pointerRequalify<?*mut Document, *mut Document>(raw),
+  }
+  unsafe lxb_dom_document_scripting_set_noi(owner.document, 1)
+  if unsafe lxb_html_document_parse(owner.document, Pointer.fromSlice(bytes), bytes.length) != 0 {
+    run corpora.reject("HTML5 reference discovery failed")
+  }
+  let root = unsafe Intrinsic.pointerReinterpret<*mut Document, *mut Node>(owner.document)
+  let mut pending = List<*mut Node>.make()
+  run List<*mut Node>.append(&mut pending, root)
+  let mut references = List<Link>.make()
+  while List<*mut Node>.length(&pending) != 0 {
+    let last = List<*mut Node>.length(&pending) - 1
+    let pointer = List<*mut Node>.remove(&mut pending, last)
+    let node = unsafe Pointer.borrow(&owner, pointer)
+
+    // Push reverse child order so references retain the original document traversal order.
+    let mut child = node.lastChild
+    while !Pointer.isNull(child) {
+      let current = unsafe Intrinsic.pointerRequalify<?*mut Node, *mut Node>(child)
+      run List<*mut Node>.append(&mut pending, current)
+      child = (unsafe Pointer.borrow(&owner, current)).previous
+    }
+    if node.kind != 1 {
+      continue
+    }
+    let element = unsafe Intrinsic.pointerReinterpret<*mut Node, *mut Element>(pointer)
+    let mut length: usize = 0
+    let namePointer = unsafe lxb_dom_element_local_name(element, Pointer.fromMutRef(&mut length))
+    let ownedName = run nativeText(namePointer, length)
+    let name = String.view(&ownedName)
+    let mut local = name
+    let mut pieces = String.split(name, ":")
+    while let Option<string>.Some { value } = pieces.next() {
+      local = value
+    }
+    if local == "link" {
+      let relation = run attribute(element, "rel")
+      if String.view(&relation) == "match" || String.view(&relation) == "mismatch" {
+        run List<Link>.append(
+          &mut references,
+          Link { href: run attribute(element, "href"), relation: move relation },
+        )
+      }
+    }
+
+    // Only HTML template elements have an out-of-tree document fragment.
+    if name == "template" && node.namespace == 2 {
+      let template = unsafe Intrinsic.pointerReinterpret<*mut Element, *mut Template>(element)
+      let content = (unsafe Pointer.borrow(&owner, template)).content
+      if !Pointer.isNull(content) {
+        run List<*mut Node>.append(
+          &mut pending,
+          unsafe Intrinsic.pointerRequalify<?*mut Node, *mut Node>(content),
+        )
+      }
+    }
+  }
+  return move references
+}

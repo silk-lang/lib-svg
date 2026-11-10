@@ -18,7 +18,7 @@ import svg_css.colors { Color, Context as ColorContext }
 import svg_css.tokens { Limits }
 import svg_fonts.database { FontDatabase }
 import svg_raster.cpu
-import svg_raster.lower { Lowering, PixmapCanvas }
+import svg_raster.lower { PixmapCanvas }
 import svg_raster.lower
 import svg_gpu.scene as svgGpu
 import gpu_scene.renderer { SceneRenderer, FORMAT }
@@ -42,7 +42,6 @@ import silk.collections.bytes { Bytes }
 import silk.collections.list { List }
 import silk.core.effect { Effect }
 import silk.core.option { Option }
-import silk.core.result { Result }
 import silk.io.writer_native { StderrWriter }
 import silk.mem.allocator { Allocator, OutOfMemoryError }
 import silk.system.filesystem { Path, FileSystem, FileError, DirectoryEntry }
@@ -50,7 +49,6 @@ import silk.system.filesystem_machine { MachineFileSystem }
 import silk.system.host_input { HostInput, HostInputError }
 import silk.num.u8
 import silk.num.u32
-import silk.num.u64
 import silk.num.usize
 
 fn environmentFor<'a>(base: &'a Url, fonts: &'a FontDatabase) -> Environment<'a, 'a> {

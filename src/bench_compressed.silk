@@ -1,0 +1,191 @@
+//! Measures identical plain, gzip and zlib sources; only resvg zlib exit 1 means unsupported.
+import bench_support as B
+import task_support as Support
+import bench_process as Process
+import bench_harness as H
+import bench_images as Images
+import fixtures_common as F
+import silk.cli.task { Task, TaskError }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.num.usize
+
+effect fn measure(engines: &[H.Engine], input: &Path, directory: &Path, callgrind: bool) -> Value
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let timing = H.Timing {
+    iterations: 5,
+    warmup: 1,
+    samples: 3,
+    timeout: 120.0,
+    callgrind: callgrind,
+  }
+  run H.validate(&timing, engines)
+  if callgrind {
+    let _version = run H.requireCallgrind()
+  }
+  let source = run FileSystem.readFile(input)
+  let sourceHash = run B.hash(source.asSlice())
+  let mut report = B.object()
+  let release = run Process.version("uname", &["-r"])
+  let platform = run B.format(
+    "{os}-{release}",
+    &.{ os: Support.operatingSystem(), release: String.view(&release) },
+  )
+  run B.set(&mut report, "platform", run B.stringValue(String.view(&platform)))
+  run B.set(&mut report, "input_sha256", run B.stringValue(String.view(&sourceHash)))
+  run B.set(&mut report, "iterations", B.integer(5))
+  run B.set(&mut report, "warmup", B.integer(1))
+  run B.set(&mut report, "samples", B.integer(3))
+  run B.set(&mut report, "stage", run B.stringValue("parse+record"))
+  let plainPath = run Path.join(directory, "plain.svg")
+  run FileSystem.writeFile(&plainPath, source.asSlice())
+
+  // gzip -n strips source filename and timestamp, retaining the former level-9 contract.
+  let gzip = run Process.execute(
+    "gzip",
+    &["-9", "-n", "-c", run B.pathText(&plainPath)],
+    120.0,
+    false,
+  )
+  let zlib = run Effect.catchAll(F.compressed(source.asSlice(), false), Images.encodingFailed)
+  let payloads = [move source, move gzip.output, move zlib]
+  let encodings = ["plain", "gzip", "zlib"]
+  let mut binaries = B.object()
+  let mut rows = B.array()
+  let mut e: usize = 0
+  while e < engines.length {
+    let engine = &engines[e]
+    let executable = run B.pathText(&engine.executable)
+    let executableHash = run B.fileHash(&engine.executable)
+    let mut binary = B.object()
+    run B.set(&mut binary, "path", run B.stringValue(executable))
+    run B.set(&mut binary, "sha256", run B.stringValue(String.view(&executableHash)))
+    run B.set(&mut binaries, engine.label, move binary)
+    let mut original = Value.Null
+    let mut encoding: usize = 0
+    while encoding < encodings.length {
+      let filename = run B.format("{encoding}.svg", &.{ encoding: encodings[encoding] })
+      let path = run Path.join(directory, String.view(&filename))
+      let payload = payloads[encoding].asSlice()
+      run FileSystem.writeFile(&path, payload)
+      let hash = run B.hash(payload)
+      let mut row = B.object()
+      run B.set(&mut row, "engine", run B.stringValue(engine.label))
+      run B.set(&mut row, "encoding", run B.stringValue(encodings[encoding]))
+      run B.set(&mut row, "bytes", B.integer(usize.toU64(payload.length)))
+      run B.set(&mut row, "sha256", run B.stringValue(String.view(&hash)))
+      let probe = run Process.execute(
+        executable,
+        &["parse", run B.pathText(&path), "5", "1"],
+        120.0,
+        true,
+      )
+      if probe.status != 0 {
+        if engine.label != "resvg" || encodings[encoding] != "zlib" || probe.status != 1 {
+          run Task.abort(
+            "compressed benchmark failed (only resvg zlib exit 1 denotes unsupported input)",
+          )
+        }
+        let stderr = run B.text(move probe.errors)
+        run B.set(&mut row, "supported", B.boolean(false))
+        run B.set(&mut row, "stderr", run B.stringValue(String.trim(String.view(&stderr))))
+        run B.set(&mut row, "exit_code", B.integer(1))
+      } else {
+        let first = run B.parse(probe.output.asSlice())
+        run H.validateResult(&first, &timing)
+        if encoding == 0 {
+          original = run Json.copy(run B.field(&first, "checksum"))
+        }
+        let mut samples = B.array()
+        let mut times = B.array()
+        let mut result = move first
+        let mut sample: usize = 0
+        while sample < 3 {
+          if sample > 0 {
+            let invocation = run H.invoke(&engine.executable, "parse", &path, &timing)
+            result = move invocation.result
+          }
+          if !Json.equal(&original, run B.field(&result, "checksum")) {
+            run Task.abort("invalid timing or compressed/plain output mismatch")
+          }
+          run B.push(
+            &mut times,
+            B.number((run B.real(run B.field(&result, "elapsed_ns"))) / 5000000.0),
+          )
+          run B.push(&mut samples, move result)
+          result = Value.Null
+          sample = sample + 1
+        }
+        let median = run H.median(&times)
+        run B.set(&mut row, "supported", B.boolean(true))
+        run B.set(&mut row, "checksum", run Json.copy(&original))
+        run B.set(&mut row, "median_ms", B.number(median))
+        run B.set(&mut row, "samples", move samples)
+        if callgrind && engine.label == "silk" {
+          let irTiming = H.Timing {
+            iterations: 1,
+            warmup: 0,
+            samples: 1,
+            timeout: 300.0,
+            callgrind: true,
+          }
+          run B.set(
+            &mut row,
+            "process_ir",
+            B.integer(run H.processIr(&engine.executable, "parse", &path, &irTiming)),
+          )
+        }
+        let message = run B.format(
+          "{engine}/{encoding}: {ms:.4} ms/parse+record",
+          &.{ engine: engine.label, encoding: encodings[encoding], ms: median },
+        )
+        run B.print(String.view(&message))
+      }
+      run B.push(&mut rows, move row)
+      encoding = encoding + 1
+    }
+    e = e + 1
+  }
+  run B.set(&mut report, "binaries", move binaries)
+  run B.set(&mut report, "rows", move rows)
+  return move report
+}
+
+pub effect fn measureCompressed(
+  engines: &[H.Engine],
+  input: &Path,
+  output: string,
+  callgrind: bool,
+) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let parent = run B.path("modules/bench/.cache")
+  run FileSystem.createDirectoriesRecursively(&parent)
+  let directory = run FileSystem.createTemporaryDirectory(&parent, b"compressed-")
+  let result = run Effect.result(measure(engines, input, &directory, callgrind))
+  run FileSystem.removeDirectoryRecursively(&directory)
+  match move result {
+    Result<
+      Value,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Success {
+      value
+    } => run B.emit(&value, output)
+    Result<
+      Value,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+}

@@ -426,7 +426,7 @@ effect fn available(url: &Url, policy: &Policy, remaining: &mut usize) -> Option
         RenderError value => {
           fail value
         }
-        OutOfMemoryError value => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
         _ => {}
@@ -553,7 +553,7 @@ pub effect fn loadWith(graph: &Graph, maxPixels: usize, cache: ImageCache) -> St
         Result<Url, UrlError | OutOfMemoryError>.Success { value } => move value
         Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
           match &error {
-            OutOfMemoryError value => {
+            OutOfMemoryError _ => {
               fail OutOfMemoryError {}
             }
             _ => {}
@@ -898,7 +898,7 @@ pub effect fn applyProfiles(
         Result<Image, ImageError | OutOfMemoryError>.Success { value } => move value
         Result<Image, ImageError | OutOfMemoryError>.Failure { error } => {
           match &error {
-            OutOfMemoryError problem => {
+            OutOfMemoryError _ => {
               fail OutOfMemoryError {}
             }
             _ => {

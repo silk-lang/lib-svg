@@ -51,7 +51,7 @@ effect fn rejected(input: &[u8], maximum: usize, expected: ResourceError) -> ()
     match &result {
       Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
         ResourceError problem => problem == expected
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -326,7 +326,7 @@ test effect fn preflightBoundsAndAllocationFailureRemainDistinct() -> ()
   run Testing.expect(
     match &exhausted {
       Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match &error {
-        OutOfMemoryError problem => true
+        OutOfMemoryError _ => true
         _ => false
       }
       _ => false

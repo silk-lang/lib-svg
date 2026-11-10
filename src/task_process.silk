@@ -1,0 +1,28 @@
+import task_support as Support
+import silk.cli.task { Task, TaskError }
+import silk.collections.list { List }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem }
+import silk.system.host_input { HostInput, HostInputError }
+
+// GNU coreutils is a native process supervisor. Unlike capture, exec inherits the
+// entire host environment (including Vulkan/Dawn, dynamic loader and compiler settings).
+pub effect fn exec(program: string, arguments: &[string], seconds: string) -> ()
+  ! TaskError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let mut args = List<string>.make()
+  run List<string>.append(&mut args, "--signal=KILL")
+  run List<string>.append(&mut args, seconds)
+  run List<string>.append(&mut args, program)
+  let mut i: usize = 0
+  while i < arguments.length {
+    run List<string>.append(&mut args, arguments[i])
+    i = i + 1
+  }
+  let timeout = if Support.operatingSystem() == "darwin" {
+    "gtimeout"
+  } else {
+    "timeout"
+  }
+  run Task.exec(timeout, List<string>.asSlice(&args))
+}

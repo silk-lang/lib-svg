@@ -529,7 +529,7 @@ fn paintIdentity(paint: &Paint) -> usize {
     Paint.CurrentColor => 1
     Paint.ContextFill => 2
     Paint.ContextStroke => 3
-    Paint.Solid { color } => 4
+    Paint.Solid { .. } => 4
     Paint.Server { index } => index + 5
   }
 }
@@ -1607,7 +1607,7 @@ effect fn place(
       let supplement = layouts.asSlice()[value].supplement
       matrix = transforms.multiply(&matrix, &transforms.fromAffine(supplement))
       match &layouts.asSlice()[value].clip {
-        Option<Clip>.Some { value: clip } => {
+        Option<Clip>.Some { .. } => {
           let mapping = run Mapping.fromMatrix(&clipMatrix)
           let mut entries = layouts.asMutSlice()
           entries[value].clipMapping = mapping
@@ -1972,9 +1972,7 @@ effect fn paintMarkers(
             run transform.compose(&placement)
           }
           let mut markerClip = clip
-          if let Mapping.Projective {
-            value: projection
-          } = &state.plans.asSlice()[definition.root].local {
+          if let Mapping.Projective { .. } = &state.plans.asSlice()[definition.root].local {
             if let Option<HalfPlane>.Some { value: plane } = &(run parent.flatteningClip()) {
               markerClip = Option<usize>.some(clips.length())
               run clips.append(ProjectionClip { parent: clip, plane: plane })
@@ -2196,9 +2194,7 @@ effect fn pictureBounds(
   i = 0
   while i < nodes.length() {
     let updated = match &nodes.asSlice()[i] {
-      ResolvedNode.BeginGroup { opacity, bounds: previous, linearRgb, blendMode } => Option<
-        ResolvedNode
-      >.some(
+      ResolvedNode.BeginGroup { opacity, linearRgb, blendMode, .. } => Option<ResolvedNode>.some(
         ResolvedNode.BeginGroup {
           opacity: opacity,
           bounds: bounds,
@@ -3162,7 +3158,7 @@ effect fn referencedClip(
     if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
       if let EffectValue.ClipPath { source } = &value {
         let reference = match &source {
-          ClipSource.Shape { shape, reference } => reference
+          ClipSource.Shape { reference, .. } => reference
           ClipSource.Box { reference } => reference
           _ => GeometryBox.View
         }
@@ -3185,7 +3181,7 @@ effect fn referencedClip(
             _ => Rect { xMin: 0.0, yMin: 0.0, xMax: 0.0, yMax: 0.0 }
           }
         }
-        if let ClipSource.Box { reference: ignored } = &source {
+        if let ClipSource.Box { .. } = &source {
           let path = state.paths.length()
           run state.paths.append(
             run svg.rectangle(box.xMin, box.yMin, box.width(), box.height(), 0.0, 0.0),
@@ -3196,7 +3192,7 @@ effect fn referencedClip(
           )
           return Option<usize>.some(index)
         }
-        if let ClipSource.Shape { shape, reference: ignored } = &source {
+        if let ClipSource.Shape { shape, .. } = &source {
           let built = run used_clip_shapes.build(&styles.catalog.engine, &shape, box)
           if let Option<used_clip_shapes.Geometry>.Some { value: geometry } = move built {
             let path = state.paths.length()
@@ -3365,7 +3361,7 @@ fn imageSampling(engine: &Engine<'_>, style: StyleId) -> ImageSampling {
 fn layerMode(engine: &Engine<'_>, style: StyleId, layerIndex: usize) -> MaskMode {
   if let Option<ComputedValue>.Some { value: entry } = &engine.get(style, Property.MaskMode) {
     if let Value.Effect { value } = &engine.values.get(entry.value).* {
-      if let EffectValue.Masks { layers, resetBorder } = &value {
+      if let EffectValue.Masks { layers, .. } = &value {
         if layers.length() > 0 {
           return layers.asSlice()[layerIndex % layers.length()].mode
         }
@@ -3857,7 +3853,7 @@ effect fn paintMaskLayer(
     Property.MaskMode,
   ) {
     if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
-      if let EffectValue.Masks { layers, resetBorder } = &value {
+      if let EffectValue.Masks { layers, .. } = &value {
         if layers.length() > 0 {
           let mode = layers.asSlice()[layerIndex % layers.length()].mode
           if mode == MaskMode.Alpha {
@@ -4016,7 +4012,7 @@ effect fn applyMask(
     Property.MaskImage,
   ) {
     if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
-      if let EffectValue.Masks { layers, resetBorder } = &value {
+      if let EffectValue.Masks { layers, .. } = &value {
         count = layers.length()
       }
     }
@@ -4048,7 +4044,7 @@ effect fn applyMask(
         Property.MaskComposite,
       ) {
         if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
-          if let EffectValue.Masks { layers, resetBorder } = &value {
+          if let EffectValue.Masks { layers, .. } = &value {
             if layers.length() > 0 {
               operation = match layers.asSlice()[index % layers.length()].composite {
                 Composite.Add => MaskComposite.Add
@@ -4101,7 +4097,7 @@ effect fn filtering(
         count = items.length()
         let mut item: usize = 0
         while item < count {
-          if let Filter.Url { url } = &items.asSlice()[item] {
+          if let Filter.Url { .. } = &items.asSlice()[item] {
             // A reference to a missing or non-filter element ignores the whole chain.
             if styles.resourceAt(plan.occurrence, Property.Filter, item).isNone() {
               return Filtering { hidden: false, programs: move programs, images: move images }
@@ -5142,7 +5138,7 @@ effect fn paintPrepared(
       let childPlan = &state.plans.asSlice()[next]
       let projected = !childPlan.suppressed && childPlan.style.opacity != 0.0
         && match &childPlan.local {
-          Mapping.Projective { value: projection } => true
+          Mapping.Projective { .. } => true
           _ => false
         }
       if projected && !preparedClip {
@@ -5961,7 +5957,7 @@ effect fn glyphShown(graph: &Graph, glyph: Option<GlyphDocument>) -> List<bool>
 // paint servers belong to this document and paint none there.
 fn carried(paint: Paint, color: SceneColor) -> Paint {
   return match &paint {
-    Paint.Solid { color: solid } => paint
+    Paint.Solid { .. } => paint
     Paint.CurrentColor => Paint.Solid { color: color }
     _ => Paint.None
   }
@@ -6017,10 +6013,10 @@ effect fn glyphBytes(fonts: &Fonts<'_>, face: usize, glyph: u32) -> Option<Glyph
           _ => run Bytes.copy(raw)
         }
         Result<Option<Bytes>, StructureError | OutOfMemoryError>.Failure { error } => match &error {
-          OutOfMemoryError problem => {
+          OutOfMemoryError _ => {
             fail OutOfMemoryError {}
           }
-          StructureError problem => {
+          StructureError _ => {
             return Option<GlyphBytes>.None
           }
         }

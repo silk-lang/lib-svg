@@ -1,0 +1,769 @@
+import corpora { CorpusError, CorpusFailure }
+import corpora as C
+import corpora_png { Rgba }
+import corpora_png as Png
+import corpora_references as References
+import corpora_suites as Suites
+import bench_process as Process
+import task_support as Support
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, Path }
+import silk.system.child_process { ChildProcess }
+import silk.system.host_input { HostInput }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.u8
+import silk.num.usize
+import silk.num.i64
+import silk.num.f64
+import silk.num.i32
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+import svg_image.png as Encoder
+import svg_image.image { ImageError }
+
+pub struct Options {
+  pub suite: String,
+  pub full: bool,
+  pub malformed: bool,
+  pub validate: bool,
+  pub timeout: f64,
+  pub manifest: String,
+  pub expectations: String,
+  pub renderer: Value,
+  pub report: String,
+  pub diffDir: String,
+}
+
+pub effect fn defaults() -> Options
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return Options {
+    suite: run String.copy("resvg"),
+    full: false,
+    malformed: false,
+    validate: false,
+    timeout: 30.0,
+    manifest: String.make(),
+    expectations: String.make(),
+    renderer: C.array(),
+    report: String.make(),
+    diffDir: String.make(),
+  }
+}
+
+fn different(a: u8, b: u8) -> usize {
+  return if a > b {
+    u8.toUsize(a - b)
+  } else {
+    u8.toUsize(b - a)
+  }
+}
+
+pub effect fn compareRgba(
+  actual: &Rgba,
+  reference: &Rgba,
+  channel: usize,
+  pixels: usize,
+  antialias: usize,
+) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let a = Bytes.asSlice(&actual.data)
+  let b = Bytes.asSlice(&reference.data)
+  if a.length != actual.width * actual.height * 4
+    || b.length != reference.width * reference.height * 4 {
+    run C.reject("invalid RGBA buffer length")
+  }
+  let mut result = C.object()
+  if actual.width != reference.width || actual.height != reference.height {
+    run C.put(&mut result, "match", Value.Bool { value: false })
+    run C.setText(&mut result, "reason", "image dimensions differ")
+    let mut actualSize = C.array()
+    run C.append(&mut actualSize, C.integer(actual.width))
+    run C.append(&mut actualSize, C.integer(actual.height))
+    run C.put(&mut result, "actual_size", move actualSize)
+    let mut referenceSize = C.array()
+    run C.append(&mut referenceSize, C.integer(reference.width))
+    run C.append(&mut referenceSize, C.integer(reference.height))
+    run C.put(&mut result, "reference_size", move referenceSize)
+    return move result
+  }
+  let mut differentPixels: usize = 0
+  let mut maximum: usize = 0
+  let mut offset: usize = 0
+  while offset < a.length {
+    let mut delta: usize = 0
+    let mut component: usize = 0
+    while component < 4 {
+      let difference = different(a[offset + component], b[offset + component])
+      if difference > delta {
+        delta = difference
+      }
+      component = component + 1
+    }
+    if delta > maximum {
+      maximum = delta
+    }
+    let partial = a[offset + 3] > 0 && a[offset + 3] < 255 && b[offset + 3] > 0
+      && b[offset + 3] < 255
+    let tolerance = if partial && antialias > channel {
+      antialias
+    } else {
+      channel
+    }
+    if delta > tolerance {
+      differentPixels = differentPixels + 1
+    }
+    offset = offset + 4
+  }
+  run C.put(&mut result, "match", Value.Bool { value: differentPixels <= pixels })
+  run C.put(&mut result, "different_pixels", C.integer(differentPixels))
+  run C.put(&mut result, "max_channel_difference", C.integer(maximum))
+  run C.put(&mut result, "channel_tolerance", C.integer(channel))
+  run C.put(&mut result, "antialias_channel_tolerance", C.integer(antialias))
+  run C.put(&mut result, "pixel_tolerance", C.integer(pixels))
+  return move result
+}
+
+pub effect fn outcome(expected: string, matched: bool) -> string<'static>
+  ! CorpusFailure
+  ? &mut Allocator {
+  if expected == "pass" {
+    return if matched {
+      "pass"
+    } else {
+      "unexpected-fail"
+    }
+  }
+  if expected == "fail" {
+    return if matched {
+      "unexpected-pass"
+    } else {
+      "fail"
+    }
+  }
+  if expected == "spec-difference" {
+    return if matched {
+      "unexpected-pass"
+    } else {
+      "spec-difference"
+    }
+  }
+  run C.reject("skip cases must not be compared")
+  return ""
+}
+
+pub effect fn rendererArgv(command: &Value, input: string, output: string, root: string) -> List<
+  String
+>
+  ! CorpusFailure
+  ? &mut Allocator {
+  let values = run C.values(command)
+  if values.length == 0 {
+    run C.reject("--renderer must be a JSON array of argv strings")
+  }
+  let mut hasInput = false
+  let mut hasOutput = false
+  let mut result = List<String>.make()
+  let mut index: usize = 0
+  while index < values.length {
+    let value = match Json.asString(Option<&Value>.some(&values[index])) {
+      Option<string>.Some { value } => value
+      _ => {
+        fail CorpusError {
+          message: run String.copy("--renderer must be a JSON array of argv strings"),
+        }
+      }
+    }
+    hasInput = hasInput || String.contains(value, "{input}")
+    hasOutput = hasOutput || String.contains(value, "{output}")
+    let a = run C.replaceAll(value, "{input}", input)
+    let b = run C.replaceAll(String.view(&a), "{output}", output)
+    let c = run C.replaceAll(String.view(&b), "{root}", root)
+    run List<String>.append(&mut result, move c)
+    index = index + 1
+  }
+  if !hasInput || !hasOutput {
+    run C.reject("renderer argv requires {input} and {output} placeholders")
+  }
+  return move result
+}
+
+pub effect fn readPng(path: &Path) -> Rgba
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let bytes = run FileSystem.readFile(path)
+  return run Png.decode(Bytes.asSlice(&bytes))
+}
+
+effect fn execute(
+  command: &Value,
+  input: &Path,
+  output: &Path,
+  root: &Path,
+  timeout: f64,
+) -> Process.Completed
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let source = run C.resolvedPath(input)
+  let directory = run C.resolvedPath(root)
+  let inputNative = run C.nativePath(&source)
+  let outputNative = run C.nativePath(output)
+  let rootNative = run C.nativePath(&directory)
+  let args = run rendererArgv(
+    command,
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&inputNative)),
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&outputNative)),
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&rootNative)),
+  )
+  let mut views = List<string>.make()
+  let mut index: usize = 1
+  while index < List<String>.length(&args) {
+    run List<string>.append(&mut views, String.view(&List<String>.asSlice(&args)[index]))
+    index = index + 1
+  }
+  return run Process.execute(
+    String.view(&List<String>.asSlice(&args)[0]),
+    List<string>.asSlice(&views),
+    timeout,
+    true,
+  )
+}
+
+pub effect fn render(
+  command: &Value,
+  input: &Path,
+  output: &Path,
+  root: &Path,
+  timeout: f64,
+) -> Rgba
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let process = run execute(command, input, output, root, timeout)
+  if process.status != 0 {
+    run C.reject("renderer exited unsuccessfully")
+  }
+  if !run References.isFile(output) {
+    run C.reject("renderer did not produce its requested PNG")
+  }
+  return run readPng(output)
+}
+
+pub effect fn writeDiff(actual: &Rgba, reference: &Rgba, path: &Path) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  if actual.width != reference.width || actual.height != reference.height {
+    return ()
+  }
+  let a = Bytes.asSlice(&actual.data)
+  let b = Bytes.asSlice(&reference.data)
+  let mut data = run Bytes.zeroed(a.length)
+  let output = Bytes.asMutSlice(&mut data)
+  let mut offset: usize = 0
+  while offset < a.length {
+    let mut channel: usize = 0
+    while channel < 3 {
+      output[offset + channel] = usize.toU8(different(a[offset + channel], b[offset + channel]))
+      channel = channel + 1
+    }
+    output[offset + 3] = 255
+    if a[offset + 3] != b[offset + 3] {
+      output[offset] = 255
+      output[offset + 1] = 0
+      output[offset + 2] = 255
+    }
+    offset = offset + 4
+  }
+  drop output
+  let encoded = run Effect.result(
+    Encoder.encodePixels(
+      usize.toU32(actual.width),
+      usize.toU32(actual.height),
+      Bytes.asSlice(&data),
+    ),
+  )
+  let bytes = match move encoded {
+    Result<Bytes, ImageError | OutOfMemoryError>.Success { value } => move value
+    _ => {
+      fail CorpusError { message: run String.copy("cannot encode PNG difference") }
+    }
+  }
+  run FileSystem.writeFileWithParents(path, Bytes.asSlice(&bytes))
+}
+
+fn tolerance(expectation: &Value, name: string) -> usize {
+  let value = Json.field(expectation, "tolerance")
+    |> Json.fieldAt(name)
+    |> C.wholeNumber
+    |> Option<i64>.unwrapOr(0)
+  return i64.toUsize(value)
+}
+
+effect fn result(entry: &Value, expectation: &Value) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut result = C.object()
+  run C.setText(&mut result, "id", run C.text(entry, "id"))
+  run C.setText(&mut result, "expected", run C.text(expectation, "status"))
+  run C.setText(&mut result, "reason", run C.text(expectation, "reason"))
+  run C.setText(&mut result, "spec", run C.text(expectation, "spec"))
+  run C.put(&mut result, "rendered", Value.Bool { value: false })
+  return move result
+}
+
+pub effect fn runCase(
+  entry: &Value,
+  expectation: &Value,
+  root: &Path,
+  command: &Value,
+  timeout: f64,
+  scratch: &Path,
+  diffDir: Option<&Path>,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let mut result = run result(entry, expectation)
+  if (run C.text(expectation, "status")) == "skip" {
+    run C.setText(&mut result, "outcome", "skip")
+    return move result
+  }
+  if C.has(entry, "skip_reason") {
+    run C.setText(&mut result, "outcome", "error")
+    run C.setText(&mut result, "detail", run C.text(entry, "skip_reason"))
+    return move result
+  }
+  let attempted = run Effect.result(
+    compareCase(&mut result, entry, expectation, root, command, timeout, scratch, diffDir),
+  )
+  match move attempted {
+    Result<(), CorpusFailure>.Success { .. } => {}
+    Result<(), CorpusFailure>.Failure { error } => {
+      let message = run C.errorMessage(move error)
+      run C.setText(&mut result, "outcome", "error")
+      run C.setText(&mut result, "detail", String.view(&message))
+    }
+  }
+  return move result
+}
+
+effect fn compareCase(
+  result: &mut Value,
+  entry: &Value,
+  expectation: &Value,
+  root: &Path,
+  command: &Value,
+  timeout: f64,
+  scratch: &Path,
+  diffDir: Option<&Path>,
+) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let temporary = run FileSystem.temporaryDirectory(scratch, "svg-reftest-")
+  let attempted = run Effect.result(
+    compareInDirectory(
+      &mut result,
+      entry,
+      expectation,
+      root,
+      command,
+      timeout,
+      &temporary.path,
+      diffDir,
+    ),
+  )
+  run FileSystem.releaseIgnored(move temporary)
+  match move attempted {
+    Result<(), CorpusFailure>.Success { .. } => {}
+    Result<(), CorpusFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+}
+
+effect fn compareInDirectory(
+  result: &mut Value,
+  entry: &Value,
+  expectation: &Value,
+  root: &Path,
+  command: &Value,
+  timeout: f64,
+  temporary: &Path,
+  diffDir: Option<&Path>,
+) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let input = run C.contained(root, run C.text(entry, "input"))
+  let output = run Path.join(temporary, "actual.png")
+  let mut inputCommand = run Json.copy(command)
+  if C.has(entry, "arguments") {
+    let args = run C.values(run C.field(entry, "arguments"))
+    let mut index: usize = 0
+    while index < args.length {
+      run C.append(&mut inputCommand, run Json.copy(&args[index]))
+      index = index + 1
+    }
+  }
+  let mut actual = run render(&inputCommand, &input, &output, root, timeout)
+  run C.put(&mut result, "rendered", Value.Bool { value: true })
+  let white = C.optionalText(entry, "canvas") == "white"
+  if white {
+    actual = run Png.onWhite(&actual, 800, 600)
+  }
+  let refs = run C.values(run C.field(entry, "references"))
+  if refs.length == 0 {
+    run C.reject("case has no references")
+  }
+  let mut images = List<Rgba>.make()
+  let mut comparisons = C.array()
+  let mut equality = false
+  let mut hasEquality = false
+  let mut inequality = true
+  let mut index: usize = 0
+  while index < refs.length {
+    let ref = &refs[index]
+    let name = run C.text(ref, "path")
+    let source = run C.contained(root, name)
+    let referenceOutput = run Path.join(temporary, "reference.png")
+    if run FileSystem.exists(&referenceOutput) {
+      run FileSystem.removeFile(&referenceOutput)
+    }
+    let mut reference = if References.extension(name, ".png") {
+      run readPng(&source)
+    } else {
+      run render(command, &source, &referenceOutput, root, timeout)
+    }
+    if white {
+      reference = run Png.onWhite(&reference, 800, 600)
+    }
+    let mut comparison = run compareRgba(
+      &actual,
+      &reference,
+      tolerance(expectation, "channel"),
+      tolerance(expectation, "pixels"),
+      tolerance(expectation, "antialias_channel"),
+    )
+    let relation = run C.text(ref, "relation")
+    let matched = C.boolField(&comparison, "match", false)
+    if relation == "==" {
+      hasEquality = true
+      equality = equality || matched
+    } else if relation == "!=" {
+      inequality = inequality && !matched
+    } else {
+      run C.reject("invalid reference relation")
+    }
+    run C.setText(&mut comparison, "reference", name)
+    run C.setText(&mut comparison, "relation", relation)
+    run C.append(&mut comparisons, move comparison)
+    run List<Rgba>.append(&mut images, move reference)
+    index = index + 1
+  }
+  let status = run outcome(
+    run C.text(expectation, "status"),
+    (!hasEquality || equality) && inequality,
+  )
+  run C.setText(&mut result, "outcome", status)
+  if status == "unexpected-fail" {
+    match diffDir {
+      Option<&Path>.Some { value } => {
+        let compared = run C.values(&comparisons)
+        index = 0
+        while index < compared.length {
+          if !C.boolField(&compared[index], "match", false) {
+            let mut name = run String.copy(run C.text(entry, "id"))
+            run String.append(&mut name, "-")
+            let number = run Support.number(index)
+            run String.append(&mut name, String.view(&number))
+            run String.append(&mut name, ".png")
+            let path = run C.contained(value, String.view(&name))
+            run writeDiff(&actual, &List<Rgba>.asSlice(&images)[index], &path)
+          }
+          index = index + 1
+        }
+      }
+      _ => {}
+    }
+  }
+  run C.put(&mut result, "comparisons", move comparisons)
+}
+
+pub effect fn runMalformedCase(
+  entry: &Value,
+  root: &Path,
+  command: &Value,
+  timeout: f64,
+  scratch: &Path,
+  diffDir: Option<&Path>,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  if (C.wholeNumber(Json.field(entry, "exit_code")) |> Option<i64>.unwrapOr(-1)) == 0 {
+    let mut result = run runCase(entry, entry, root, command, timeout, scratch, diffDir)
+    run C.put(&mut result, "expected_exit_code", C.integer(0))
+    run C.put(&mut result, "expected_output_present", Value.Bool { value: true })
+    return move result
+  }
+  let mut result = run result(entry, entry)
+  run C.put(&mut result, "expected_exit_code", C.integer(1))
+  run C.put(&mut result, "expected_output_present", Value.Bool { value: false })
+  let temporary = run FileSystem.temporaryDirectory(scratch, "svg-malformed-")
+  let attempted = run Effect.result(
+    rejectCase(&mut result, entry, root, command, timeout, &temporary.path),
+  )
+  run FileSystem.releaseIgnored(move temporary)
+  match move attempted {
+    Result<(), CorpusFailure>.Success { .. } => {}
+    Result<(), CorpusFailure>.Failure { error } => {
+      let message = run C.errorMessage(move error)
+      run C.setText(&mut result, "outcome", "error")
+      run C.setText(&mut result, "detail", String.view(&message))
+    }
+  }
+  return move result
+}
+
+effect fn rejectCase(
+  result: &mut Value,
+  entry: &Value,
+  root: &Path,
+  command: &Value,
+  timeout: f64,
+  temporary: &Path,
+) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let input = run C.contained(root, run C.text(entry, "input"))
+  let output = run Path.join(temporary, "actual.png")
+  let completed = run execute(command, &input, &output, root, timeout)
+  let present = run FileSystem.exists(&output)
+  run C.put(&mut result, "exit_code", C.integer(i32.toUsize(completed.status)))
+  run C.put(&mut result, "output_present", Value.Bool { value: present })
+  let errors = String.fromUtf8(Bytes.asSlice(&completed.errors))
+  match move errors {
+    Result<string, InvalidUtf8>.Success { value } => run C.setText(&mut result, "stderr", value)
+    _ => run C.setText(&mut result, "stderr", "renderer stderr was not UTF-8")
+  }
+  run C.setText(
+    &mut result,
+    "outcome",
+    if completed.status == 1 && !present {
+      "pass"
+    } else {
+      "error"
+    },
+  )
+  if completed.status != 1 || present {
+    run C.setText(
+      &mut result,
+      "detail",
+      "expected CLI rejection (exit 1, no output); crashes and other exits are not rejection",
+    )
+  }
+}
+
+pub effect fn runSuite(
+  project: &Path,
+  lockPath: &Path,
+  cache: &Path,
+  curl: &Path,
+  options: &Options,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let suite = String.view(&options.suite)
+  if suite != "own" && suite != "resvg" && suite != "w3c-svg11" && suite != "wpt" {
+    run C.reject("unknown suite")
+  }
+  if !f64.isFinite(options.timeout) || options.timeout <= 0.0 {
+    run C.reject("timeout must be positive")
+  }
+  if suite != "own" && (String.view(&options.manifest) != "" || options.malformed) {
+    run C.reject("--manifest and --malformed require --suite own")
+  }
+  if suite == "own" && (String.view(&options.expectations) != "" || options.full) {
+    run C.reject("own suite uses its manifest, not --expectations or --full")
+  }
+  if !options.validate {
+    let _validated = run rendererArgv(&options.renderer, "input.svg", "output.png", ".")
+  }
+  let mut root = run Path.fromBytes(Path.rawBytes(project))
+  let mut cases = C.array()
+  let mut expectations = C.object()
+  if suite == "own" {
+    let default = if options.malformed {
+      "modules/tests/fixtures/malformed/manifest.json"
+    } else {
+      "modules/tests/fixtures/own/manifest.json"
+    }
+    let manifest = if String.view(&options.manifest) == "" {
+      run resolve(project, default)
+    } else {
+      run resolve(project, String.view(&options.manifest))
+    }
+    let own = run References.loadOwnManifest(&manifest, options.malformed)
+    root = move own.root
+    cases = move own.cases
+    expectations = move own.expectations
+  } else {
+    let lock = run Suites.loadLock(lockPath)
+    root = run Suites.fetchSuite(&lock, suite, cache, curl, options.full, true)
+    let mut default = run String.copy("modules/tests/expectations/")
+    run String.append(&mut default, suite)
+    run String.append(&mut default, ".txt")
+    let path = run resolve(
+      project,
+      if String.view(&options.expectations) == "" {
+        String.view(&default)
+      } else {
+        String.view(&options.expectations)
+      },
+    )
+    expectations = run References.loadExpectations(&path, suite)
+    cases = run References.discoverCases(&root, suite, &lock, options.full)
+  }
+  let entries = run C.values(&cases)
+  if entries.length == 0 {
+    run C.reject("no reftest cases discovered")
+  }
+  let mut ids = C.object()
+  let mut index: usize = 0
+  while index < entries.length {
+    run C.put(&mut ids, run C.text(&entries[index], "id"), Value.Null)
+    index = index + 1
+  }
+  if suite != "resvg" || options.full {
+    let expected = run C.entries(&expectations)
+    index = 0
+    while index < expected.length {
+      if !C.has(&ids, String.view(&expected[index].key)) {
+        run C.reject("expectations name absent cases")
+      }
+      index = index + 1
+    }
+  }
+  let scratch = run Path.join(project, "build/svg/.scratch")
+  run FileSystem.createDirectoriesRecursively(&scratch)
+  let diff = if String.view(&options.diffDir) != "" {
+    Option<Path>.some(run resolve(project, String.view(&options.diffDir)))
+  } else {
+    Option<Path>.none()
+  }
+  let diffPath = match &diff {
+    Option<Path>.Some { value } => Option<&Path>.some(&value)
+    _ => Option<&Path>.none()
+  }
+  let mut results = C.array()
+  let mut rendered: usize = 0
+  let mut passed: usize = 0
+  let mut failed: usize = 0
+  let mut gate: usize = 0
+  index = 0
+  while index < entries.length {
+    let entry = &entries[index]
+    let id = run C.text(entry, "id")
+    let item = match Json.field(&expectations, id) {
+      Option<&Value>.Some { value: expectation } => {
+        if options.validate {
+          let mut item = C.object()
+          run C.setText(&mut item, "id", id)
+          run C.setText(&mut item, "outcome", "validated")
+          run C.setText(&mut item, "expected", run C.text(expectation, "status"))
+          run C.setText(&mut item, "reason", run C.text(expectation, "reason"))
+          run C.put(&mut item, "rendered", Value.Bool { value: false })
+          move item
+        } else if options.malformed {
+          run runMalformedCase(entry, &root, &options.renderer, options.timeout, &scratch, diffPath)
+        } else {
+          run runCase(
+            entry,
+            expectation,
+            &root,
+            &options.renderer,
+            options.timeout,
+            &scratch,
+            diffPath,
+          )
+        }
+      }
+      _ => {
+        let mut item = C.object()
+        run C.setText(&mut item, "id", id)
+        run C.setText(&mut item, "outcome", "untriaged")
+        run C.put(&mut item, "rendered", Value.Bool { value: false })
+        run C.setText(
+          &mut item,
+          "reason",
+          if C.has(entry, "skip_reason") {
+            run C.text(entry, "skip_reason")
+          } else {
+            "no reviewed expectation; rendering/conformance not evaluated"
+          },
+        )
+        move item
+      }
+    }
+    let status = run C.text(&item, "outcome")
+    if C.boolField(&item, "rendered", false) {
+      rendered = rendered + 1
+    }
+    if status == "pass" {
+      passed = passed + 1
+    }
+    if status == "fail" || status == "unexpected-fail" || status == "error" {
+      failed = failed + 1
+    }
+    if status == "unexpected-pass" || status == "unexpected-fail" || status == "error"
+      || status == "untriaged" {
+      gate = gate + 1
+    }
+    run C.append(&mut results, move item)
+    index = index + 1
+  }
+  let mut report = C.object()
+  run C.setText(&mut report, "suite", suite)
+  run C.setText(
+    &mut report,
+    "mode",
+    if options.validate {
+      "validate-only"
+    } else if options.malformed {
+      "malformed"
+    } else {
+      "render"
+    },
+  )
+  run C.put(&mut report, "rendered_cases", C.integer(rendered))
+  run C.put(&mut report, "passed_cases", C.integer(passed))
+  run C.put(&mut report, "failed_cases", C.integer(failed))
+  run C.put(&mut report, "gate_failures", C.integer(gate))
+  run C.put(&mut report, "results", move results)
+  if String.view(&options.report) != "" {
+    let destination = run resolve(project, String.view(&options.report))
+    run C.writeJson(&destination, &report)
+  }
+  return move report
+}
+
+pub effect fn resolve(root: &Path, name: string) -> Path
+  ! CorpusFailure
+  ? &mut Allocator {
+  if String.startsWith(name, "/") {
+    return run Path.make(name)
+  }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    let bytes = String.utf8Bytes(name)
+    if bytes.length > 2 && bytes[1] == 58 {
+      return run WindowsPath.fromNativeBytes(bytes)
+    }
+  }
+  return run Path.resolve(root, name)
+}

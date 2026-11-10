@@ -42,7 +42,7 @@ effect fn invalid(input: &[u8]) -> ()
   ? &mut Allocator {
   let attempted = run Effect.result(Url.parseAbsolute(input))
   match move attempted {
-    Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+    Result<Url, UrlError | OutOfMemoryError>.Success { .. } => {
       run Testing.expect(false, "invalid URL must fail")
     }
     Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
@@ -269,7 +269,7 @@ effect fn inputLimit(input: &[u8]) -> ()
   ? &mut Allocator {
   let attempted = run Effect.result(Url.parseAbsolute(input))
   match move attempted {
-    Result<Url, UrlError | OutOfMemoryError>.Success { value } => {
+    Result<Url, UrlError | OutOfMemoryError>.Success { .. } => {
       run Testing.expect(false, "IDNA resource exhaustion must fail")
     }
     Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {

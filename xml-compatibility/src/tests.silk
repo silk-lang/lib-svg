@@ -43,8 +43,8 @@ effect fn rejected(data: &[u8]) -> ()
   run Testing.expect(
     match &result {
       Result<XmlDocument, XmlError | OutOfMemoryError>.Failure { error } => match &error {
-        XmlError problem => true
-        OutOfMemoryError problem => {
+        XmlError _ => true
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -271,7 +271,7 @@ test effect fn hostLimitsAreEnforced() -> ()
           XmlReason.Limit => true
           _ => false
         }
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -326,7 +326,7 @@ test effect fn entityBudgetCountsRepeatedReferences() -> ()
           XmlReason.Limit => true
           _ => false
         }
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -399,7 +399,7 @@ effect fn pseudoRejected(data: &[u8], limits: &XmlLimits, expected: XmlReason) -
   // the malformed-byte case at that checked boundary without unsafe conversion.
   let text = match String.fromUtf8(data) {
     Result<string, InvalidUtf8>.Success { value } => value
-    Result<string, InvalidUtf8>.Failure { error } => {
+    Result<string, InvalidUtf8>.Failure { .. } => {
       run Testing.expect(
         expected == XmlReason.Encoding,
         "malformed pseudo-attribute UTF8 is rejected",
@@ -414,7 +414,7 @@ effect fn pseudoRejected(data: &[u8], limits: &XmlLimits, expected: XmlReason) -
     match &result {
       Result<XmlPseudoAttributes, XmlError | OutOfMemoryError>.Failure { error } => match &error {
         XmlError problem => problem.reason == expected
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }

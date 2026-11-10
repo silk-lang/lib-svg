@@ -70,7 +70,7 @@ impl FixtureResolver {
     let finalUrl = match move parsed {
       Result<Url, UrlError | OutOfMemoryError>.Success { value } => move value
       Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
-        UrlError invalid => {
+        UrlError _ => {
           fail ResourceError.InvalidData
         }
         OutOfMemoryError exhausted => {
@@ -326,7 +326,7 @@ fn paintProvenance(
   }
   let typedReference = match &result.styled.catalog.engine.values.get(entry.value).* {
     Value.Paint { paint } => match &paint {
-      Paint.Server { url, fallback } => equal(
+      Paint.Server { url, .. } => equal(
         result.styled.catalog.engine.values.text(url),
         expectedReference,
       )

@@ -141,7 +141,7 @@ test effect fn allocationFailureIsNotBrokenImageFallback() -> ()
     |> Effect.provideMut<Allocator>(&mut allocator)
   let rejected = match &result {
     Result<Store, RenderError | OutOfMemoryError>.Failure { error } => match &error {
-      OutOfMemoryError value => true
+      OutOfMemoryError _ => true
       _ => false
     }
     _ => false

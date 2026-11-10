@@ -1,6 +1,4 @@
 //! SVG2 secure image documents share the caller's finite resource budget.
-import svg_css.computed { Initials }
-import silk.core.option { Option }
 import svg_fonts.database { FontDatabase }
 import lib as renderer
 import lib { RenderOptions, RenderError, RenderTree }

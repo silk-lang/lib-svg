@@ -41,12 +41,12 @@ effect fn advancesAvailable(records: Result<GlyphMetricRecords<'_>, ReadError>) 
     Result<GlyphMetricRecords, ReadError>.Success { value } => {
       let advance = GlyphMetricRecords.advance(&value, GlyphId.new(0))
       return match &advance {
-        Option<u16>.Some { value: amount } => true
+        Option<u16>.Some { .. } => true
         _ => false
       }
     }
     Result<GlyphMetricRecords, ReadError>.Failure { error } => match &error {
-      ReadError.TableIsMissing { tag } => false
+      ReadError.TableIsMissing { .. } => false
       _ => {
         fail FontMetricsError.InvalidFont
       }

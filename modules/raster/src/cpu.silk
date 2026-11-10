@@ -16,20 +16,18 @@ import svg_core.scene {
 }
 import svg_geometry.geometry { Path, isValidRect }
 import svg_core.mapping { Mapping, ProjectionClip }
-import svg_core.mapping
 import svg_core.vector_path
 import vector.path { Path as VectorPath }
 import vector.geometry { Rect as VectorRect, Point as VectorPoint, rectAt }
 import vector.projective { Homography, HalfPlane }
 import vector.projective
 import vector.geometry_error { GeometryError }
-import vector.pixmap { Pixmap, Rgba8 }
+import vector.pixmap { Pixmap }
 import vector.strips { Rasterizer, Coverage, NONZERO, EVENODD, BAND }
 import vector.stroke as strokes
 import vector.stroke { Stroker, Stroke as VectorStroke }
 import vector.flatten { Line, TOLERANCE }
 import vector.flatten as flattening
-import vector.layer { Mask }
 import vector.filter as filters
 import vector.layer as layers
 import vector.paint { ImagePattern, SAMPLE_BILINEAR, SAMPLE_NEAREST, EXTEND_CLAMP }
@@ -618,12 +616,12 @@ effect fn picture(
             path,
             transform,
             clip,
-            bounds,
             brush,
             opacity,
             linearRgb,
             rule,
-            crispEdges
+            crispEdges,
+            ..
           } => {
             let texture = run prepareBrush(
               &brush,
@@ -681,12 +679,12 @@ effect fn picture(
             transform,
             strokeSpace,
             clip,
-            bounds,
             brush,
             opacity,
             linearRgb,
             stroke,
-            crispEdges
+            crispEdges,
+            ..
           } => {
             let texture = run prepareBrush(
               &brush,
@@ -746,7 +744,7 @@ effect fn picture(
 
           // A layer of opacity 0 leaves its target as it is (Compositing 1 #groupcompositing);
           // it is recorded only so that hit testing sees its content.
-          Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+          Command.PushLayer { opacity, linearRgb, blendMode, .. } => {
             if opacity == 0.0 {
               i = layerEnd(commands, i)
             } else {
@@ -999,7 +997,7 @@ effect fn picture(
           Command.EndFilter => {}
           Command.BeginFilterImage => {}
           Command.EndFilterImage => {}
-          Command.Hit { path, transform, strokeSpace, clip, rule, stroke, target } => {}
+          Command.Hit { .. } => {}
           Command.PopLayer => {
             let top = stack.length() - 1
             let layer = stack.remove(top)
@@ -1104,7 +1102,7 @@ pub fn layerEnd(commands: &[Command], begin: usize) -> usize {
   let mut i = begin + 1
   while i < commands.length {
     match &commands[i] {
-      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+      Command.PushLayer { .. } => {
         nested = nested + 1
       }
       Command.PopLayer => {
@@ -1113,10 +1111,10 @@ pub fn layerEnd(commands: &[Command], begin: usize) -> usize {
         }
         nested = nested - 1
       }
-      Command.CompositeMask { operation } => {
+      Command.CompositeMask { .. } => {
         nested = nested - 1
       }
-      Command.ApplyMask { luminance, linearRgb } => {
+      Command.ApplyMask { .. } => {
         nested = nested - 1
       }
       _ => {}
@@ -1161,7 +1159,7 @@ pub fn filterEnd(commands: &[Command], begin: usize) -> usize {
   let mut i = begin + 1
   while i < commands.length {
     match &commands[i] {
-      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+      Command.BeginFilter { .. } => {
         nested = nested + 1
       }
       Command.EndFilter => {
@@ -1601,7 +1599,7 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
         }
         run clipIndex(clip, clips.length)
       }
-      Command.Hit { path, transform, strokeSpace, clip, rule, stroke, target } => {
+      Command.Hit { path, transform, strokeSpace, clip, stroke, target, .. } => {
         if path >= list.paths.length() || target >= list.targets.length() || !transform.isFinite() {
           fail RenderError.InvalidGeometry
         }
@@ -1618,17 +1616,7 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
           run checked.stroke(value, list.dashes.asSlice()[value.dashIndex].asSlice())
         }
       }
-      Command.FillPath {
-        path,
-        transform,
-        clip,
-        bounds,
-        brush,
-        opacity,
-        linearRgb,
-        rule,
-        crispEdges
-      } => {
+      Command.FillPath { path, transform, clip, bounds, brush, opacity, .. } => {
         if path >= list.paths.length() {
           fail RenderError.InvalidGeometry
         }
@@ -1647,9 +1635,8 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
         bounds,
         brush,
         opacity,
-        linearRgb,
         stroke,
-        crispEdges
+        ..
       } => {
         if path >= list.paths.length() || stroke.dashIndex >= list.dashes.length() {
           fail RenderError.InvalidGeometry
@@ -1671,7 +1658,7 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
         run paints.validateBrush(&brush, list)
         drop run checked.unit(opacity)
       }
-      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+      Command.PushLayer { opacity, bounds, .. } => {
         drop run checked.unit(opacity)
         if !isValidRect(bounds) {
           fail RenderError.InvalidGeometry
@@ -1681,18 +1668,18 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
           fail RenderError.TooLarge
         }
       }
-      Command.ConvertMask { luminance, linearRgb } => {
+      Command.ConvertMask { .. } => {
         if depth < 2 {
           fail RenderError.InvalidGeometry
         }
       }
-      Command.CompositeMask { operation } => {
+      Command.CompositeMask { .. } => {
         if depth < 3 {
           fail RenderError.InvalidGeometry
         }
         depth = depth - 1
       }
-      Command.ApplyMask { luminance, linearRgb } => {
+      Command.ApplyMask { .. } => {
         if depth < 2 {
           fail RenderError.InvalidGeometry
         }
@@ -1709,7 +1696,7 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
         }
         depth = depth - 1
       }
-      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {
+      Command.BeginFilter { filter, transform, clip, backdrop, .. } => {
         if filter >= list.filters.length() || !transform.isFinite()
           || !filterGraph.valid(&list.filters.asSlice()[filter]) {
           fail RenderError.InvalidGeometry
@@ -1770,7 +1757,7 @@ effect fn validateCommands(list: &DisplayList, commands: &[Command], width: u32,
       }
     }
     match &commands[i] {
-      Command.BeginFilter { filter, transform, clip, beneath, backdrop } => {}
+      Command.BeginFilter { .. } => {}
       Command.BeginFilterImage => {}
       Command.EndFilterImage => {}
       Command.EndFilter => {}
@@ -2025,7 +2012,7 @@ effect fn hitChecked(list: &DisplayList, x: f64, y: f64) -> Option<usize>
   let mut i: usize = 0
   while i < commands.length {
     match &commands[i] {
-      Command.PushLayer { opacity, bounds, linearRgb, blendMode } => {
+      Command.PushLayer { .. } => {
         run stack.append(HitLayer { found: Option<usize>.None, counts: true })
       }
       Command.BeginFilterImage => {
@@ -2047,11 +2034,11 @@ effect fn hitChecked(list: &DisplayList, x: f64, y: f64) -> Option<usize>
 
       // A mask layer is content of the mask, not of the element (SVG 2 §15.6: pointer
       // events are captured even where a mask is transparent).
-      Command.CompositeMask { operation } => {
+      Command.CompositeMask { .. } => {
         let last = stack.length() - 1
         drop stack.remove(last)
       }
-      Command.ApplyMask { luminance, linearRgb } => {
+      Command.ApplyMask { .. } => {
         let last = stack.length() - 1
         drop stack.remove(last)
       }

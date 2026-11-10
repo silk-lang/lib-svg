@@ -1,0 +1,65 @@
+//! Authoring-only fixture dispatch for the root task command. These functions
+//! never run as part of the normal check gate; committed assets remain inputs.
+import fixtures_common { FixtureError }
+import fixtures_images
+import fixtures_nested
+import fixtures_compressed
+import fixtures_font
+import fixtures_color
+import fixtures_mesh
+import silk.compress.deflate { EncodeError }
+import silk.io.writer { WriterError }
+import silk.json.scanner { JsonError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+
+pub effect fn generate(root: &Path, name: string) -> ()
+  ! OutOfMemoryError | FileError | WriterError | EncodeError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  if name == "all" {
+    run fixtures_images.images(root)
+    run fixtures_images.orientation(root)
+    run fixtures_images.sampling(root)
+    run fixtures_nested.nested(root)
+    run fixtures_nested.svgOrientation(root)
+    run fixtures_compressed.compressed(root)
+    run fixtures_font.glyphFont(root)
+    run fixtures_mesh.mesh(root)
+    run fixtures_mesh.hatch(root)
+    run fixtures_color.color(root)
+    return
+  }
+  if name == "image" {
+    return run fixtures_images.images(root)
+  }
+  if name == "image-orientation" {
+    return run fixtures_images.orientation(root)
+  }
+  if name == "image-sampling" {
+    return run fixtures_images.sampling(root)
+  }
+  if name == "nested-image" {
+    return run fixtures_nested.nested(root)
+  }
+  if name == "svg-image-orientation" {
+    return run fixtures_nested.svgOrientation(root)
+  }
+  if name == "compressed" {
+    return run fixtures_compressed.compressed(root)
+  }
+  if name == "svg-glyph-font" {
+    return run fixtures_font.glyphFont(root)
+  }
+  if name == "mesh" {
+    return run fixtures_mesh.mesh(root)
+  }
+  if name == "hatch" {
+    return run fixtures_mesh.hatch(root)
+  }
+  if name == "color" {
+    return run fixtures_color.color(root)
+  }
+  fail FixtureError {
+    message: "Unknown fixture generator: use color, compressed, hatch, image, image-orientation, image-sampling, mesh, nested-image, svg-image-orientation, svg-glyph-font, or all",
+  }
+}

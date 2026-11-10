@@ -1,0 +1,716 @@
+import silk.cli.task { TaskError }
+import silk.system.host_input { HostInputError }
+import silk.io.writer { Writer, WriterError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.crypto.sha2 { Sha256 }
+import silk.json.value { Json, Value, JsonEntry, JsonNumber }
+import silk.json.scanner { JsonError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, Path, FileError, AtomicWriteError, DirectoryEntry }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.u8
+import silk.num.usize
+import silk.num.i64
+import silk.num.isize
+import silk.num.f64
+import silk.mem.pointer { Pointer }
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.host_path as WindowsHostPath
+  import silk.platform.windows.path { WindowsPath }
+} else {
+  @foreign(noCapture: ("path", "resolved"))
+  unsafe extern "C" fn realpath(path: ?[*]const u8, resolved: ?[*]mut u8) -> ?[*]mut u8
+  @foreign(noCapture: ("path", "buffer"))
+  unsafe extern "C" fn readlink(path: ?[*]const u8, buffer: ?[*]mut u8, size: usize) -> isize
+}
+
+pub struct CorpusError {
+  pub message: String
+}
+
+pub type CorpusFailure = CorpusError
+  | FileError
+  | AtomicWriteError
+  | JsonError
+  | ProcessError
+  | OutOfMemoryError
+  | TaskError
+  | HostInputError
+  | WriterError
+
+pub effect fn reject(message: string) -> ()
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  fail CorpusError { message: run String.copy(message) }
+}
+
+pub effect fn text<'a>(value: &'a Value, key: string) -> string<'a>
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  return match Json.asString(Json.field(value, key)) {
+    Option<string<'a>>.Some { value: found } => found
+    _ => {
+      fail CorpusError { message: run String.copy("missing or non-string JSON field") }
+    }
+  }
+}
+
+pub effect fn field<'a>(value: &'a Value, key: string) -> &'a Value
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  return match Json.field(value, key) {
+    Option<&'a Value>.Some { value: found } => found
+    _ => {
+      fail CorpusError { message: run String.copy("missing JSON field") }
+    }
+  }
+}
+
+pub effect fn entries<'a>(value: &'a Value) -> &'a [JsonEntry]
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  return match &value.* {
+    Value.Object { entries } => List<JsonEntry>.asSlice(&entries)
+    _ => {
+      fail CorpusError { message: run String.copy("expected JSON object") }
+    }
+  }
+}
+
+pub effect fn values<'a>(value: &'a Value) -> &'a [Value]
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  return match &value.* {
+    Value.Array { values } => List<Value>.asSlice(&values)
+    _ => {
+      fail CorpusError { message: run String.copy("expected JSON array") }
+    }
+  }
+}
+
+pub fn validHex(value: string, length: usize) -> bool {
+  let bytes = String.utf8Bytes(value)
+  if bytes.length != length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < length {
+    let c = bytes[index]
+    if !((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+pub effect fn digest(data: &[u8]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let hash = Sha256.hash(data)
+  return run hexDigest(&hash)
+}
+
+pub effect fn hexDigest(hash: &[u8; 32]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let digits = b"0123456789abcdef"
+  let mut encoded: [u8; 64] = [0; 64]
+  let mut index: usize = 0
+  while index < 32 {
+    encoded[index * 2] = digits[u8.toUsize(hash[index] / 16)]
+    encoded[index * 2 + 1] = digits[u8.toUsize(hash[index] % 16)]
+    index = index + 1
+  }
+  return run String.copy(unsafe String.fromUtf8Unchecked(&encoded))
+}
+
+pub effect fn readJson(path: &Path) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let bytes = run FileSystem.readFile(path)
+  return run Json.parse(Bytes.asSlice(&bytes))
+}
+
+pub effect fn member(key: string, value: Value) -> JsonEntry
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return JsonEntry { key: run String.copy(key), value: move value }
+}
+
+pub effect fn stringValue(text: string) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return Value.String { text: run String.copy(text) }
+}
+
+pub fn object() -> Value {
+  return Value.Object { entries: List<JsonEntry>.make() }
+}
+
+pub fn array() -> Value {
+  return Value.Array { values: List<Value>.make() }
+}
+
+pub fn integer(value: usize) -> Value {
+  return Value.Number { value: JsonNumber.Integer { value: usize.toI64(value) } }
+}
+
+pub fn boolField(value: &Value, key: string, fallback: bool) -> bool {
+  return match Json.field(value, key) {
+    Option<&Value>.Some { value: found } => match &found.* {
+      Value.Bool { value: flag } => flag
+      _ => fallback
+    }
+    _ => fallback
+  }
+}
+
+pub fn has(value: &Value, key: string) -> bool {
+  let found = Json.field(value, key)
+  return Option<&Value>.isSome(&found)
+}
+
+pub fn optionalText<'a>(value: &'a Value, key: string) -> string<'a> {
+  return Json.asString(Json.field(value, key)) |> Option<string>.unwrapOr("")
+}
+
+pub effect fn append(array: &mut Value, value: Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  match &mut array.* {
+    Value.Array { values } => {
+      run List<Value>.append(&mut values, move value)
+    }
+    _ => {
+      run reject("expected JSON array")
+    }
+  }
+}
+
+pub effect fn setText(value: &mut Value, key: string, text: string) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  run put(&mut value, key, run stringValue(text))
+}
+
+pub effect fn replaceAll(text: string, from: string, to: string) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut output = String.make()
+  let mut rest = text
+  if from == "" {
+    return run String.copy(text)
+  }
+  while true {
+    match String.find(rest, from) {
+      Option<usize>.Some { value } => {
+        run String.append(&mut output, String.slice(rest, 0, value))
+        run String.append(&mut output, to)
+        let consumed = value + String.utf8Bytes(from).length
+        rest = String.slice(rest, consumed, String.utf8Bytes(rest).length - consumed)
+      }
+      _ => {
+        break
+      }
+    }
+  }
+  run String.append(&mut output, rest)
+  return move output
+}
+
+pub effect fn nativePath(path: &Path) -> Bytes
+  ! CorpusFailure
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.toArgumentBytes(path)
+  } else {
+    return run Bytes.copy(Path.rawBytes(path))
+  }
+}
+
+pub effect fn put(object: &mut Value, key: string, value: Value) -> ()
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  match &mut object.* {
+    Value.Object { entries } => {
+      let mut index: usize = 0
+      while index < List<JsonEntry>.length(&entries) {
+        if String.view(&List<JsonEntry>.asSlice(&entries)[index].key) == key {
+          let mut fields = List<JsonEntry>.asMutSlice(&mut entries)
+          fields[index].value = move value
+          return ()
+        }
+        index = index + 1
+      }
+      run List<JsonEntry>.append(&mut entries, run member(key, move value))
+    }
+    _ => {
+      run reject("expected JSON object")
+    }
+  }
+}
+
+pub effect fn quoted(output: &mut String, text: string) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run String.append(&mut output, "\"")
+  let bytes = String.utf8Bytes(text)
+  let hex = b"0123456789abcdef"
+  let mut index: usize = 0
+  let mut start: usize = 0
+  while index < bytes.length {
+    let c = bytes[index]
+    if c < 32 || c == 34 || c == 92 {
+      run String.append(&mut output, String.slice(text, start, index - start))
+      if c == 34 {
+        run String.append(&mut output, "\\\"")
+      } else if c == 92 {
+        run String.append(&mut output, "\\\\")
+      } else if c == 8 {
+        run String.append(&mut output, "\\b")
+      } else if c == 9 {
+        run String.append(&mut output, "\\t")
+      } else if c == 10 {
+        run String.append(&mut output, "\\n")
+      } else if c == 12 {
+        run String.append(&mut output, "\\f")
+      } else if c == 13 {
+        run String.append(&mut output, "\\r")
+      } else {
+        let encoded: [u8; 6] = [92, 117, 48, 48, hex[u8.toUsize(c / 16)], hex[u8.toUsize(c % 16)]]
+        run String.append(&mut output, unsafe String.fromUtf8Unchecked(&encoded))
+      }
+      start = index + 1
+    }
+    index = index + 1
+  }
+  run String.append(&mut output, String.slice(text, start, bytes.length - start))
+  run String.append(&mut output, "\"")
+}
+
+pub fn wholeNumber(value: Option<&Value>) -> Option<i64> {
+  let number = Json.asF64(value) |> Option<f64>.unwrapOr(f64.NAN)
+  if !f64.isFinite(number) || f64.trunc(number) != number {
+    return Option<i64>.none()
+  }
+  return f64.checkedToI64(number)
+}
+
+struct NumberWriter {
+  bytes: [u8; 128],
+  length: usize
+}
+
+impl Writer for NumberWriter {
+  effect fn writeAll(self: &mut Self, value: &[u8]) -> ()
+    ! WriterError {
+    if value.length > self.bytes.length - self.length {
+      fail Writer.failure()
+    }
+    let mut index: usize = 0
+    while index < value.length {
+      self.bytes[self.length + index] = value[index]
+      index = index + 1
+    }
+    self.length = self.length + value.length
+  }
+
+  effect fn flush(self: &mut Self) -> () ! WriterError {}
+}
+
+pub effect fn encode(output: &mut String, value: &Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  match &value.* {
+    Value.Null => {
+      run String.append(&mut output, "null")
+    }
+    Value.Bool { value: flag } => {
+      if flag {
+        run String.append(&mut output, "true")
+      } else {
+        run String.append(&mut output, "false")
+      }
+    }
+    Value.String { text } => {
+      run quoted(&mut output, String.view(&text))
+    }
+    Value.Number { .. } => {
+      let mut writer = NumberWriter { bytes: [0; 128], length: 0 }
+      match wholeNumber(Option<&Value>.some(value)) {
+        Option<i64>.Some { value: integer } => {
+          let normalized = Value.Number { value: JsonNumber.Integer { value: integer } }
+          run Json.write(&normalized) |> Effect.provideMut<Writer>(&mut writer)
+        }
+        _ => {
+          run Json.write(value) |> Effect.provideMut<Writer>(&mut writer)
+        }
+      }
+      run String.append(
+        &mut output,
+        unsafe String.fromUtf8Unchecked(Slice.view<u8>(&writer.bytes, 0, writer.length)),
+      )
+    }
+    Value.Array { values } => {
+      run String.append(&mut output, "[")
+      let mut index: usize = 0
+      while index < List<Value>.length(&values) {
+        if index != 0 {
+          run String.append(&mut output, ",")
+        }
+        run encode(&mut output, &List<Value>.asSlice(&values)[index])
+        index = index + 1
+      }
+      run String.append(&mut output, "]")
+    }
+    Value.Object { entries } => {
+      run String.append(&mut output, "{")
+      let mut index: usize = 0
+      while index < List<JsonEntry>.length(&entries) {
+        if index != 0 {
+          run String.append(&mut output, ",")
+        }
+        let entry = &List<JsonEntry>.asSlice(&entries)[index]
+        run quoted(&mut output, String.view(&entry.key))
+        run String.append(&mut output, ":")
+        run encode(&mut output, &entry.value)
+        index = index + 1
+      }
+      run String.append(&mut output, "}")
+    }
+  }
+}
+
+pub effect fn atomicWrite(path: &Path, bytes: &[u8]) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  match run Path.parent(path) {
+    Option<Path>.Some { value } => {
+      run FileSystem.createDirectoriesRecursively(&value)
+    }
+    _ => {}
+  }
+  run FileSystem.writeFileAtomic(path, bytes, FileSystem.replaceExisting(), FileSystem.buffered())
+}
+
+pub effect fn writeJson(path: &Path, value: &Value) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let mut output = String.make()
+  run encode(&mut output, value)
+  run String.append(&mut output, "\n")
+  run atomicWrite(path, String.utf8Bytes(String.view(&output)))
+}
+
+pub struct Download {
+  pub resolved: String,
+  pub body: Bytes
+}
+
+pub effect fn download(
+  url: string,
+  directory: &Path,
+  curl: &Path,
+  maximum: string,
+  timeout: string,
+  agent: string,
+) -> Download
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if !String.startsWith(url, "https://") {
+    run reject("download URL must use HTTPS")
+  }
+  let temporary = run FileSystem.temporaryDirectory(directory, ".download-")
+  let bodyPath = run Path.join(&temporary.path, "body")
+  let attempted = run Effect.result(downloadInto(url, &bodyPath, curl, maximum, timeout, agent))
+  run FileSystem.releaseIgnored(move temporary)
+  return match move attempted {
+    Result<Download, CorpusFailure>.Success { value } => move value
+    Result<Download, CorpusFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+}
+
+effect fn downloadInto(
+  url: string,
+  bodyPath: &Path,
+  curl: &Path,
+  maximum: string,
+  timeout: string,
+  agent: string,
+) -> Download
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let mut request = run ChildProcess.request(curl)
+  let options = [
+    "--disable",
+    "--fail",
+    "--silent",
+    "--show-error",
+    "--location",
+    "--proto",
+    "=https",
+    "--proto-redir",
+    "=https",
+    "--max-time",
+    timeout,
+    "--user-agent",
+    agent,
+    "--max-filesize",
+    maximum,
+    "--write-out",
+    "%{url_effective}",
+    "--output",
+  ]
+  let mut index: usize = 0
+  while index < options.length {
+    run ChildProcess.addArgument(&mut request, options[index])
+    index = index + 1
+  }
+  let native = run nativePath(bodyPath)
+  run ChildProcess.addArgumentBytes(&mut request, Bytes.asSlice(&native))
+  run ChildProcess.addArgument(&mut request, "--url")
+  run ChildProcess.addArgument(&mut request, url)
+  let outcome = run ChildProcess.submit(&request)
+  if (ChildProcess.exitCode(&outcome) |> Option<i32>.unwrapOr(-1)) != 0 {
+    run reject("HTTPS download failed")
+  }
+  let resolved = match String.fromUtf8(ChildProcess.outputBytes(&outcome)) {
+    Result<string, InvalidUtf8>.Success { value } => run String.copy(value)
+    _ => {
+      fail CorpusError { message: run String.copy("invalid effective download URL") }
+    }
+  }
+  if !String.startsWith(String.view(&resolved), "https://") {
+    run reject("download redirected outside HTTPS")
+  }
+  let body = run FileSystem.readFile(bodyPath)
+  return Download { resolved: move resolved, body: move body }
+}
+
+pub fn before(left: string, right: string) -> bool {
+  let a = String.utf8Bytes(left)
+  let b = String.utf8Bytes(right)
+  let mut index: usize = 0
+  while index < a.length && index < b.length {
+    if a[index] != b[index] {
+      return a[index] < b[index]
+    }
+    index = index + 1
+  }
+  return a.length < b.length
+}
+
+pub effect fn sortStrings(list: &mut List<String>) -> () {
+  let mut values = List<String>.asMutSlice(&mut list)
+  let mut gap = values.length / 2
+  while gap > 0 {
+    let mut index = gap
+    while index < values.length {
+      let mut at = index
+      while at >= gap && before(String.view(&values[at]), String.view(&values[at - gap])) {
+        let item = Intrinsic.replace(values[at], String.make())
+        values[at] = Intrinsic.replace(values[at - gap], move item)
+        at = at - gap
+      }
+      index = index + 1
+    }
+    gap = gap / 2
+  }
+}
+
+pub effect fn relativePath(name: string) -> ()
+  ! CorpusError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = String.utf8Bytes(name)
+  if bytes.length == 0 || bytes[0] == 47 {
+    run reject("unsafe relative path")
+  }
+  let mut start: usize = 0
+  let mut index: usize = 0
+  while index <= bytes.length {
+    if index < bytes.length && (bytes[index] == 0 || bytes[index] == 92) {
+      run reject("unsafe relative path")
+    }
+    if index == bytes.length || bytes[index] == 47 {
+      let part = String.slice(name, start, index - start)
+      if part == "" || part == "." || part == ".." {
+        run reject("unsafe relative path")
+      }
+      start = index + 1
+    }
+    index = index + 1
+  }
+}
+
+pub effect fn resolvedPath(path: &Path) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  return run resolvePathDepth(path, 0)
+}
+
+effect fn resolvePathDepth(path: &Path, depth: usize) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  if depth > 64 {
+    run reject("symbolic link cycle")
+  }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    match move run WindowsHostPath.canonicalBytes(Path.rawBytes(path)) {
+      Option<Bytes>.Some { value } => {
+        return run Path.fromBytes(Bytes.asSlice(&value))
+      }
+      _ => {}
+    }
+    if run FileSystem.exists(path) {
+      run reject("cannot canonicalize existing path")
+    }
+    let parent = match run Path.parent(path) {
+      Option<Path>.Some { value } => move value
+      _ => {
+        fail CorpusError { message: run String.copy("cannot resolve filesystem root") }
+      }
+    }
+    if run FileSystem.exists(&parent) {
+      let children = run FileSystem.listDirectory(&parent)
+      let mut index: usize = 0
+      while index < List<DirectoryEntry>.length(&children) {
+        let entry = List<DirectoryEntry>.get(&children, index)
+        if (Path.name(&entry.path) |> Option<string>.unwrapOr(""))
+          == (Path.name(path) |> Option<string>.unwrapOr("")) {
+          run reject("cannot resolve existing Windows reparse point")
+        }
+        index = index + 1
+      }
+    }
+    let resolvedParent = run resolvePathDepth(&parent, depth + 1)
+    return run Path.join(&resolvedParent, Path.name(path) |> Option<string>.unwrapOr(""))
+  } else {
+    let mut terminated = run Bytes.copy(Path.rawBytes(path))
+    run Bytes.append(&mut terminated, b"\0")
+    let mut buffer: [u8; 4096] = [0; 4096]
+    let result = unsafe realpath(
+      Pointer.fromSlice(Bytes.asSlice(&terminated)),
+      Pointer.fromMutSlice(&mut buffer),
+    )
+    if !Pointer.isNullMany(result) {
+      let mut length: usize = 0
+      while length < buffer.length && buffer[length] != 0 {
+        length = length + 1
+      }
+      if length == buffer.length {
+        run reject("resolved path too long")
+      }
+      return run Path.fromBytes(Slice.view<u8>(&buffer, 0, length))
+    }
+    let length = unsafe readlink(
+      Pointer.fromSlice(Bytes.asSlice(&terminated)),
+      Pointer.fromMutSlice(&mut buffer),
+      buffer.length,
+    )
+    let parent = match run Path.parent(path) {
+      Option<Path>.Some { value } => move value
+      _ => {
+        fail CorpusError { message: run String.copy("cannot resolve filesystem root") }
+      }
+    }
+    if length >= 0 {
+      let count = isize.toUsize(length)
+      if count == buffer.length {
+        run reject("symbolic link target too long")
+      }
+      let targetBytes = Slice.view<u8>(&buffer, 0, count)
+      let target = if count > 0 && targetBytes[0] == 47 {
+        let root = run Path.make("/")
+        run Path.resolveBytes(&root, Slice.view<u8>(targetBytes, 1, count - 1))
+      } else {
+        run Path.resolveBytes(&parent, targetBytes)
+      }
+      return run resolvePathDepth(&target, depth + 1)
+    }
+
+    // Propagate permission and other failures instead of treating inaccessible paths as absent.
+    if run FileSystem.exists(path) {
+      run reject("cannot canonicalize existing path")
+    }
+    let resolvedParent = run resolvePathDepth(&parent, depth + 1)
+    let name = Path.name(path) |> Option<string>.unwrapOr("")
+    return run Path.join(&resolvedParent, name)
+  }
+}
+
+pub effect fn inside(root: &Path, target: &Path) -> bool
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let realRoot = run resolvedPath(root)
+  let realTarget = run resolvedPath(target)
+  let a = Path.rawBytes(&realRoot)
+  let b = Path.rawBytes(&realTarget)
+  if a.length > b.length {
+    return false
+  }
+  let mut index: usize = 0
+  while index < a.length {
+    if a[index] != b[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return a.length == b.length || a.length == 1 || b[a.length] == 47
+}
+
+pub effect fn contained(root: &Path, name: string) -> Path
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  run relativePath(name)
+  let path = run Path.join(root, name)
+  if !run inside(root, &path) {
+    run reject("path outside suite")
+  }
+  return move path
+}
+
+pub effect fn errorMessage(failure: CorpusFailure) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return match move failure {
+    CorpusError error => move error.message
+    TaskError error => move error.message
+    FileError error => {
+      drop error
+      run String.copy("filesystem operation failed")
+    }
+    AtomicWriteError error => {
+      drop error
+      run String.copy("atomic publication failed")
+    }
+    JsonError error => {
+      drop error
+      run String.copy("invalid JSON document")
+    }
+    ProcessError error => {
+      drop error
+      run String.copy("native process failed")
+    }
+    HostInputError error => {
+      drop error
+      run String.copy("host input failed")
+    }
+    WriterError error => {
+      drop error
+      run String.copy("report output failed")
+    }
+    OutOfMemoryError error => {
+      fail move error
+    }
+  }
+}

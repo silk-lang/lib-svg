@@ -185,7 +185,7 @@ pub effect fn combine(
         } else {
           match &nodes[owner] {
             ClipNode.Empty => false
-            ClipNode.Shape { path, transform, rule } => if rule == FillRule.EvenOdd {
+            ClipNode.Shape { rule, .. } => if rule == FillRule.EvenOdd {
               counts[owner] % 2 != 0
             } else {
               counts[owner] != 0

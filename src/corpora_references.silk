@@ -1,0 +1,596 @@
+import corpora { CorpusError, CorpusFailure }
+import corpora as C
+import corpora_html as Html
+import corpora_encoding as Encoding
+import corpora_xml as Xml
+import silk.system.child_process { ChildProcess }
+import silk.system.host_input { HostInput }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator }
+import silk.system.filesystem { FileSystem, Path, FileInfo, DirectoryInfo, DirectoryEntry }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.u8
+import silk.num.usize
+import silk.num.i32
+
+pub fn extension(name: string, suffix: string) -> bool {
+  return String.endsWith(name, suffix)
+}
+
+pub fn pathText(path: &Path) -> string {
+  return Path.view(path) |> Option<string>.unwrapOr("")
+}
+
+pub effect fn relative(root: &Path, path: &Path) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  let base = pathText(root)
+  let name = pathText(path)
+  let length = String.utf8Bytes(base).length
+  if !String.startsWith(name, base) || String.utf8Bytes(name).length <= length
+    || (length > 1 && String.utf8Bytes(name)[length] != 47) {
+    run C.reject("path outside suite root")
+  }
+  let start = if length == 1 {
+    1
+  } else {
+    length + 1
+  }
+  return run String.copy(String.slice(name, start, String.utf8Bytes(name).length - start))
+}
+
+pub effect fn isFile(path: &Path) -> bool
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  if !run FileSystem.exists(path) {
+    return false
+  }
+  return match move run FileSystem.stat(path) {
+    FileInfo _ => true
+    DirectoryInfo _ => false
+  }
+}
+
+pub effect fn walk(root: &Path) -> List<String>
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let mut names = List<String>.make()
+  if !run FileSystem.exists(root) {
+    return move names
+  }
+  run walkInto(root, &mut names)
+  run C.sortStrings(&mut names)
+  return move names
+}
+
+effect fn walkInto(root: &Path, names: &mut List<String>) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let entries = run FileSystem.listDirectory(root)
+  let mut index: usize = 0
+  while index < List<DirectoryEntry>.length(&entries) {
+    let entry = &List<DirectoryEntry>.asSlice(&entries)[index]
+    if entry.kind.code == 1 {
+      run walkInto(&entry.path, &mut names)
+    } else if run isFile(&entry.path) {
+      run List<String>.append(&mut names, run String.copy(pathText(&entry.path)))
+    }
+    index = index + 1
+  }
+}
+
+pub effect fn validateExpectation(entry: &Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let id = run C.text(entry, "id")
+  if id == "" {
+    run C.reject("expectation requires a nonempty id")
+  }
+  let status = run C.text(entry, "status")
+  if status != "pass" && status != "fail" && status != "spec-difference" && status != "skip" {
+    run C.reject("unknown expectation status")
+  }
+  if String.trim(run C.text(entry, "reason")) == "" {
+    run C.reject("missing expectation reason")
+  }
+  let spec = run C.text(entry, "spec")
+  let anchor = String.find(spec, "#") |> Option<usize>.unwrapOr(String.utf8Bytes(spec).length)
+  if !String.startsWith(spec, "https://") || anchor + 1 >= String.utf8Bytes(spec).length {
+    run C.reject("spec must be an HTTPS normative #anchor citation")
+  }
+  if status == "spec-difference" {
+    if String.trim(run C.text(entry, "spec_result")) == ""
+      || String.trim(run C.text(entry, "reference_result")) == "" {
+      run C.reject("spec difference requires both observed results")
+    }
+  }
+  match Json.field(entry, "tolerance") {
+    Option<&Value>.Some { value } => {
+      let fields = run C.entries(value)
+      let mut index: usize = 0
+      while index < fields.length {
+        let key = String.view(&fields[index].key)
+        if key != "channel" && key != "antialias_channel" && key != "pixels" && key != "reason" {
+          run C.reject("invalid tolerance field")
+        }
+        if key != "reason" {
+          let number = C.wholeNumber(Option<&Value>.some(&fields[index].value))
+            |> Option<i64>.unwrapOr(-1)
+          let maximum: i64 = if key == "pixels" {
+            100000000
+          } else {
+            255
+          }
+          if number < 0 || number > maximum {
+            run C.reject("invalid tolerance")
+          }
+        }
+        index = index + 1
+      }
+      if fields.length != 0 && String.trim(C.optionalText(value, "reason")) == "" {
+        run C.reject("tolerance needs a reason")
+      }
+    }
+    _ => {}
+  }
+}
+
+pub effect fn loadExpectations(path: &Path, suite: string) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let document = run C.readJson(path)
+  if (C.wholeNumber(Json.field(&document, "version")) |> Option<i64>.unwrapOr(0)) != 1
+    || (run C.text(&document, "suite")) != suite {
+    run C.reject("expectation version/suite mismatch")
+  }
+  let cases = run C.values(run C.field(&document, "cases"))
+  let mut result = C.object()
+  let mut index: usize = 0
+  while index < cases.length {
+    run validateExpectation(&cases[index])
+    let id = run C.text(&cases[index], "id")
+    if C.has(&result, id) {
+      run C.reject("duplicate expectation")
+    }
+    run C.put(&mut result, id, run Json.copy(&cases[index]))
+    index = index + 1
+  }
+  return move result
+}
+
+pub struct Own {
+  pub root: Path,
+  pub cases: Value,
+  pub expectations: Value
+}
+
+pub effect fn loadOwnManifest(path: &Path, malformed: bool) -> Own
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  let document = run C.readJson(path)
+  if (C.wholeNumber(Json.field(&document, "version")) |> Option<i64>.unwrapOr(0)) != 1
+    || (run C.text(&document, "suite")) != "own"
+    || (run C.text(&document, "mode"))
+      != (if malformed {
+        "malformed"
+      } else {
+        "reference"
+      }) {
+    run C.reject("own manifest version/suite/mode mismatch")
+  }
+  let parent = match run Path.parent(path) {
+    Option<Path>.Some { value } => move value
+    _ => {
+      fail CorpusError { message: run String.copy("manifest has no parent") }
+    }
+  }
+  let root = run C.resolvedPath(&parent)
+  let casesValue = run C.field(&document, "cases")
+  let cases = run C.values(casesValue)
+  if cases.length == 0 {
+    run C.reject("own manifest requires nonempty cases")
+  }
+  let mut expectations = C.object()
+  let mut inputs = C.object()
+  let mut files = C.object()
+  let mut index: usize = 0
+  while index < cases.length {
+    let entry = &cases[index]
+    run validateExpectation(entry)
+    let id = run C.text(entry, "id")
+    let _safeId = run C.contained(&root, id)
+    if (run C.text(entry, "status")) != "pass" {
+      run C.reject("own cases must have status pass")
+    }
+    if C.has(&expectations, id) {
+      run C.reject("duplicate own case")
+    }
+    run C.put(&mut expectations, id, run Json.copy(entry))
+    let input = run C.text(entry, "input")
+    let inputPath = run C.contained(&root, input)
+    if !extension(input, ".svg") && !extension(input, ".svgz") {
+      run C.reject("input must be SVG or compressed SVG")
+    }
+    if C.has(&inputs, input) {
+      run C.reject("duplicate own input")
+    }
+    run C.put(&mut inputs, input, Value.Null)
+    if !run isFile(&inputPath) {
+      run C.reject("missing fixture input")
+    }
+    run C.put(&mut files, input, Value.Null)
+    if C.has(entry, "arguments") {
+      let args = run C.values(run C.field(entry, "arguments"))
+      let mut at: usize = 0
+      while at < args.length {
+        let converted = Json.asString(Option<&Value>.some(&args[at]))
+        if Option<string>.isNone(&converted) {
+          run C.reject("arguments must be renderer option strings")
+        }
+        at = at + 1
+      }
+    }
+    let empty = C.array()
+    let references = match Json.field(entry, "references") {
+      Option<&Value>.Some { value } => value
+      _ => &empty
+    }
+    let refs = run C.values(references)
+    let mut needsReference = true
+    if malformed {
+      let exit = C.wholeNumber(Json.field(entry, "exit_code")) |> Option<i64>.unwrapOr(-1)
+      let presenceValue = run C.field(entry, "output_present")
+      let presence = match &presenceValue.* {
+        Value.Bool { value } => value
+        _ => {
+          fail CorpusError { message: run String.copy("malformed output_present must be boolean") }
+        }
+      }
+      if (exit != 0 && exit != 1) || presence != (exit == 0) {
+        run C.reject("malformed contract requires exit 1 without output or exit 0 with output")
+      }
+      if exit == 1 && refs.length != 0 {
+        run C.reject("rejected input cannot have references")
+      }
+      needsReference = exit == 0
+    }
+    if needsReference && refs.length == 0 {
+      run C.reject("missing references")
+    }
+    let mut at: usize = 0
+    while at < refs.length {
+      let relation = run C.text(&refs[at], "relation")
+      if relation != "==" && relation != "!=" {
+        run C.reject("invalid reference relation")
+      }
+      let name = run C.text(&refs[at], "path")
+      if !extension(name, ".svg") && !extension(name, ".png") {
+        run C.reject("reference must be SVG or PNG")
+      }
+      let reference = run C.contained(&root, name)
+      if !run isFile(&reference) {
+        run C.reject("missing reference fixture")
+      }
+      let realReference = run C.resolvedPath(&reference)
+      let realInput = run C.resolvedPath(&inputPath)
+      if pathText(&realReference) == pathText(&realInput) {
+        run C.reject("input cannot reference itself")
+      }
+      run C.put(&mut files, name, Value.Null)
+      at = at + 1
+    }
+    index = index + 1
+  }
+  let disk = run walk(&root)
+  index = 0
+  while index < List<String>.length(&disk) {
+    let name = String.view(&List<String>.asSlice(&disk)[index])
+    if extension(name, ".svg") || extension(name, ".svgz") || extension(name, ".png") {
+      let absolute = run Path.make(name)
+      let relative = run relative(&root, &absolute)
+      if !C.has(&files, String.view(&relative)) {
+        run C.reject("unlisted own fixtures")
+      }
+    }
+    index = index + 1
+  }
+  return Own { root: move root, cases: run Json.copy(casesValue), expectations: move expectations }
+}
+
+pub effect fn svgDocument(path: &Path) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let bytes = run FileSystem.readFile(path)
+  let decoded = run Encoding.decodeXml(Bytes.asSlice(&bytes))
+  return run Xml.validate(Bytes.asSlice(&decoded))
+}
+
+fn hex(c: u8) -> i32 {
+  return if c >= 48 && c <= 57 {
+    u8.toI32(c) - 48
+  } else if c >= 65 && c <= 70 {
+    u8.toI32(c) - 55
+  } else if c >= 97 && c <= 102 {
+    u8.toI32(c) - 87
+  } else {
+    -1
+  }
+}
+
+pub effect fn decodeHref(href: string) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  let input = String.utf8Bytes(href)
+  let mut bytes = Bytes.make()
+  let mut index: usize = 0
+  while index < input.length {
+    if input[index] == 37 && index + 2 < input.length && hex(input[index + 1]) >= 0
+      && hex(input[index + 2]) >= 0 {
+      let byte = [i32.toU8(hex(input[index + 1]) * 16 + hex(input[index + 2]))]
+      run Bytes.append(&mut bytes, &byte)
+      index = index + 3
+    } else {
+      run Bytes.append(&mut bytes, Slice.view<u8>(input, index, 1))
+      index = index + 1
+    }
+  }
+
+  // Decode each maximal well-formed sequence; malformed UTF-8 becomes U+FFFD as in URL unquote.
+  let raw = Bytes.asSlice(&bytes)
+  let mut output = String.make()
+  index = 0
+  while index < raw.length {
+    let c = raw[index]
+    let count: usize = if c < 128 {
+      1
+    } else if c >= 194 && c <= 223 {
+      2
+    } else if c >= 224 && c <= 239 {
+      3
+    } else if c >= 240 && c <= 244 {
+      4
+    } else {
+      1
+    }
+    let mut length: usize = 1
+    while length < count && index + length < raw.length && raw[index + length] >= 128
+      && raw[index + length] <= 191 {
+      if length == 1
+        && ((c == 224 && raw[index + length] < 160) || (c == 237 && raw[index + length] > 159)
+          || (c == 240 && raw[index + length] < 144)
+          || (c == 244 && raw[index + length] > 143)) {
+        break
+      }
+      length = length + 1
+    }
+    match String.fromUtf8(Slice.view<u8>(raw, index, length)) {
+      Result<string, InvalidUtf8>.Success { value } => {
+        run String.append(&mut output, value)
+      }
+      _ => {
+        run String.append(&mut output, "�")
+      }
+    }
+    index = index + length
+  }
+  return move output
+}
+
+effect fn wptReference(root: &Path, input: &Path, href: string) -> String
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  if String.startsWith(href, "//") || String.contains(href, "?") || String.contains(href, "#") {
+    run C.reject("external/query/fragment reference needs manual adaptation")
+  }
+  let raw = String.utf8Bytes(href)
+  let mut at: usize = 0
+  let mut scheme = raw.length > 0
+    && ((raw[0] >= 65 && raw[0] <= 90) || (raw[0] >= 97 && raw[0] <= 122))
+  while at < raw.length && raw[at] != 47 {
+    let c = raw[at]
+    if c == 58 {
+      if scheme {
+        run C.reject("external reference needs manual adaptation")
+      }
+      break
+    }
+    if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 43 || c == 45
+      || c == 46) {
+      scheme = false
+    }
+    at = at + 1
+  }
+  let decoded = run decodeHref(href)
+  let name = String.view(&decoded)
+  if name == "" || String.contains(name, "\\") {
+    run C.reject("invalid reference path")
+  }
+  let parent = match run Path.parent(input) {
+    Option<Path>.Some { value } => move value
+    _ => {
+      fail CorpusError { message: run String.copy("reference path has no parent") }
+    }
+  }
+  let path = if String.startsWith(name, "/") {
+    run Path.resolve(root, String.slice(name, 1, String.utf8Bytes(name).length - 1))
+  } else {
+    run Path.resolve(&parent, name)
+  }
+  let resolved = run C.resolvedPath(&path)
+  if !run C.inside(root, &resolved) {
+    run C.reject("reference outside suite root")
+  }
+  if !extension(pathText(&resolved), ".svg") {
+    run C.reject("reference requires HTML layout rather than standalone SVG")
+  }
+  if !run isFile(&resolved) {
+    run C.reject("reference resource absent from fetched scope")
+  }
+  run svgDocument(&resolved)
+  let realRoot = run C.resolvedPath(root)
+  return run relative(&realRoot, &resolved)
+}
+
+pub effect fn discoverCases(root: &Path, suite: string, lock: &Value, full: bool) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let mut result = C.array()
+  if suite == "resvg" && !full {
+    let cases = run C.values(
+      run C.field(run C.field(run C.field(lock, "suites"), "resvg"), "curated"),
+    )
+    let mut index: usize = 0
+    while index < cases.length {
+      let files = run C.values(run C.field(&cases[index], "files"))
+      if files.length < 2 {
+        run C.reject("curated case lacks input/reference")
+      }
+      run C.append(
+        &mut result,
+        run referenceCase(
+          run C.text(&cases[index], "id"),
+          run C.text(&files[0], "path"),
+          run C.text(&files[1], "path"),
+        ),
+      )
+      index = index + 1
+    }
+    return move result
+  }
+  let source = if suite == "wpt" {
+    run Path.fromBytes(Path.rawBytes(root))
+  } else {
+    run Path.join(
+      root,
+      if suite == "resvg" {
+        "crates/resvg/tests/tests"
+      } else {
+        "svg"
+      },
+    )
+  }
+  let files = run walk(&source)
+  let svg = run Path.join(root, "svg")
+  let scoped = suite == "wpt" && run FileSystem.exists(&svg)
+  let mut index: usize = 0
+  while index < List<String>.length(&files) {
+    let name = String.view(&List<String>.asSlice(&files)[index])
+    let path = run Path.make(name)
+    let relativeName = run relative(root, &path)
+    if suite == "wpt" {
+      if extension(name, ".svg") || extension(name, ".html") || extension(name, ".xhtml")
+        || extension(name, ".htm") {
+        let relative = String.view(&relativeName)
+        if !scoped || String.startsWith(relative, "svg/")
+          || String.startsWith(relative, "css/filter-effects/")
+          || String.startsWith(relative, "css/css-masking/")
+          || String.startsWith(relative, "css/compositing/")
+          || String.startsWith(relative, "css/css-transforms/") {
+          let bytes = run FileSystem.readFile(&path)
+          let links = run Html.links(Bytes.asSlice(&bytes))
+          if List<Html.Link>.length(&links) != 0 {
+            let mut entry = C.object()
+            run C.setText(&mut entry, "id", relative)
+            run C.setText(&mut entry, "input", relative)
+            run C.setText(&mut entry, "canvas", "white")
+            let built = run Effect.result(wptReferences(root, &path, &links))
+            match move built {
+              Result<Value, CorpusFailure>.Success { value } => {
+                run C.put(&mut entry, "references", move value)
+              }
+              Result<Value, CorpusFailure>.Failure { error } => {
+                let reason = run C.errorMessage(move error)
+                run C.setText(&mut entry, "skip_reason", String.view(&reason))
+                run C.put(&mut entry, "references", C.array())
+              }
+            }
+            run C.append(&mut result, move entry)
+          }
+        }
+      }
+    } else if extension(name, ".svg") {
+      let local = run relative(&source, &path)
+      let id = String.slice(
+        String.view(&local),
+        0,
+        String.utf8Bytes(String.view(&local)).length - 4,
+      )
+      let mut reference = run String.copy(
+        if suite == "resvg" {
+          String.slice(name, 0, String.utf8Bytes(name).length - 4)
+        } else {
+          ""
+        },
+      )
+      if suite != "resvg" {
+        let png = run Path.join(root, "png")
+        let destination = run Path.resolve(&png, id)
+        run String.append(&mut reference, pathText(&destination))
+      }
+      run String.append(&mut reference, ".png")
+      let refPath = run Path.make(String.view(&reference))
+      let refName = run relative(root, &refPath)
+      let mut entry = run referenceCase(id, String.view(&relativeName), String.view(&refName))
+      if !run isFile(&refPath) {
+        run C.setText(
+          &mut entry,
+          "skip_reason",
+          "upstream provides no PNG reference; manual pass-criteria adaptation required",
+        )
+      }
+      run C.append(&mut result, move entry)
+    }
+    index = index + 1
+  }
+  return move result
+}
+
+effect fn wptReferences(root: &Path, path: &Path, links: &List<Html.Link>) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  if !extension(pathText(path), ".svg") {
+    run C.reject("HTML layout required; not a standalone SVG reftest")
+  }
+  run svgDocument(path)
+  let mut references = C.array()
+  let mut index: usize = 0
+  while index < List<Html.Link>.length(links) {
+    let link = &List<Html.Link>.asSlice(links)[index]
+    let name = run wptReference(root, path, String.view(&link.href))
+    let mut reference = C.object()
+    run C.setText(&mut reference, "path", String.view(&name))
+    run C.setText(
+      &mut reference,
+      "relation",
+      if String.view(&link.relation) == "match" {
+        "=="
+      } else {
+        "!="
+      },
+    )
+    run C.append(&mut references, move reference)
+    index = index + 1
+  }
+  return move references
+}
+
+pub effect fn referenceCase(id: string, input: string, reference: string) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut entry = C.object()
+  run C.setText(&mut entry, "id", id)
+  run C.setText(&mut entry, "input", input)
+  let mut refs = C.array()
+  let mut ref = C.object()
+  run C.setText(&mut ref, "path", reference)
+  run C.setText(&mut ref, "relation", "==")
+  run C.append(&mut refs, move ref)
+  run C.put(&mut entry, "references", move refs)
+  return move entry
+}

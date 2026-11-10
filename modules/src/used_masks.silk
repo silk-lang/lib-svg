@@ -6,7 +6,7 @@ import svg_css.computed { Engine, StyleId, ComputedValue }
 import svg_css.values { Value }
 import svg_css.effect_values { EffectValue, Image }
 import svg_css.properties { Property }
-import svg_css.dimensions { Dimension, ExprId }
+import svg_css.dimensions { Dimension }
 import svg_css.dimensions
 import svg_css.lexer
 import svg_css.input { Input }
@@ -200,7 +200,7 @@ pub fn present(engine: &Engine<'_>, style: StyleId) -> bool {
   return match &engine.get(style, Property.MaskImage) {
     Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
       Value.Effect { value } => match &value {
-        EffectValue.Masks { layers, resetBorder } => if layers.length() == 1 {
+        EffectValue.Masks { layers, .. } => if layers.length() == 1 {
           match &layers.asSlice()[0].image {
             Image.None => false
             _ => true

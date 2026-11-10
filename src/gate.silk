@@ -1,0 +1,99 @@
+import task_support as Support
+import task_process as Process
+import silk.cli.task { Task, TaskError }
+import silk.collections.list { List }
+import silk.core.option { Option }
+import silk.io.writer { WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { FileError, FileSystem }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.toml.value { Toml, Value }
+
+pub effect fn workspace() -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let config = run Support.manifest("silk.toml")
+  let members = match Toml.field(&config, "workspace") |> Toml.fieldAt("members") {
+    Option<&Value>.Some { value } => value
+    Option<&Value>.None => run Task.abort("Missing workspace members")
+  }
+
+  // Complete each phase serially: immutable Git checkout materialization is shared.
+  let mut phase: usize = 0
+  while phase < 3 {
+    let mut index: usize = 0
+    while let Option<string>.Some { value: member } = Toml.item(members, index) |> Toml.asString {
+      let manifest = run Support.cat(&[member, "/silk.toml"])
+      if phase == 0 {
+        run Task.silk(&["check", "--manifest-path", String.view(&manifest)])
+      } else if phase == 1 {
+        run Task.silk(&["format", "--check", "--manifest-path", String.view(&manifest)])
+      } else {
+        let relative = run Support.cat(&[member, "/src/tests.silk"])
+        let tests = run Support.path(String.view(&relative))
+        if run FileSystem.exists(&tests) {
+          run Task.silk(
+            &["test", "--manifest-path", String.view(&manifest), "--root", "src/tests.silk"],
+          )
+        }
+      }
+      index = index + 1
+    }
+    phase = phase + 1
+  }
+  run Task.silk(&["test", "--manifest-path", "silk.toml", "--root", "src/tests.silk"])
+}
+
+pub effect fn gpu(suites: &List<String>) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let executable = run Support.build("modules/gpu/tests", "svg-gpu-tests", false, false)
+  let fixtures = run Support.path("modules/tests/fixtures")
+  let defaults = &[
+    "painting",
+    "compositing",
+    "masking",
+    "clipping",
+    "clip-shapes",
+    "structure",
+    "color",
+    "filters",
+    "images",
+    "own",
+    "text",
+    "animation",
+    "css",
+    "malformed",
+  ]
+  let values = List<String>.asSlice(suites)
+  let mut arguments = List<string>.make()
+  run List<string>.append(&mut arguments, run Support.pathText(&fixtures))
+  let count = if values.length == 0 {
+    defaults.length
+  } else {
+    values.length
+  }
+  let mut i: usize = 0
+  while i < count {
+    if values.length == 0 {
+      run List<string>.append(&mut arguments, defaults[i])
+    } else {
+      run List<string>.append(&mut arguments, String.view(&values[i]))
+    }
+    i = i + 1
+  }
+  run Process.exec(String.view(&executable), List<string>.asSlice(&arguments), "900")
+}
+
+pub effect fn setupCi(linuxGpu: bool) -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let resolved = run Support.nativeManifest()
+  if linuxGpu {
+    run Task.silk(&["task", "--manifest-path", String.view(&resolved), "setup-ci", "--linux-gpu"])
+  } else {
+    run Task.silk(&["task", "--manifest-path", String.view(&resolved), "setup-ci"])
+  }
+}

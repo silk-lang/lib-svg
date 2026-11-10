@@ -168,7 +168,7 @@ pub effect fn metadataIndex(
 
 fn inherit<T: Copy>(current: Option<T>, template: Option<T>) -> Option<T> {
   return match &current {
-    Option<T>.Some { value } => current
+    Option<T>.Some { .. } => current
     _ => template
   }
 }
@@ -256,8 +256,8 @@ effect fn mergedGradient(
     }
   }
   let radial = match &store.metadata.asSlice()[first] {
-    Metadata.LinearGradient { value } => false
-    Metadata.RadialGradient { value } => true
+    Metadata.LinearGradient { .. } => false
+    Metadata.RadialGradient { .. } => true
     _ => {
       return Option<usize>.None
     }
@@ -386,7 +386,7 @@ pub fn resolveCurrent(engine: &Engine<'_>, style: StyleId, color: colors.Color) 
   return match &engine.get(style, Property.Color) {
     Option<ComputedValue>.Some { value: entry } => match &engine.values.get(entry.value).* {
       Value.Color { color: value } => value
-      Value.IccColor { color: value, icc } => value
+      Value.IccColor { color: value, .. } => value
       _ => color
     }
     _ => color
@@ -403,7 +403,7 @@ pub effect fn stopColor(engine: &Engine<'_>, style: StyleId) -> Color
   }
   let color = match &engine.values.get(entry.value).* {
     Value.Color { color: value } => colors.toSrgb(resolveCurrent(engine, style, value))
-    Value.IccColor { color: value, icc } => colors.toSrgb(resolveCurrent(engine, style, value))
+    Value.IccColor { color: value, .. } => colors.toSrgb(resolveCurrent(engine, style, value))
     _ => {
       fail RenderError.InvalidGeometry
     }

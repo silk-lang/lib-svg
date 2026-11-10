@@ -74,7 +74,7 @@ fn whitespace(byte: u8) -> bool {
 fn present(document: &XmlDocument, node: XmlNodeId, name: string) -> bool {
   return match &(document.attribute(node, "", name)
     |> Option<string>.map<&[u8]>(String.utf8Bytes)) {
-    Option<&[u8]>.Some { value } => true
+    Option<&[u8]>.Some { .. } => true
     _ => false
   }
 }
@@ -230,7 +230,7 @@ effect fn colorOf(engine: &Engine<'_>, style: StyleId, property: Property) -> Rg
   }
   let srgb = match &engine.values.get(entry.value).* {
     Value.Color { color: value } => colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
-    Value.IccColor { color: value, icc } => {
+    Value.IccColor { color: value, .. } => {
       colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
     }
     _ => {
@@ -1547,7 +1547,7 @@ pub effect fn shorthand(
         color: Rgba { r: srgb.r, g: srgb.g, b: srgb.b, a: srgb.a },
       }
     }
-    Filter.Url { url } => {
+    Filter.Url { .. } => {
       fail RenderError.InvalidStyleContext
     }
   }

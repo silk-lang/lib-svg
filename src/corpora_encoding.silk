@@ -1,0 +1,253 @@
+import corpora { CorpusFailure }
+import corpora as C
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.core.ownership { Drop }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.mem.pointer { Pointer }
+import silk.num.u32
+
+extern "C" struct EncodingData {}
+
+extern "C" struct Decoder {}
+
+unsafe extern "C" fn malloc(size: usize) -> ?*mut Decoder
+
+unsafe extern "C" fn free(memory: ?*mut Decoder) -> ()
+
+unsafe extern "C" fn lxb_encoding_decode_t_sizeof() -> usize
+
+@foreign(noCapture: .("name"))
+unsafe extern "C" fn lxb_encoding_data_by_pre_name(name: ?[*]const u8, length: usize) ->
+  ?*mut EncodingData
+
+unsafe extern "C" fn lxb_encoding_data_encoding_noi(data: *mut EncodingData) -> u32
+
+unsafe extern "C" fn lxb_encoding_decode_init_noi(
+  decoder: *mut Decoder,
+  data: *mut EncodingData,
+  output: ?[*]mut u32,
+  length: usize,
+) -> u32
+
+unsafe extern "C" fn lxb_encoding_decode_buf_set_noi(
+  decoder: *mut Decoder,
+  output: ?[*]mut u32,
+  length: usize,
+) -> ()
+
+unsafe extern "C" fn lxb_encoding_decode_buf_used_noi(decoder: *mut Decoder) -> usize
+
+unsafe extern "C" fn lxb_encoding_decode_finish_noi(decoder: *mut Decoder) -> u32
+
+@foreign(noCapture: ("input", "end"))
+unsafe extern "C" fn lxb_encoding_data_call_decode_noi(
+  data: *mut EncodingData,
+  decoder: *mut Decoder,
+  input: *mut ?[*]const u8,
+  end: ?[*]const u8,
+) -> u32
+
+struct Owner {
+  handle: *mut Decoder
+}
+
+impl Drop for Owner {
+  fn drop(self: &mut Self) -> () {
+    unsafe free(self.handle)
+  }
+}
+
+fn lower(c: u8) -> u8 {
+  return if c >= 65 && c <= 90 {
+    c + 32
+  } else {
+    c
+  }
+}
+
+fn space(c: u8) -> bool {
+  return c == 9 || c == 10 || c == 13 || c == 32
+}
+
+struct Declaration {
+  start: usize,
+  end: usize
+}
+
+fn declarationEncoding(source: &[u8]) -> Declaration {
+  if source.length < 6 || source[0] != 60 || source[1] != 63 || lower(source[2]) != 120
+    || lower(source[3]) != 109
+    || lower(source[4]) != 108
+    || !space(source[5]) {
+    return Declaration { start: 0, end: 0 }
+  }
+  let mut result = Declaration { start: 0, end: 0 }
+  let mut index: usize = 6
+  let length = if source.length > 512 {
+    512
+  } else {
+    source.length
+  }
+  while index + 8 < length && source[index] != 63 {
+    let mut equal = true
+    let mut letter: usize = 0
+    while letter < 8 {
+      if lower(source[index + letter]) != b"encoding"[letter] {
+        equal = false
+      }
+      letter = letter + 1
+    }
+    if equal {
+      let mut at = index + 8
+      while at < length && space(source[at]) {
+        at = at + 1
+      }
+      if at < length && source[at] == 61 {
+        at = at + 1
+        while at < length && space(source[at]) {
+          at = at + 1
+        }
+        if at < length && (source[at] == 34 || source[at] == 39) {
+          let quote = source[at]
+          at = at + 1
+          let start = at
+          while at < length && source[at] != quote && source[at] != 63 {
+            at = at + 1
+          }
+          if at < length && at > start && source[at] == quote {
+            result = Declaration { start: start, end: at }
+          }
+        }
+      }
+    }
+    index = index + 1
+  }
+  return move result
+}
+
+pub effect fn scalar(output: &mut Bytes, value: u32) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if value < 128 {
+    let bytes = [u32.toU8(value)]
+    run Bytes.append(&mut output, &bytes)
+  } else if value < 2048 {
+    let bytes = [u32.toU8(192 + value / 64), u32.toU8(128 + value % 64)]
+    run Bytes.append(&mut output, &bytes)
+  } else if value < 65536 {
+    let bytes = [
+      u32.toU8(224 + value / 4096),
+      u32.toU8(128 + value / 64 % 64),
+      u32.toU8(128 + value % 64),
+    ]
+    run Bytes.append(&mut output, &bytes)
+  } else {
+    let bytes = [
+      u32.toU8(240 + value / 262144),
+      u32.toU8(128 + value / 4096 % 64),
+      u32.toU8(128 + value / 64 % 64),
+      u32.toU8(128 + value % 64),
+    ]
+    run Bytes.append(&mut output, &bytes)
+  }
+}
+
+pub effect fn decodeXml<'a>(source: &'a [u8]) -> Bytes
+  ! CorpusFailure
+  ? &mut Allocator {
+  let declaration = declarationEncoding(source)
+  let mut label: &'a [u8] = b"utf-8"
+  if source.length >= 2
+    && ((source[0] == 255 && source[1] == 254) || (source[0] == 60 && source[1] == 0)) {
+    label = b"utf-16le"
+  } else if source.length >= 2
+    && ((source[0] == 254 && source[1] == 255) || (source[0] == 0 && source[1] == 60)) {
+    label = b"utf-16be"
+  } else if declaration.end > declaration.start {
+    label = Slice.view<u8>(source, declaration.start, declaration.end - declaration.start)
+  }
+  let found = unsafe lxb_encoding_data_by_pre_name(Pointer.fromSlice(label), label.length)
+  if Pointer.isNull(found) {
+    run C.reject("unsupported XML encoding label")
+  }
+  let data = unsafe Intrinsic.pointerRequalify<?*mut EncodingData, *mut EncodingData>(found)
+  let kind = unsafe lxb_encoding_data_encoding_noi(data)
+  if kind == 30 || kind == 42 {
+    run C.reject("unsupported XML encoding label")
+  }
+  let allocated = unsafe malloc(unsafe lxb_encoding_decode_t_sizeof())
+  if Pointer.isNull(allocated) {
+    fail OutOfMemoryError {}
+  }
+  let owner = Owner {
+    handle: unsafe Intrinsic.pointerRequalify<?*mut Decoder, *mut Decoder>(allocated),
+  }
+  let mut buffer: [u32; 1024] = [0; 1024]
+  if unsafe lxb_encoding_decode_init_noi(
+    owner.handle,
+    data,
+    Pointer.fromMutSlice(&mut buffer),
+    buffer.length,
+  )
+    != 0 {
+    run C.reject("cannot initialize XML decoder")
+  }
+  let mut output = Bytes.make()
+  if source.length == 0 {
+    return move output
+  }
+  let mut input = Pointer.fromSlice(source)
+  let start = unsafe Intrinsic.pointerRequalify<?[*]const u8, [*]const u8>(input)
+  let end = unsafe Pointer.assumeMany(unsafe Pointer.at(start, source.length))
+  let limit = Pointer.addressMany(input) + source.length
+  let mut first = true
+  while Pointer.addressMany(input) < limit {
+    let before = Pointer.addressMany(input)
+    let code = unsafe lxb_encoding_data_call_decode_noi(
+      data,
+      owner.handle,
+      Pointer.fromMutRef(&mut input),
+      end,
+    )
+    let count = unsafe lxb_encoding_decode_buf_used_noi(owner.handle)
+
+    // Lexbor 2.5: OK=0, CONTINUE=14, SMALL_BUFFER=15. Never infer success from buffer fullness.
+    if code != 0 && code != 14 && code != 15 {
+      run C.reject("invalid XML byte encoding")
+    }
+    let mut index: usize = 0
+    while index < count {
+      let value = buffer[index]
+      if !(first && value == 65279) {
+        run scalar(&mut output, value)
+      }
+      first = false
+      index = index + 1
+    }
+    if Pointer.addressMany(input) == before && count == 0 {
+      run C.reject("XML decoder made no progress")
+    }
+    unsafe lxb_encoding_decode_buf_set_noi(
+      owner.handle,
+      Pointer.fromMutSlice(&mut buffer),
+      buffer.length,
+    )
+  }
+  if unsafe lxb_encoding_decode_finish_noi(owner.handle) != 0 {
+    run C.reject("truncated XML byte encoding")
+  }
+  let decoded = Bytes.asSlice(&output)
+  let normalized = declarationEncoding(decoded)
+  if normalized.end > normalized.start {
+    let mut result = Bytes.make()
+    run Bytes.append(&mut result, Slice.view<u8>(decoded, 0, normalized.start))
+    run Bytes.append(&mut result, b"utf-8")
+    run Bytes.append(
+      &mut result,
+      Slice.view<u8>(decoded, normalized.end, decoded.length - normalized.end),
+    )
+    return move result
+  }
+  return move output
+}

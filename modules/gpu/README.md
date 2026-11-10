@@ -52,9 +52,12 @@ level differently per mask. On the reftest inputs every render is currently byte
 From the repository root, with a Vulkan, Metal or D3D driver (CI uses lavapipe):
 
 ```sh
-modules/scripts/test-gpu            # every suite
-modules/scripts/test-gpu painting   # some suites
+silk task test-gpu            # every suite
+silk task test-gpu painting   # some suites
 ```
+
+Windows GPU builds invoke the pinned lib-native package's `prepare-windows`
+Silk task to provision imports and stage runtime DLLs.
 
 It renders every input under `modules/tests/fixtures/<suite>/inputs` with the CPU executor,
 the CPU model and the GPU, and prints the inputs that differ. The unit tests in

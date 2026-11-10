@@ -1,16 +1,14 @@
 //! Rasterize retained clip geometry without consuming fill, stroke or opacity.
 import svg_core.scene { ClipNode, FillRule, RenderError }
 import svg_core.mapping { Mapping }
-import svg_core.mapping
 import svg_core.vector_path
 import svg_geometry.geometry { Path }
-import vector.geometry { Rect, rectAt }
+import vector.geometry { rectAt }
 import vector.geometry_error { GeometryError }
-import vector.projective { Homography }
 import vector.projective
 import vector.flatten as flattening
 import vector.flatten { Line, TOLERANCE }
-import vector.strips { Rasterizer, Coverage, EVENODD, NONZERO }
+import vector.strips { Rasterizer, Coverage, NONZERO }
 import vector.layer { Mask }
 import silk.collections.list { List }
 import silk.mem.allocator { Allocator, OutOfMemoryError }
@@ -139,7 +137,7 @@ effect fn cover(
   while index <= root {
     let mut lines = List<Line>.make()
     if needed.asSlice()[index] {
-      if let ClipNode.Shape { path, transform, rule } = &nodes[index] {
+      if let ClipNode.Shape { path, transform, .. } = &nodes[index] {
         if path >= paths.length || !transform.isFinite() {
           fail RenderError.InvalidGeometry
         }

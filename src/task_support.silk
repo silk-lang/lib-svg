@@ -1,0 +1,308 @@
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.crypto.sha2 { Sha256 }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { FileError, FileSystem, Path }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.format { Format }
+import silk.text.string { InvalidUtf8, String }
+import silk.toml.scanner { TomlError }
+import silk.toml.value { Toml, Value }
+import silk.num.u8
+import silk.num.usize
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+pub fn operatingSystem() -> string<'static> {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return "windows"
+  } else {
+    static if Intrinsic.targetOperatingSystem() == "darwin" {
+      return "darwin"
+    } else {
+      static if Intrinsic.targetOperatingSystem() == "linux" {
+        return "linux"
+      } else {
+        return "unknown"
+      }
+    }
+  }
+}
+
+pub fn architecture() -> string<'static> {
+  static if Intrinsic.targetArchitecture() == "aarch64" {
+    return "aarch64"
+  } else {
+    static if Intrinsic.targetArchitecture() == "x86_64" {
+      return "x86_64"
+    } else {
+      static if Intrinsic.targetArchitecture() == "wasm32" {
+        return "wasm32"
+      } else {
+        return "unknown"
+      }
+    }
+  }
+}
+
+pub effect fn text(bytes: &[u8]) -> string
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return match String.fromUtf8(bytes) {
+    Result<string, InvalidUtf8>.Success { value } => value
+    Result<string, InvalidUtf8>.Failure { .. } => run Task.abort("Expected UTF-8 text")
+  }
+}
+
+pub effect fn cat(parts: &[string]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = String.make()
+  let mut i: usize = 0
+  while i < parts.length {
+    run String.append(&mut result, parts[i])
+    i = i + 1
+  }
+  return move result
+}
+
+pub effect fn number(value: usize) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut buffer: [u8; 20] = [0; 20]
+  let count = Format.writeU64Display(usize.toU64(value), &mut buffer, 0)
+  return run String.copy(unsafe String.fromUtf8Unchecked(Slice.view<u8>(&buffer, 0, count)))
+}
+
+pub effect fn quote(value: string) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut bytes = run Bytes.copy(b"\"")
+  let input = String.utf8Bytes(value)
+  let digits = b"0123456789abcdef"
+  let mut i: usize = 0
+  while i < input.length {
+    let c = input[i]
+    if c == 34 || c == 92 {
+      run Bytes.append(&mut bytes, b"\\")
+      run Bytes.append(&mut bytes, Slice.view<u8>(input, i, 1))
+    } else if c < 32 {
+      run Bytes.append(&mut bytes, b"\\u00")
+      run Bytes.append(&mut bytes, Slice.view<u8>(digits, u8.toUsize(c / 16), 1))
+      run Bytes.append(&mut bytes, Slice.view<u8>(digits, u8.toUsize(c % 16), 1))
+    } else {
+      run Bytes.append(&mut bytes, Slice.view<u8>(input, i, 1))
+    }
+    i = i + 1
+  }
+  run Bytes.append(&mut bytes, b"\"")
+  return unsafe String.fromBytesUnchecked(move bytes)
+}
+
+pub effect fn printLine(value: string) -> ()
+  ! WriterError {
+  let mut out = StdoutWriter.make()
+  run Writer.writeString(value) |> Effect.provideMut<Writer>(&mut out)
+  run Writer.writeString("\n") |> Effect.provideMut<Writer>(&mut out)
+}
+
+pub effect fn hostPath(value: &[u8]) -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.fromNativeBytes(value)
+  } else {
+    return run Path.fromBytes(value)
+  }
+}
+
+pub effect fn path(value: string) -> Path
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  if String.startsWith(value, "/") {
+    return run Path.make(value)
+  }
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    let raw = String.utf8Bytes(value)
+    if raw.length >= 3 && raw[1] == 58 {
+      return run hostPath(raw)
+    }
+  }
+  let root = run Task.root()
+  return run Path.resolve(&root, value)
+}
+
+pub effect fn pathText(value: &Path) -> string
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return match Path.view(value) {
+    Option<string>.Some { value: result } => result
+    Option<string>.None => run Task.abort("Task paths must be UTF-8")
+  }
+}
+
+pub effect fn readText(value: string) -> String
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let resolved = run path(value)
+  let bytes = run FileSystem.readFile(&resolved)
+  return run String.copy(run text(Bytes.asSlice(&bytes)))
+}
+
+pub effect fn digest(bytes: &[u8]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let hash = Sha256.hash(bytes)
+  let mut output = String.make()
+  let digits = "0123456789abcdef"
+  let mut i: usize = 0
+  while i < 32 {
+    run String.append(&mut output, String.slice(digits, u8.toUsize(hash[i] / 16), 1))
+    run String.append(&mut output, String.slice(digits, u8.toUsize(hash[i] % 16), 1))
+    i = i + 1
+  }
+  return move output
+}
+
+pub effect fn manifest(value: string) -> Value
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let resolved = run path(value)
+  let bytes = run FileSystem.readFile(&resolved)
+  return match move run Effect.result(Toml.parse(Bytes.asSlice(&bytes))) {
+    Result<Value, TomlError | OutOfMemoryError>.Success { value: parsed } => move parsed
+    Result<Value, TomlError | OutOfMemoryError>.Failure { .. } => run Task.abort(
+      "Invalid package manifest",
+    )
+  }
+}
+
+pub effect fn nativeManifest() -> String
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let config = run manifest("modules/gpu/tests/silk.toml")
+  let revision = Toml.field(&config, "dependencies")
+    |> Toml.fieldAt("webgpu_sys")
+    |> Toml.fieldAt("rev")
+    |> Toml.asString
+    |> Option<string>.unwrapOr("")
+  if String.utf8Bytes(revision).length != 40 {
+    run Task.abort("Missing pinned lib-native revision")
+  }
+  let home = match move run HostInput.variableNamed("SILK_HOME") {
+    Option<Bytes>.Some { value } => move value
+    Option<Bytes>.None => {
+      let key = if operatingSystem() == "windows" {
+        "USERPROFILE"
+      } else {
+        "HOME"
+      }
+      let base = match move run HostInput.variableNamed(key) {
+        Option<Bytes>.Some { value } => move value
+        Option<Bytes>.None => run Task.abort("Set SILK_HOME or HOME to locate fetched lib-native")
+      }
+      let mut result = move base
+      run Bytes.append(&mut result, b"/.silk")
+      move result
+    }
+  }
+  let directory = run hostPath(Bytes.asSlice(&home))
+  let relative = run cat(&["git/", revision, "/silk.toml"])
+  let located = run Path.join(&directory, String.view(&relative))
+  if !run FileSystem.exists(&located) {
+    run Task.abort("Fetch lib-native first: silk check --manifest-path modules/gpu/tests/silk.toml")
+  }
+  return run String.copy(run pathText(&located))
+}
+
+pub effect fn build(package: string, name: string, release: bool, wasm: bool) -> String
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let config = run cat(&[package, "/silk.toml"])
+  let system = if operatingSystem() == "darwin" {
+    "apple-darwin"
+  } else if operatingSystem() == "windows" {
+    "pc-windows-msvc"
+  } else {
+    "unknown-linux-gnu"
+  }
+  let native = run cat(&[architecture(), "-", system])
+  let mut target = String.view(&native)
+  if wasm {
+    target = "wasm32-unknown-unknown"
+  }
+  let windowsGpu = operatingSystem() == "windows" && package == "modules/gpu/tests" && !wasm
+  if windowsGpu {
+    run Task.silk(&["check", "--manifest-path", String.view(&config)])
+    let nativeConfig = run nativeManifest()
+    run Task.silk(&["task", "--manifest-path", String.view(&nativeConfig), "prepare-windows"])
+  }
+  if release {
+    run Task.silk(
+      &["build", "--manifest-path", String.view(&config), "--target", target, "--release"],
+    )
+  } else {
+    run Task.silk(&["build", "--manifest-path", String.view(&config), "--target", target])
+  }
+  let mode = if release {
+    "release"
+  } else {
+    "debug"
+  }
+  let directory = run cat(&["build/llvm/", target, "/", mode])
+  let suffix = if !wasm && operatingSystem() == "windows" {
+    ".exe"
+  } else {
+    ""
+  }
+  let relative = run cat(&[String.view(&directory), "/", name, suffix])
+  let executable = run path(String.view(&relative))
+  if !run FileSystem.exists(&executable) {
+    run Task.abort("Silk did not produce the expected task executable")
+  }
+  if windowsGpu {
+    let nativeConfig = run nativeManifest()
+    let runtime = run path(String.view(&directory))
+    run Task.silk(
+      &[
+        "task",
+        "--manifest-path",
+        String.view(&nativeConfig),
+        "prepare-windows",
+        "--runtime-directory",
+        run pathText(&runtime),
+      ],
+    )
+  }
+  return run String.copy(run pathText(&executable))
+}
+
+pub effect fn captured(program: string, arguments: &[string], seconds: string) -> Bytes
+  ! TaskError | ProcessError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let mut args = List<string>.make()
+  run List<string>.append(&mut args, "--signal=KILL")
+  run List<string>.append(&mut args, seconds)
+  run List<string>.append(&mut args, program)
+  let mut i: usize = 0
+  while i < arguments.length {
+    run List<string>.append(&mut args, arguments[i])
+    i = i + 1
+  }
+  let timeout = if operatingSystem() == "darwin" {
+    "gtimeout"
+  } else {
+    "timeout"
+  }
+  return run Task.capture(timeout, List<string>.asSlice(&args))
+}

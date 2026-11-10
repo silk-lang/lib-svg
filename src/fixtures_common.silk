@@ -1,0 +1,514 @@
+//! Shared byte encoders and manifest publication for the authoring-only fixture tasks.
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.deflate { Encoder, Options, EncodeError }
+import silk.compress.inflate { Format as CompressionFormat }
+import silk.compress.checksum { CompressionChecksum }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.encoding.base64 { Base64, Base64Error }
+import silk.io.writer { Writer, WriterError }
+import silk.json.value { Json, Value, JsonEntry }
+import silk.json.output { JsonOptions }
+import silk.json.scanner { JsonError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, FileError, Path }
+import silk.text.format { Format }
+import silk.text.string { String, InvalidUtf8 }
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+pub struct FixtureError {
+  pub message: string<'static>
+}
+
+pub struct Chunk {
+  pub kind: string<'static>,
+  pub body: Bytes
+}
+
+// Writer's service contract has no allocator requirement. Its owned buffer uses the
+// system allocator and translates allocation failure to the service's WriterError.
+pub struct Capture {
+  pub bytes: Bytes
+}
+
+impl Writer for Capture {
+  effect fn writeAll(self: &mut Self, value: &[u8]) -> ()
+    ! WriterError
+    ? &mut Writer {
+    let mut allocator = Allocator.systemAllocatorProvider()
+    let result = run Effect.result(Bytes.append(&mut self.bytes, value))
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    match move result {
+      Result<(), OutOfMemoryError>.Success { .. } => {}
+      Result<(), OutOfMemoryError>.Failure { .. } => {
+        fail Writer.failure()
+      }
+    }
+  }
+
+  effect fn flush(self: &mut Self) -> () ! WriterError ? &mut Writer {}
+}
+
+pub effect fn fmt<Args>(static template: string<'static>, args: &Args) -> String
+  ! WriterError {
+  let mut out = Capture { bytes: Bytes.make() }
+  run Format.format(template, args) |> Effect.provideMut<Writer>(&mut out)
+  return unsafe String.fromBytesUnchecked(move out.bytes)
+}
+
+pub effect fn concat(parts: &[string]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut length: usize = 0
+  let mut i: usize = 0
+  while i < parts.length {
+    length = length + String.byteLength(parts[i])
+    i = i + 1
+  }
+  let mut result = run String.makeWithCapacity(length)
+  i = 0
+  while i < parts.length {
+    run result.append(parts[i])
+    i = i + 1
+  }
+  return move result
+}
+
+pub effect fn write(root: &Path, relative: string, bytes: &[u8]) -> ()
+  ! FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  let path = run Path.join(root, relative)
+  run FileSystem.writeFileWithParents(&path, bytes)
+}
+
+pub effect fn text(root: &Path, relative: string, body: string) -> ()
+  ! FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  run write(root, relative, String.utf8Bytes(body))
+}
+
+pub effect fn readText(root: &Path, relative: string) -> String
+  ! FileError | OutOfMemoryError | FixtureError
+  ? &mut FileSystem | &mut Allocator {
+  let path = run Path.join(root, relative)
+  let bytes = run FileSystem.readFile(&path)
+  return match String.fromBytes(move bytes) {
+    Result<String, InvalidUtf8>.Success { value } => move value
+    Result<String, InvalidUtf8>.Failure { .. } => {
+      fail FixtureError { message: "Fixture text is not UTF-8" }
+    }
+  }
+}
+
+pub effect fn svg(width: usize, height: usize, body: string, newlines: bool) -> String
+  ! WriterError {
+  return run fmt(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\">{}{}{}</svg>\n",
+    &(
+      width,
+      height,
+      if newlines {
+        "\n"
+      } else {
+        ""
+      },
+      body,
+      if newlines {
+        "\n"
+      } else {
+        ""
+      }
+    ),
+  )
+}
+
+pub effect fn dataUrl(bytes: &[u8], mime: string) -> String
+  ! OutOfMemoryError | WriterError | FixtureError
+  ? &mut Allocator {
+  let length = match Base64.encodedLength(bytes.length) {
+    Result<usize, Base64Error>.Success { value } => value
+    Result<usize, Base64Error>.Failure { .. } => {
+      fail FixtureError { message: "Base64 length overflow" }
+    }
+  }
+  let mut encoded = run Bytes.zeroed(length)
+  match Base64.encodeInto(encoded.asMutSlice(), bytes) {
+    Result<usize, Base64Error>.Success { .. } => {}
+    Result<usize, Base64Error>.Failure { .. } => {
+      fail FixtureError { message: "Base64 output too short" }
+    }
+  }
+  let view = unsafe String.fromUtf8Unchecked(encoded.asSlice())
+  return run fmt("data:{};base64,{}", &(mime, view))
+}
+
+pub effect fn compressed(bytes: &[u8], gzip: bool) -> Bytes
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let format = if gzip {
+    CompressionFormat.Gzip
+  } else {
+    CompressionFormat.Zlib
+  }
+  let capacity = match Encoder.encodedBound(bytes.length, format) {
+    Option<usize>.Some { value } => value
+    Option<usize>.None => {
+      fail OutOfMemoryError {}
+    }
+  }
+  let mut output = run Bytes.zeroed(capacity)
+  let size = run Encoder.encode(
+    bytes,
+    output.asMutSlice(),
+    format,
+    Options.make(
+      if gzip {
+        9
+      } else {
+        6
+      },
+    ),
+  )
+  output.truncate(size)
+  return move output
+}
+
+pub effect fn be16(out: &mut Bytes, value: u32) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run out.append(&[u32.toU8(value / 256 % 256), u32.toU8(value % 256)])
+}
+
+pub effect fn be32(out: &mut Bytes, value: u32) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run be16(&mut out, value / 65536)
+  run be16(&mut out, value % 65536)
+}
+
+pub fn setByte(out: &mut Bytes, index: usize, value: u8) -> () {
+  let mut bytes = Bytes.asMutSlice(&mut out)
+  bytes[index] = value
+}
+
+pub effect fn le32(out: &mut Bytes, value: u32) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run out.append(
+    &[
+      u32.toU8(value % 256),
+      u32.toU8(value / 256 % 256),
+      u32.toU8(value / 65536 % 256),
+      u32.toU8(value / 16777216),
+    ],
+  )
+}
+
+pub effect fn chunk(out: &mut Bytes, kind: &[u8], body: &[u8]) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run be32(&mut out, usize.toU32(body.length))
+  run out.append(kind)
+  run out.append(body)
+  let crc = CompressionChecksum.crc32Update(CompressionChecksum.crc32(kind), body)
+  run be32(&mut out, crc)
+}
+
+pub effect fn png(
+  width: usize,
+  height: usize,
+  colorType: u8,
+  rows: &[u8],
+  chunks: &[Chunk],
+) -> Bytes
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let mut header = Bytes.make()
+  run be32(&mut header, usize.toU32(width))
+  run be32(&mut header, usize.toU32(height))
+  run header.append(&[8, colorType, 0, 0, 0])
+  let packed = run compressed(rows, false)
+  let mut result = run Bytes.copy(b"\x89PNG\r\n\x1a\n")
+  run chunk(&mut result, b"IHDR", header.asSlice())
+  let mut i: usize = 0
+  while i < chunks.length {
+    run chunk(&mut result, String.utf8Bytes(chunks[i].kind), chunks[i].body.asSlice())
+    i = i + 1
+  }
+  run chunk(&mut result, b"IDAT", packed.asSlice())
+  run chunk(&mut result, b"IEND", b"")
+  return move result
+}
+
+// Constant 128 has a zero level-shifted DCT, at every quantization quality.
+// One-symbol DC and AC Huffman tables encode DC=0 and EOB with one zero bit each.
+// This is a real baseline sequential JPEG encoder specialized to the fixture's
+// constant source, not a saved JPEG payload or dependency on a generated asset.
+pub effect fn jpegGray128(width: u32, height: u32, orientation: u32, icc: &[u8]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.copy(
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00",
+  )
+  if orientation != 0 {
+    run out.append(
+      b"\xff\xe1\x00\x22Exif\x00\x00MM\x00\x2a\x00\x00\x00\x08\x00\x01\x01\x12\x00\x03\x00\x00\x00\x01",
+    )
+    run be16(&mut out, orientation)
+    run out.append(b"\x00\x00\x00\x00\x00\x00")
+  }
+  let mut offset: usize = 0
+  let count = (icc.length + 65518) / 65519
+  while offset < icc.length {
+    let remaining = icc.length - offset
+    let length = if remaining > 65519 {
+      65519
+    } else {
+      remaining
+    }
+    run out.append(b"\xff\xe2")
+    run be16(&mut out, usize.toU32(length + 16))
+    run out.append(b"ICC_PROFILE\x00")
+    run out.append(&[usize.toU8(offset / 65519 + 1), usize.toU8(count)])
+    run out.append(Slice.view<u8>(icc, offset, length))
+    offset = offset + length
+  }
+  run out.append(b"\xff\xdb\x00\x43\x00")
+  let quant: [u8; 64] = [1; 64]
+  run out.append(&quant)
+  run out.append(b"\xff\xc0\x00\x0b\x08")
+  run be16(&mut out, height)
+  run be16(&mut out, width)
+  run out.append(b"\x01\x01\x11\x00\xff\xc4\x00\x26")
+  let mut table: u32 = 0
+  while table <= 16 {
+    run out.append(&[u32.toU8(table), 1])
+    let zeros: [u8; 15] = [0; 15]
+    run out.append(&zeros)
+    run out.append(b"\x00")
+    table = table + 16
+  }
+  run out.append(b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00")
+  let bits = ((width + 7) / 8) * ((height + 7) / 8) * 2
+  let mut i: u32 = 0
+  while i < bits / 8 {
+    run out.append(b"\x00")
+    i = i + 1
+  }
+  if bits % 8 != 0 {
+    let padding = 8 - bits % 8
+    run out.append(&[u32.toU8(u32.shiftLeft(1, padding) - 1)])
+  }
+  run out.append(b"\xff\xd9")
+  return move out
+}
+
+pub effect fn member(entries: &mut List<JsonEntry>, key: string, value: Value) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run entries.append(JsonEntry { key: run String.copy(key), value: move value })
+}
+
+pub effect fn stringValue(value: string) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return Value.String { text: run String.copy(value) }
+}
+
+pub effect fn caseRecord(
+  id: string,
+  input: string,
+  reference: string,
+  reason: string,
+  spec: string,
+) -> Value
+  ! OutOfMemoryError | JsonError | WriterError
+  ? &mut Allocator {
+  let mut entries = List<JsonEntry>.make()
+  run member(&mut entries, "id", run stringValue(id))
+  run member(&mut entries, "input", run stringValue(input))
+  if reference != "" {
+    let mut refFields = List<JsonEntry>.make()
+    run member(&mut refFields, "path", run stringValue(reference))
+    run member(&mut refFields, "relation", run stringValue("=="))
+    let mut references = List<Value>.make()
+    run references.append(Value.Object { entries: move refFields })
+    run member(&mut entries, "references", Value.Array { values: move references })
+  }
+  run member(&mut entries, "status", run stringValue("pass"))
+  run member(&mut entries, "reason", run stringValue(reason))
+  run member(&mut entries, "spec", run stringValue(spec))
+  run member(&mut entries, "tolerance", Value.Object { entries: List<JsonEntry>.make() })
+  return Value.Object { entries: move entries }
+}
+
+pub effect fn jsonText(value: &Value) -> String
+  ! JsonError | WriterError {
+  let mut capture = Capture { bytes: Bytes.make() }
+  run Json.writeWith(value, &JsonOptions.indented(2)) |> Effect.provideMut<Writer>(&mut capture)
+  return unsafe String.fromBytesUnchecked(move capture.bytes)
+}
+
+fn replaced(value: &Value, cases: &[Value], prefix: string) -> bool {
+  let id = Json.field(value, "id")
+    |> Json.asString
+    |> Option<string>.unwrapOr("")
+  if prefix != "" && String.startsWith(id, prefix) {
+    return true
+  }
+  let mut i: usize = 0
+  while i < cases.length {
+    let candidate = Json.field(&cases[i], "id")
+      |> Json.asString
+      |> Option<string>.unwrapOr("")
+    if id == candidate {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+effect fn appendCase(out: &mut String, value: &Value, first: &mut bool) -> ()
+  ! OutOfMemoryError | WriterError | JsonError
+  ? &mut Allocator {
+  let rendered = run jsonText(value)
+  if !first.* {
+    run out.append(",")
+  }
+  run out.append("\n    ")
+  let bytes = rendered.ownedUtf8Bytes()
+  let mut start: usize = 0
+  let mut i: usize = 0
+  while i < bytes.length {
+    if bytes[i] == 10 {
+      run out.append(String.slice(rendered.view(), start, i - start))
+      run out.append("\n    ")
+      start = i + 1
+    }
+    i = i + 1
+  }
+  run out.append(String.slice(rendered.view(), start, bytes.length - start))
+  first.* = false
+}
+
+// Retains untouched case bytes for mesh/hatch, and all unrelated manifest fields
+// for every incremental generator. The array scanner honors JSON strings/escapes.
+pub effect fn saveManifest(
+  root: &Path,
+  relative: string,
+  cases: &[Value],
+  replacePrefix: string,
+  fresh: bool,
+  prepend: bool,
+  preserveText: bool,
+) -> ()
+  ! FileError | OutOfMemoryError | JsonError | WriterError | FixtureError
+  ? &mut FileSystem | &mut Allocator {
+  let path = run Path.join(root, relative)
+  let exists = run FileSystem.exists(&path)
+  let original = if fresh || !exists {
+    run String.copy(
+      "{\n  \"version\": 1,\n  \"suite\": \"own\",\n  \"mode\": \"reference\",\n  \"cases\": []\n}\n",
+    )
+  } else {
+    run readText(root, relative)
+  }
+  let validated = run Json.parse(original.ownedUtf8Bytes())
+  drop validated
+  let source = original.view()
+  let key = match String.find(source, "\"cases\"") {
+    Option<usize>.Some { value } => value
+    _ => {
+      fail FixtureError { message: "Manifest has no cases array" }
+    }
+  }
+  let bytes = original.ownedUtf8Bytes()
+  let mut at = key + 7
+  while at < bytes.length && bytes[at] != 91 {
+    at = at + 1
+  }
+  if at == bytes.length {
+    fail FixtureError { message: "Manifest has no cases array" }
+  }
+  let mut output = run String.copy(String.slice(source, 0, at + 1))
+  let mut first = true
+  if prepend {
+    let mut i: usize = 0
+    while i < cases.length {
+      run appendCase(&mut output, &cases[i], &mut first)
+      i = i + 1
+    }
+  }
+  at = at + 1
+  while true {
+    while at < bytes.length
+      && (bytes[at] == 32 || bytes[at] == 10 || bytes[at] == 13 || bytes[at] == 9
+        || bytes[at] == 44) {
+      at = at + 1
+    }
+    if at == bytes.length {
+      fail FixtureError { message: "Unterminated cases array" }
+    }
+    if bytes[at] == 93 {
+      break
+    }
+    let start = at
+    let mut depth: usize = 0
+    let mut quoted = false
+    let mut escaped = false
+    while true {
+      let byte = bytes[at]
+      if quoted {
+        if escaped {
+          escaped = false
+        } else if byte == 92 {
+          escaped = true
+        } else if byte == 34 {
+          quoted = false
+        }
+      } else if byte == 34 {
+        quoted = true
+      } else if byte == 123 || byte == 91 {
+        depth = depth + 1
+      } else if byte == 125 || byte == 93 {
+        depth = depth - 1
+      }
+      at = at + 1
+      if depth == 0 && !quoted {
+        break
+      }
+    }
+    let raw = String.slice(source, start, at - start)
+    let item = run Json.parse(String.utf8Bytes(raw))
+    if !replaced(&item, cases, replacePrefix) {
+      if preserveText {
+        if !first {
+          run output.append(",")
+        }
+        run output.append("\n    ")
+        run output.append(raw)
+        first = false
+      } else {
+        run appendCase(&mut output, &item, &mut first)
+      }
+    }
+  }
+  if !prepend {
+    let mut i: usize = 0
+    while i < cases.length {
+      run appendCase(&mut output, &cases[i], &mut first)
+      i = i + 1
+    }
+  }
+  if !first {
+    run output.append("\n  ")
+  }
+  run output.append(String.slice(source, at, bytes.length - at))
+  run FileSystem.writeFile(&path, output.ownedUtf8Bytes())
+}

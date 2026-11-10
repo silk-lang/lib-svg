@@ -1,0 +1,312 @@
+//! Small TrueType/SVG font writer. Tables and checksums are authored from the
+//! same square outlines, metrics, and SVG documents as the original generator.
+import fixtures_common as c
+import silk.collections.bytes { Bytes }
+import silk.compress.deflate { EncodeError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.text.string { String }
+import silk.num.u8
+import silk.num.u32
+import silk.num.i32
+import silk.num.usize
+
+struct Table {
+  tag: string<'static>,
+  bytes: Bytes
+}
+
+effect fn words(values: &[i32]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.makeWithCapacity(values.length * 2)
+  let mut i: usize = 0
+  while i < values.length {
+    run c.be16(&mut out, i32.wrappingToU32(values[i]))
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn pad(out: &mut Bytes) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  while out.length() % 4 != 0 {
+    run out.append(b"\x00")
+  }
+}
+
+fn checksum(bytes: &[u8]) -> u32 {
+  let mut total: u32 = 0
+  let mut i: usize = 0
+  while i < bytes.length {
+    let mut word: u32 = 0
+    let mut j: usize = 0
+    while j < 4 {
+      word = word * 256
+      if i + j < bytes.length {
+        word = word + u8.toU32(bytes[i + j])
+      }
+      j = j + 1
+    }
+    total = u32.wrappingAdd(total, word)
+    i = i + 4
+  }
+  return total
+}
+
+effect fn glyphs() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let mut i: usize = 0
+  while i < 5 {
+    // One contour, four on-curve points, no instructions. Coordinates are
+    // delta-coded signed 16-bit values; no flags abbreviate either axis.
+    let header = run words(&[1, 100, 0, 700, 700, 3, 0])
+    run out.append(header.asSlice())
+    run out.append(b"\x01\x01\x01\x01")
+    let coordinates = run words(&[100, 0, 600, 0, 0, 700, 0, -700])
+    run out.append(coordinates.asSlice())
+    run pad(&mut out)
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn head() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  run c.be32(&mut out, 0x00010000)
+  run c.be32(&mut out, 0x00010000)
+  run c.be32(&mut out, 0)
+  run c.be32(&mut out, 0x5f0f3cf5)
+  let fields = run words(&[3, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 700, 700, 0, 8, 2, 1, 0])
+  run out.append(fields.asSlice())
+  return move out
+}
+
+effect fn hhea() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  run c.be32(&mut out, 0x00010000)
+  let fields = run words(&[800, -200, 0, 800, 100, 100, 700, 1, 0, 0, 0, 0, 0, 0, 0, 5])
+  run out.append(fields.asSlice())
+  return move out
+}
+
+effect fn hmtx() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let mut i: usize = 0
+  while i < 5 {
+    run c.be16(&mut out, 800)
+    run c.be16(&mut out, 100)
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn maxp() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  run c.be32(&mut out, 0x00010000)
+  let fields = run words(&[5, 4, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0])
+  run out.append(fields.asSlice())
+  return move out
+}
+
+effect fn loca() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = Bytes.make()
+  let mut i: u32 = 0
+  while i <= 5 {
+    run c.be32(&mut out, i * 36)
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn cmap() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run words(&[0, 2, 0, 3])
+  run c.be32(&mut out, 20)
+  let windows = run words(&[3, 1])
+  run out.append(windows.asSlice())
+  run c.be32(&mut out, 20)
+  let format4 = run words(&[4, 32, 0, 4, 4, 1, 0, 68, 65535, 0, 65, 65535, -64, 1, 0, 0])
+  run out.append(format4.asSlice())
+  return move out
+}
+
+effect fn os2() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run words(&[3, 800, 400, 5, 4, 650, 600, 0, 75, 650, 600, 0, 350, 50, 250, 0])
+  let panose: [u8; 10] = [0; 10]
+  run out.append(&panose)
+  run c.be32(&mut out, 1)
+  run c.be32(&mut out, 0)
+  run c.be32(&mut out, 0)
+  run c.be32(&mut out, 0)
+  run out.append(b"????")
+  let metrics = run words(&[64, 65, 68, 800, -200, 0, 800, 200])
+  run out.append(metrics.asSlice())
+  run c.be32(&mut out, 1)
+  run c.be32(&mut out, 0)
+  let extra = run words(&[0, 0, 0, 32, 0])
+  run out.append(extra.asSlice())
+  return move out
+}
+
+effect fn names() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let labels = ["SVG Glyphs", "Regular"]
+  let mut out = run words(&[0, 4, 54])
+  let mut strings = Bytes.make()
+  let mut platform: usize = 0
+  while platform < 2 {
+    let mut i: usize = 0
+    while i < 2 {
+      let bytes = String.utf8Bytes(labels[i])
+      run c.be16(
+        &mut out,
+        if platform == 0 {
+          1
+        } else {
+          3
+        },
+      )
+      run c.be16(
+        &mut out,
+        if platform == 0 {
+          0
+        } else {
+          1
+        },
+      )
+      run c.be16(
+        &mut out,
+        if platform == 0 {
+          0
+        } else {
+          0x0409
+        },
+      )
+      run c.be16(&mut out, usize.toU32(i + 1))
+      let unit: usize = if platform == 0 {
+        1
+      } else {
+        2
+      }
+      run c.be16(&mut out, usize.toU32(bytes.length * unit))
+      run c.be16(&mut out, usize.toU32(strings.length()))
+      let mut k: usize = 0
+      while k < bytes.length {
+        if platform == 1 {
+          run strings.append(b"\x00")
+        }
+        run strings.append(&[bytes[k]])
+        k = k + 1
+      }
+      i = i + 1
+    }
+    platform = platform + 1
+  }
+  run out.append(strings.asSlice())
+  return move out
+}
+
+effect fn post() -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.zeroed(32)
+  c.setByte(&mut out, 1, 2)
+  let glyphNames = run words(&[5, 0, 36, 37, 38, 39])
+  run out.append(glyphNames.asSlice())
+  return move out
+}
+
+effect fn svgTable() -> Bytes
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let shared = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"glyph1\"><rect x=\"100\" y=\"-700\" width=\"600\" height=\"700\" fill=\"context-fill\"/></g><g transform=\"translate(0 -350)\"><g id=\"glyph2\"><circle cx=\"400\" cy=\"0\" r=\"300\" fill=\"green\" stroke=\"context-stroke\" stroke-width=\"60\"/></g></g></svg>"
+  let alone = b"<svg xmlns=\"http://www.w3.org/2000/svg\" id=\"glyph3\"><rect x=\"0\" y=\"-800\" width=\"800\" height=\"400\" fill=\"#1e90ff\"/><rect x=\"0\" y=\"0\" width=\"800\" height=\"200\" fill=\"#ff8c00\"/></svg>"
+  let packed = run c.compressed(shared, true)
+  let mut out = Bytes.make()
+  run c.be16(&mut out, 0)
+  run c.be32(&mut out, 10)
+  run c.be32(&mut out, 0)
+  run c.be16(&mut out, 2)
+  run c.be16(&mut out, 1)
+  run c.be16(&mut out, 2)
+  run c.be32(&mut out, 26)
+  run c.be32(&mut out, usize.toU32(packed.length()))
+  run c.be16(&mut out, 3)
+  run c.be16(&mut out, 3)
+  run c.be32(&mut out, usize.toU32(26 + packed.length()))
+  run c.be32(&mut out, usize.toU32(alone.length))
+  run out.append(packed.asSlice())
+  run out.append(alone)
+  return move out
+}
+
+pub effect fn glyphFont(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | FileError
+  ? &mut Allocator | &mut FileSystem {
+  // sfnt directory order is lexical; head.checkSumAdjustment is zero while
+  // computing its directory checksum, and patched only after the complete font.
+  let tables = [
+    Table { tag: "OS/2", bytes: run os2() },
+    Table { tag: "SVG ", bytes: run svgTable() },
+    Table { tag: "cmap", bytes: run cmap() },
+    Table { tag: "glyf", bytes: run glyphs() },
+    Table { tag: "head", bytes: run head() },
+    Table { tag: "hhea", bytes: run hhea() },
+    Table { tag: "hmtx", bytes: run hmtx() },
+    Table { tag: "loca", bytes: run loca() },
+    Table { tag: "maxp", bytes: run maxp() },
+    Table { tag: "name", bytes: run names() },
+    Table { tag: "post", bytes: run post() },
+  ]
+  let mut out = Bytes.make()
+  run c.be32(&mut out, 0x00010000)
+  let header = run words(&[11, 128, 3, 48])
+  run out.append(header.asSlice())
+  let mut offset: usize = 12 + 11 * 16
+  let mut headOffset: usize = 0
+  let mut i: usize = 0
+  while i < 11 {
+    let table = &tables[i]
+    run out.append(String.utf8Bytes(table.tag))
+    run c.be32(&mut out, checksum(table.bytes.asSlice()))
+    run c.be32(&mut out, usize.toU32(offset))
+    run c.be32(&mut out, usize.toU32(table.bytes.length()))
+    if table.tag == "head" {
+      headOffset = offset
+    }
+    offset = offset + (table.bytes.length() + 3) / 4 * 4
+    i = i + 1
+  }
+  i = 0
+  while i < 11 {
+    run out.append(tables[i].bytes.asSlice())
+    run pad(&mut out)
+    i = i + 1
+  }
+  let adjustment = u32.wrappingSubtract(0xb1b0afba, checksum(out.asSlice()))
+  let mut writable = out.asMutSlice()
+  writable[headOffset + 8] = u32.toU8(adjustment / 16777216)
+  writable[headOffset + 9] = u32.toU8(adjustment / 65536 % 256)
+  writable[headOffset + 10] = u32.toU8(adjustment / 256 % 256)
+  writable[headOffset + 11] = u32.toU8(adjustment % 256)
+  drop writable
+  run c.write(root, "modules/tests/fonts/SvgGlyphs.ttf", out.asSlice())
+}

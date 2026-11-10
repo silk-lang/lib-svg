@@ -1,8 +1,10 @@
 //! Executor safety contracts; rasterization/presentation integration is tested by svg_render.
+// Imported only to register each module's tests with this root.
+import clip_mask_tests as _clip_mask_tests
+import image_sampling_tests as _image_sampling_tests
 import svg_core.image_assets { Asset }
 import svg_core.scene { BlendMode, ClipNode, MaskComposite }
 import svg_geometry.svg
-import image_sampling_tests
 import svg_core.scene { ImageSampling }
 import cpu
 import silk.num.f32
@@ -71,7 +73,7 @@ effect fn rejected(list: &DisplayList, expected: RenderError) -> bool
     Result<Pixmap, RenderError | OutOfMemoryError>.Success { value: _ } => false
     Result<Pixmap, RenderError | OutOfMemoryError>.Failure { error } => match &error {
       RenderError problem => problem == expected
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -608,8 +610,6 @@ test effect fn projectivePatternResolutionUsesFiniteDestinationMagnification() -
   )
 }
 
-import clip_mask_tests
-
 // https://www.w3.org/TR/css-masking-1/#clipping-paths
 effect fn clippedLayer() -> bool
   ! RenderError | OutOfMemoryError
@@ -818,7 +818,7 @@ test effect fn deeplyNestedRetainedPicturesFailBeforeUnboundedRecursion() -> ()
 effect fn linesAccepted(lines: &[Line], width: u32, height: u32) -> bool {
   let result = run Effect.result(checked.lines(lines, width, height))
   return match &result {
-    Result<(), RenderError>.Success { value } => true
+    Result<(), RenderError>.Success { .. } => true
     _ => false
   }
 }

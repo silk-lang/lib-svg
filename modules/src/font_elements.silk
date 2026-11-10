@@ -18,7 +18,6 @@ import svg_geometry.geometry { Point, Segment }
 import svg_geometry.arcs { ArcIter }
 import svg_geometry.svg
 import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind }
-import silk.collections.bytes { Bytes }
 import silk.collections.list { List }
 import silk.collections.slice { Slice }
 import silk.core.option { Option }

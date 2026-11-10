@@ -556,7 +556,7 @@ test effect fn patternNumericOverflowAndUnderflowNeverBecomeDisabledOrIdentity()
           error
         } => match move error {
           RenderError problem => problem == RenderError.InvalidGeometry
-          GeometryError problem => true
+          GeometryError _ => true
           XmlError problem => {
             fail problem
           }

@@ -1,7 +1,7 @@
 //! @font-face descriptor parsing.
 import font_faces { Rule }
 import font_faces
-import svg_css.tokens { Limits, CssError, TokenBuffer }
+import svg_css.tokens { Limits, CssError }
 import svg_css.lexer
 import svg_fonts.database { Range, FaceStyle }
 import silk.collections.bytes { Bytes }

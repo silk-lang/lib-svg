@@ -1,0 +1,660 @@
+//! Independent original image geometry, orientation, and sampling probes.
+import fixtures_common { FixtureError }
+import fixtures_common as c
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.compress.deflate { EncodeError }
+import silk.core.option { Option }
+import silk.io.writer { WriterError }
+import silk.json.value { Value }
+import silk.json.scanner { JsonError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { FileSystem, FileError, Path }
+import silk.text.string { String }
+import silk.num.usize
+import silk.num.i32
+
+const IMAGE_SPEC: string = "https://www.w3.org/TR/2018/CR-SVG2-20181004/embedded.html#ImageElement"
+
+const ORIENTATION_SPEC: string = "https://www.w3.org/TR/css-images-3/#the-image-orientation"
+
+const SAMPLING_SPEC: string = "https://www.w3.org/TR/css-images-3/#the-image-rendering"
+
+const MANIFEST: string = "modules/tests/fixtures/images/manifest.json"
+
+pub effect fn replace(source: string, needle: string, replacement: string) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = String.make()
+  let mut rest = source
+  while true {
+    match String.find(rest, needle) {
+      Option<usize>.None => {
+        run out.append(rest)
+        return move out
+      }
+      Option<usize>.Some { value: at } => {
+        run out.append(String.slice(rest, 0, at))
+        run out.append(replacement)
+        rest = String.slice(
+          rest,
+          at + String.byteLength(needle),
+          String.byteLength(rest) - at - String.byteLength(needle),
+        )
+      }
+    }
+  }
+}
+
+pub effect fn add(
+  root: &Path,
+  cases: &mut List<Value>,
+  id: string,
+  filename: string,
+  width: usize,
+  height: usize,
+  actual: string,
+  expected: string,
+  reason: string,
+  spec: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let input = run c.fmt("inputs/{}.svg", &.(filename))
+  let reference = run c.fmt("references/{}.svg", &.(filename))
+  let inputPath = run c.fmt("modules/tests/fixtures/images/{}", &.(input.view()))
+  let referencePath = run c.fmt("modules/tests/fixtures/images/{}", &.(reference.view()))
+  let source = run c.svg(width, height, actual, false)
+  let target = run c.svg(width, height, expected, false)
+  run c.text(root, inputPath.view(), source.view())
+  run c.text(root, referencePath.view(), target.view())
+  run cases.append(run c.caseRecord(id, input.view(), reference.view(), reason, spec))
+}
+
+effect fn imageCase(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  actual: string,
+  expected: string,
+  reason: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let id = run c.fmt("image-{}", &.(name))
+  run add(root, &mut cases, id.view(), name, 12, 8, actual, expected, reason, IMAGE_SPEC)
+}
+
+effect fn imageUrl(rows: &[u8], width: usize, height: usize, colorType: u8) -> String
+  ! OutOfMemoryError | EncodeError | WriterError | FixtureError
+  ? &mut Allocator {
+  let bytes = run c.png(width, height, colorType, rows, &[])
+  return run c.dataUrl(bytes.asSlice(), "image/png")
+}
+
+struct ImageCase {
+  name: string<'static>,
+  actual: string<'static>,
+  expected: string<'static>
+}
+
+pub effect fn images(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | WriterError | FixtureError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let url = run imageUrl(b"\x00\xff\x00\x00\xff\x00\x00\xff\xff", 2, 1, 6)
+  let mut cases = List<Value>.make()
+  let geometry = [
+    ImageCase {
+      name: "natural",
+      actual: "x=\"2\" y=\"3\"",
+      expected: "<rect x=\"2\" y=\"3\" width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"3\" y=\"3\" width=\"1\" height=\"1\" fill=\"blue\"/>",
+    },
+    ImageCase {
+      name: "none",
+      actual: "x=\"2\" y=\"2\" width=\"8\" height=\"4\" preserveAspectRatio=\"none\"",
+      expected: "<rect x=\"2\" y=\"2\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"6\" y=\"2\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+    },
+    ImageCase {
+      name: "meet",
+      actual: "x=\"2\" y=\"0\" width=\"8\" height=\"8\"",
+      expected: "<rect x=\"2\" y=\"2\" width=\"4\" height=\"4\" fill=\"red\"/><rect x=\"6\" y=\"2\" width=\"4\" height=\"4\" fill=\"blue\"/>",
+    },
+    ImageCase { name: "zero", actual: "width=\"0\" height=\"8\"", expected: "" },
+    ImageCase { name: "broken", actual: "width=\"8\" height=\"8\"", expected: "" },
+  ]
+  let mut i: usize = 0
+  while i < 5 {
+    let item = &geometry[i]
+    let mut source = url.view()
+    if item.name == "broken" {
+      source = "data:image/png;base64,AAAA"
+    }
+    let actual = run c.fmt(
+      "<image href=\"{}\" {} style=\"image-rendering:optimizeSpeed\"/>",
+      &(source, item.actual),
+    )
+    run imageCase(
+      root,
+      &mut cases,
+      item.name,
+      actual.view(),
+      item.expected,
+      "Original 2x1 red/blue RGBA PNG built with explicit PNG chunks; reference rectangles follow SVG image geometry and nearest sampling.",
+    )
+    i = i + 1
+  }
+  let jpeg = run c.jpegGray128(2, 3, 6, b"")
+  let jpegUrl = run c.dataUrl(jpeg.asSlice(), "image/jpeg")
+  let oriented = run c.fmt("<image x=\"2\" y=\"3\" href=\"{}\"/>", &.(jpegUrl.view()))
+  let extraReason = "Original sample data; reference rectangles independently express orientation, image placement and compositing. JPEG is uniform gray 128 with EXIF orientation 6."
+  run imageCase(
+    root,
+    &mut cases,
+    "jpeg-orientation",
+    oriented.view(),
+    "<rect x=\"2\" y=\"3\" width=\"3\" height=\"2\" fill=\"#808080\"/>",
+    extraReason,
+  )
+  let extras = [
+    ImageCase {
+      name: "opacity",
+      actual: "<image href=\"@PNG@\" opacity=\"0.5\"/>",
+      expected: "<g opacity=\"0.5\"><rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/></g>",
+    },
+    ImageCase {
+      name: "ignore-fill-stroke",
+      actual: "<image href=\"@PNG@\" fill=\"none\" stroke=\"lime\" stroke-width=\"8\" fill-opacity=\"0\"/>",
+      expected: "<rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/>",
+    },
+    ImageCase {
+      name: "transform",
+      actual: "<image href=\"@PNG@\" transform=\"translate(3 2) scale(2)\" style=\"image-rendering:optimizeSpeed\"/>",
+      expected: "<g transform=\"translate(3 2) scale(2)\"><rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/></g>",
+    },
+    ImageCase {
+      name: "repeated",
+      actual: "<image href=\"@PNG@\"/><image href=\"@PNG@\" x=\"4\" y=\"3\"/>",
+      expected: "<rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/><g transform=\"translate(4 3)\"><rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/></g>",
+    },
+    ImageCase {
+      name: "use",
+      actual: "<defs><image id=\"tile\" href=\"@PNG@\"/></defs><use href=\"#tile\" x=\"4\" y=\"3\"/>",
+      expected: "<g transform=\"translate(4 3)\"><rect width=\"1\" height=\"1\" fill=\"red\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/></g>",
+    },
+    ImageCase {
+      name: "slice",
+      actual: "<image href=\"@PNG@\" width=\"4\" height=\"4\" preserveAspectRatio=\"xMidYMid slice\" style=\"image-rendering:optimizeSpeed\"/>",
+      expected: "<rect width=\"2\" height=\"4\" fill=\"red\"/><rect x=\"2\" width=\"2\" height=\"4\" fill=\"blue\"/>",
+    },
+    ImageCase {
+      name: "projective",
+      actual: "<image href=\"@PNG@\" width=\"8\" height=\"4\" style=\"transform:perspective(30px) rotateY(30deg);image-rendering:optimizeSpeed\"/>",
+      expected: "<defs><clipPath id=\"edge\"><rect width=\"8\" height=\"4\"/></clipPath></defs><g style=\"transform:perspective(30px) rotateY(30deg)\" clip-path=\"url(#edge)\"><rect x=\"-100\" y=\"-100\" width=\"200\" height=\"200\" fill=\"blue\"/><rect x=\"-100\" y=\"-100\" width=\"104\" height=\"200\" fill=\"red\" shape-rendering=\"crispEdges\"/></g>",
+    },
+  ]
+  i = 0
+  while i < 7 {
+    let actual = run replace(extras[i].actual, "@PNG@", url.view())
+    run imageCase(root, &mut cases, extras[i].name, actual.view(), extras[i].expected, extraReason)
+    i = i + 1
+  }
+  let alphaUrl = run imageUrl(b"\x00\xff\x00\x00\x80\x00\x00\xff\x40", 2, 1, 6)
+  let alpha = run c.fmt("<image href=\"{}\"/>", &.(alphaUrl.view()))
+  let alphaReason = "Original two-sample PNG verifies premultiplied source alpha and images used inside retained mask/pattern pictures."
+  run imageCase(
+    root,
+    &mut cases,
+    "source-alpha",
+    alpha.view(),
+    "<rect width=\"1\" height=\"1\" fill=\"red\" fill-opacity=\"0.5019607843137255\"/><rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\" fill-opacity=\"0.25098039215686275\"/>",
+    alphaReason,
+  )
+  let mask = run c.fmt(
+    "<defs><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"2\" height=\"1\" style=\"mask-type:alpha\"><image href=\"{}\"/></mask></defs><rect width=\"8\" height=\"8\" fill=\"lime\" mask=\"url(#m)\"/>",
+    &.(url.view()),
+  )
+  run imageCase(
+    root,
+    &mut cases,
+    "mask-content",
+    mask.view(),
+    "<rect width=\"2\" height=\"1\" fill=\"lime\"/>",
+    alphaReason,
+  )
+  let pattern = run c.fmt(
+    "<defs><pattern id=\"p\" patternUnits=\"userSpaceOnUse\" width=\"2\" height=\"1\"><image href=\"{}\"/></pattern></defs><rect width=\"8\" height=\"4\" fill=\"url(#p)\"/>",
+    &.(url.view()),
+  )
+  let mut reference = String.make()
+  i = 0
+  while i < 8 {
+    run reference.appendOwned(
+      run c.fmt(
+        "<rect x=\"{}\" width=\"1\" height=\"4\" fill=\"{}\"/>",
+        &(
+          i,
+          if i % 2 == 0 {
+            "red"
+          } else {
+            "blue"
+          }
+        ),
+      ),
+    )
+    i = i + 1
+  }
+  run imageCase(root, &mut cases, "pattern-content", pattern.view(), reference.view(), alphaReason)
+  run c.saveManifest(root, MANIFEST, cases.asSlice(), "", false, true, false)
+}
+
+const COLORS: [[u8; 3]; 6] = [
+  [255, 0, 0],
+  [0, 255, 0],
+  [0, 0, 255],
+  [255, 255, 0],
+  [0, 255, 255],
+  [255, 0, 255],
+]
+
+struct Orientation {
+  name: string<'static>,
+  value: string<'static>,
+  turns: i32,
+  flip: bool
+}
+
+effect fn pixels(turns: i32, flip: bool, offsetX: i32, offsetY: i32) -> String
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let mut result = String.make()
+  let mut y: i32 = 0
+  while y < 3 {
+    let mut x: i32 = 0
+    while x < 2 {
+      let mut dx = x
+      let mut dy = y
+      let mut w: i32 = 2
+      let mut h: i32 = 3
+      let mut turn: i32 = 0
+      while turn < turns {
+        let nextX = h - 1 - dy
+        dy = dx
+        dx = nextX
+        let previousWidth = w
+        w = h
+        h = previousWidth
+        turn = turn + 1
+      }
+      if flip {
+        dx = w - 1 - dx
+      }
+      let color = &COLORS[i32.toUsize(y * 2 + x)]
+      run result.appendOwned(
+        run c.fmt(
+          "<rect x=\"{}\" y=\"{}\" width=\"1\" height=\"1\" fill=\"rgb({},{},{})\"/>",
+          &(dx + offsetX, dy + offsetY, color[0], color[1], color[2]),
+        ),
+      )
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return move result
+}
+
+effect fn orientationCase(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  actual: string,
+  expected: string,
+  reason: string,
+  spec: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | JsonError | FileError
+  ? &mut Allocator | &mut FileSystem {
+  let filename = run c.fmt("orientation-{}", &.(name))
+  let id = run c.fmt("image-orientation-{}", &.(name))
+  run add(root, &mut cases, id.view(), filename.view(), 6, 6, actual, expected, reason, spec)
+}
+
+pub effect fn orientation(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | WriterError | FixtureError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let mut rows = Bytes.make()
+  let mut y: usize = 0
+  while y < 3 {
+    run rows.append(b"\x00")
+    run rows.append(&COLORS[y * 2])
+    run rows.append(&COLORS[y * 2 + 1])
+    y = y + 1
+  }
+  let url = run imageUrl(rows.asSlice(), 2, 3, 2)
+  let probes = [
+    Orientation { name: "none", value: "none", turns: 0, flip: false },
+    Orientation { name: "clockwise", value: "90deg", turns: 1, flip: false },
+    Orientation { name: "half-turn", value: "180deg", turns: 2, flip: false },
+    Orientation { name: "counterclockwise", value: "270deg", turns: 3, flip: false },
+    Orientation { name: "flip", value: "flip", turns: 0, flip: true },
+    Orientation { name: "clockwise-flip", value: "90deg flip", turns: 1, flip: true },
+    Orientation { name: "half-turn-flip", value: "flip 180deg", turns: 2, flip: true },
+    Orientation { name: "counterclockwise-flip", value: "270deg flip", turns: 3, flip: true },
+    Orientation { name: "positive-tie", value: "45deg", turns: 1, flip: false },
+    Orientation { name: "negative-tie", value: "-45deg", turns: 0, flip: false },
+    Orientation { name: "negative-half-tie", value: "-135deg", turns: 3, flip: false },
+    Orientation { name: "wrapped-angle", value: "450deg", turns: 1, flip: false },
+    Orientation { name: "calculated-angle", value: "calc(1turn - 90deg)", turns: 3, flip: false },
+    Orientation { name: "inherit", value: "inherit", turns: 1, flip: false },
+    Orientation { name: "unset", value: "unset", turns: 1, flip: false },
+    Orientation { name: "initial", value: "initial", turns: 0, flip: false },
+    Orientation { name: "all-inherit", value: "all:inherit", turns: 1, flip: false },
+    Orientation { name: "all-initial", value: "all:initial", turns: 0, flip: false },
+    Orientation { name: "infinite-angle", value: "calc(infinity * 1deg)", turns: 0, flip: false },
+    Orientation {
+      name: "negative-infinite-angle",
+      value: "calc(-infinity * 1deg)",
+      turns: 0,
+      flip: false,
+    },
+    Orientation { name: "nan-angle", value: "calc(NaN * 1deg)", turns: 0, flip: false },
+    Orientation { name: "overflow-angle", value: "calc(1e308deg * 10)", turns: 0, flip: false },
+  ]
+  let mut cases = List<Value>.make()
+  let mut i: usize = 0
+  while i < 22 {
+    let p = &probes[i]
+    let style = if String.startsWith(p.value, "all:") {
+      run c.fmt("{};x:1px;y:1px", &.(p.value))
+    } else {
+      run c.fmt("image-orientation:{}", &.(p.value))
+    }
+    let image = run c.fmt(
+      "<image x=\"1\" y=\"1\" href=\"{}\" style=\"{}\"/>",
+      &(url.view(), style.view()),
+    )
+    let actual = if i >= 13 && i <= 17 {
+      run c.fmt("<g style=\"image-orientation:90deg\">{}</g>", &.(image.view()))
+    } else {
+      move image
+    }
+    let expected = run pixels(p.turns, p.flip, 1, 1)
+    run orientationCase(
+      root,
+      &mut cases,
+      p.name,
+      actual.view(),
+      expected.view(),
+      "Original 2x3 RGB source with six distinct samples; reference rotates integer sample coordinates clockwise, then flips horizontally.",
+      if i >= 18 {
+        "https://www.w3.org/TR/css-values-4/#numeric-data-types"
+      } else {
+        ORIENTATION_SPEC
+      },
+    )
+    i = i + 1
+  }
+  let actual = run c.fmt(
+    "<image href=\"{0}\"/><image href=\"{0}\" x=\"3\" style=\"image-orientation:90deg\"/>",
+    &.(url.view()),
+  )
+  let left = run pixels(0, false, 0, 0)
+  let right = run pixels(1, false, 3, 0)
+  let expected = run c.concat(&[left.view(), right.view()])
+  let sharedReason = "Shared source pixels retain independent per-occurrence CSS orientation; EXIF is used only by from-image."
+  run orientationCase(
+    root,
+    &mut cases,
+    "shared-resource",
+    actual.view(),
+    expected.view(),
+    sharedReason,
+    ORIENTATION_SPEC,
+  )
+
+  // Keep the original dependency on the JPEG fixture, rather than silently creating it.
+  let jpeg = run c.readText(root, "modules/tests/fixtures/images/inputs/jpeg-orientation.svg")
+  let start = match String.find(jpeg.view(), "href=\"") {
+    Option<usize>.Some { value } => value + 6
+    _ => {
+      fail FixtureError { message: "JPEG fixture has no href" }
+    }
+  }
+  let remainder = String.slice(jpeg.view(), start, String.byteLength(jpeg.view()) - start)
+  let end = match String.find(remainder, "\"") {
+    Option<usize>.Some { value } => value
+    _ => {
+      fail FixtureError { message: "JPEG fixture href is unterminated" }
+    }
+  }
+  let jpegUrl = String.slice(remainder, 0, end)
+  let actualJpeg = run c.fmt(
+    "<image href=\"{0}\" style=\"image-orientation:none\"/><image href=\"{0}\" x=\"3\"/>",
+    &.(jpegUrl),
+  )
+  run orientationCase(
+    root,
+    &mut cases,
+    "jpeg-none",
+    actualJpeg.view(),
+    "<rect width=\"2\" height=\"3\" fill=\"#808080\"/><rect x=\"3\" width=\"3\" height=\"2\" fill=\"#808080\"/>",
+    sharedReason,
+    ORIENTATION_SPEC,
+  )
+  run c.saveManifest(root, MANIFEST, cases.asSlice(), "image-orientation-", false, false, false)
+}
+
+pub effect fn samplingSource(mx: usize, my: usize) -> String
+  ! OutOfMemoryError | EncodeError | WriterError | FixtureError
+  ? &mut Allocator {
+  let mut rows = Bytes.make()
+  let mut y: usize = 0
+  while y < 2 * my {
+    run rows.append(b"\x00")
+    let mut x: usize = 0
+    while x < 2 * mx {
+      run rows.append(&COLORS[(y / my) * 2 + x / mx])
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return run imageUrl(rows.asSlice(), 2 * mx, 2 * my, 2)
+}
+
+effect fn sampleImage(url: string, width: string, height: string, hint: string) -> String
+  ! WriterError {
+  return run c.fmt(
+    "<image x=\"1\" y=\"1\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{}\" style=\"image-rendering:{}\"/>",
+    &(width, height, url, hint),
+  )
+}
+
+effect fn samplingCase(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  actual: string,
+  expected: string,
+  reason: string,
+) -> ()
+  ! OutOfMemoryError | WriterError | JsonError | FileError
+  ? &mut Allocator | &mut FileSystem {
+  let filename = run c.fmt("sampling-{}", &.(name))
+  let id = run c.fmt("image-sampling-{}", &.(name))
+  run add(
+    root,
+    &mut cases,
+    id.view(),
+    filename.view(),
+    12,
+    12,
+    actual,
+    expected,
+    reason,
+    SAMPLING_SPEC,
+  )
+}
+
+struct Sampling {
+  name: string<'static>,
+  hint: string<'static>,
+  width: string<'static>,
+  height: string<'static>,
+  mx: usize,
+  my: usize
+}
+
+pub effect fn sampling(root: &Path) -> ()
+  ! OutOfMemoryError | EncodeError | WriterError | FixtureError | FileError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let probes = [
+    Sampling { name: "crisp-edges", hint: "crisp-edges", width: "6", height: "6", mx: 3, my: 3 },
+    Sampling {
+      name: "pixelated-integer",
+      hint: "pixelated",
+      width: "6",
+      height: "6",
+      mx: 3,
+      my: 3,
+    },
+    Sampling {
+      name: "pixelated-round-down",
+      hint: "pixelated",
+      width: "4.8",
+      height: "4.8",
+      mx: 2,
+      my: 2,
+    },
+    Sampling {
+      name: "pixelated-round-up",
+      hint: "pixelated",
+      width: "5.2",
+      height: "5.2",
+      mx: 3,
+      my: 3,
+    },
+    Sampling {
+      name: "pixelated-anisotropic",
+      hint: "pixelated",
+      width: "5.2",
+      height: "7.2",
+      mx: 3,
+      my: 4,
+    },
+    Sampling {
+      name: "pixelated-downscale",
+      hint: "pixelated",
+      width: "1.4",
+      height: "1.4",
+      mx: 1,
+      my: 1,
+    },
+    Sampling { name: "smooth", hint: "smooth", width: "5.2", height: "7.2", mx: 1, my: 1 },
+    Sampling {
+      name: "high-quality",
+      hint: "high-quality",
+      width: "5.2",
+      height: "7.2",
+      mx: 1,
+      my: 1,
+    },
+  ]
+  let url = run samplingSource(1, 1)
+  let mut cases = List<Value>.make()
+  let mut i: usize = 0
+  while i < 8 {
+    let p = &probes[i]
+    let expanded = run samplingSource(p.mx, p.my)
+    let actual = run sampleImage(url.view(), p.width, p.height, p.hint)
+    let reference = run sampleImage(expanded.view(), p.width, p.height, "optimizeQuality")
+    run samplingCase(
+      root,
+      &mut cases,
+      p.name,
+      actual.view(),
+      reference.view(),
+      "Original four-color PNG; reference explicitly duplicates samples to the nearest positive integer size on each axis, then uses the selected smooth algorithm.",
+    )
+    i = i + 1
+  }
+  let expanded = run samplingSource(3, 3)
+  let names = ["scaled", "rotated-scaled"]
+  let transforms = ["scale(1.8)", "translate(12 0) rotate(90) scale(1.8)"]
+  i = 0
+  while i < 2 {
+    let source = run sampleImage(url.view(), "2.8", "2.8", "pixelated")
+    let target = run sampleImage(expanded.view(), "2.8", "2.8", "smooth")
+    let actual = run c.fmt("<g transform=\"{}\">{}</g>", &(transforms[i], source.view()))
+    let reference = run c.fmt("<g transform=\"{}\">{}</g>", &(transforms[i], target.view()))
+    run samplingCase(
+      root,
+      &mut cases,
+      names[i],
+      actual.view(),
+      reference.view(),
+      "Complete device mapping determines the nearest integer expansion; the independent reference expands threefold before the same scale and rotation.",
+    )
+    i = i + 1
+  }
+  let source = run sampleImage(url.view(), "6", "6", "pixelated")
+  let target = run sampleImage(expanded.view(), "6", "6", "smooth")
+  let actual = run c.fmt(
+    "<g style=\"transform:matrix3d(1,0,0,0.01,0,1,0,0,0,0,1,0,0,0,0,1)\">{}</g>",
+    &.(source.view()),
+  )
+  let reference = run c.fmt(
+    "<g style=\"transform:matrix3d(1,0,0,0.01,0,1,0,0,0,0,1,0,0,0,0,1)\">{}</g>",
+    &.(target.view()),
+  )
+  run samplingCase(
+    root,
+    &mut cases,
+    "projective",
+    actual.view(),
+    reference.view(),
+    "A finite perspective image uses a threefold independently expanded reference before the same projective bilinear mapping.",
+  )
+  let wide = run samplingSource(3, 2)
+  let tall = run samplingSource(2, 3)
+  let mut actualShared = run sampleImage(url.view(), "5.2", "3.2", "pixelated")
+  let mut referenceShared = run sampleImage(wide.view(), "5.2", "3.2", "smooth")
+  i = 0
+  while i < 2 {
+    let width = if i == 0 {
+      "3.2"
+    } else {
+      "5.2"
+    }
+    let height = if i == 0 {
+      "5.2"
+    } else {
+      "3.2"
+    }
+    let source = run sampleImage(url.view(), width, height, "pixelated")
+    let target = run sampleImage(
+      if i == 0 {
+        tall.view()
+      } else {
+        wide.view()
+      },
+      width,
+      height,
+      "smooth",
+    )
+    run actualShared.appendOwned(
+      run c.fmt("<g transform=\"translate(0 {})\">{}</g>", &((i + 1) * 4, source.view())),
+    )
+    run referenceShared.appendOwned(
+      run c.fmt("<g transform=\"translate(0 {})\">{}</g>", &((i + 1) * 4, target.view())),
+    )
+    i = i + 1
+  }
+  run samplingCase(
+    root,
+    &mut cases,
+    "shared-resource-scales",
+    actualShared.view(),
+    referenceShared.view(),
+    "One decoded resource is used at two anisotropic integer expansions and then reuses the first expansion; independent references have duplicated samples for each scale.",
+  )
+  run c.saveManifest(root, MANIFEST, cases.asSlice(), "image-sampling-", false, false, false)
+}

@@ -3,7 +3,7 @@ import silk.text.string { String }
 import structure { Graph, Options, StructureError, DocumentId, SourceId, OccurrenceId, build }
 import resources { Resolver, Response, ResourceKind, ResourceError, ProcessingMode }
 import url { Url, UrlError }
-import silk.xml.document { XmlDocument, XmlNodeId }
+import silk.xml.document { XmlDocument }
 import svg_css.tokens { equal }
 import silk.collections.bytes { Bytes }
 import silk.core.effect { Effect }
@@ -33,10 +33,10 @@ impl Host {
           response.finalUrl = Option<Url>.Some { value: move value }
         }
         Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
-          UrlError value => {
+          UrlError _ => {
             fail ResourceError.InvalidData
           }
-          OutOfMemoryError value => {
+          OutOfMemoryError _ => {
             fail OutOfMemoryError {}
           }
         }
@@ -73,7 +73,7 @@ fn occurrence(graph: &Graph, id: &[u8]) -> OccurrenceId {
 
 fn shadow(graph: &Graph, id: &[u8]) -> bool {
   return match &graph.occurrences.asSlice()[occurrence(graph, id).index].shadow {
-    Option<OccurrenceId>.Some { value } => true
+    Option<OccurrenceId>.Some { .. } => true
     _ => false
   }
 }
@@ -257,7 +257,7 @@ test effect fn instancesUseIncludingModeAndRedirectAliasesAreCached() -> ()
   )
   run Testing.expect(
     match graph.findId(DocumentId { index: 1 }, b"t") {
-      Option<SourceId>.Some { value } => true
+      Option<SourceId>.Some { .. } => true
       _ => false
     },
     "external IDs remain indexed in their own document",
@@ -344,8 +344,8 @@ test effect fn expansionBudgetsFailHard() -> ()
         error
       } => match &error {
         StructureError value => value == StructureError.TooLarge
-        UrlError value => false
-        OutOfMemoryError value => {
+        UrlError _ => false
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -468,8 +468,8 @@ effect fn limited(source: &[u8], options: &Options<'_>, host: &mut Host) -> ()
         error
       } => match &error {
         StructureError value => value == StructureError.TooLarge
-        UrlError value => false
-        OutOfMemoryError value => {
+        UrlError _ => false
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }
@@ -633,10 +633,10 @@ impl OriginRedirectHost {
         response.finalUrl = Option<Url>.Some { value: move value }
       }
       Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
-        UrlError value => {
+        UrlError _ => {
           fail ResourceError.InvalidData
         }
-        OutOfMemoryError value => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }

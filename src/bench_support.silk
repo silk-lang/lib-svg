@@ -1,0 +1,445 @@
+//! Shared native benchmark I/O, exact JSON counters, and deterministic serialization.
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.crypto.sha2 { Sha256 }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter, StderrWriter }
+import silk.json.value { Json, Value, JsonNumber, JsonEntry }
+import silk.json.scanner { JsonError }
+import silk.json.output { JsonOptions }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String, InvalidUtf8 }
+import silk.text.format { Format, ParseError }
+import silk.num.u8
+import silk.num.u64
+import silk.num.f64
+import silk.num.usize
+
+struct Sink {
+  bytes: Bytes,
+  count: usize,
+  counting: bool
+}
+
+impl Writer for Sink {
+  effect fn writeAll(self: &mut Self, val: &[u8]) -> ()
+    ! WriterError {
+    self.count = self.count + val.length
+    if !self.counting && !Bytes.appendSliceWithinCapacity(&mut self.bytes, val) {
+      fail Writer.failure()
+    }
+  }
+
+  effect fn flush(self: &mut Self) -> () ! WriterError {}
+}
+
+pub effect fn format<A>(static template: string<'static>, args: &A) -> String
+  ! OutOfMemoryError | WriterError | TaskError
+  ? &mut Allocator {
+  let mut count = Sink { bytes: Bytes.make(), count: 0, counting: true }
+  run Format.format(template, args) |> Effect.provideMut<Writer>(&mut count)
+  let mut sink = Sink { bytes: run Bytes.makeWithCapacity(count.count), count: 0, counting: false }
+  run Format.format(template, args) |> Effect.provideMut<Writer>(&mut sink)
+  return run text(move sink.bytes)
+}
+
+pub effect fn text(bytes: Bytes) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move String.fromBytes(move bytes) {
+    Result<String, InvalidUtf8>.Success { value } => {
+      return move value
+    }
+    Result<String, InvalidUtf8>.Failure { .. } => run Task.abort("expected UTF-8 text")
+  }
+}
+
+pub effect fn parse(bytes: &[u8]) -> Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move run Effect.result(Json.parse(bytes)) {
+    Result<Value, JsonError | OutOfMemoryError>.Success { value } => {
+      return move value
+    }
+    Result<Value, JsonError | OutOfMemoryError>.Failure { error: failure } => match move failure {
+      OutOfMemoryError error => {
+        fail move error
+      }
+      JsonError error => {
+        drop error
+        run Task.abort("invalid benchmark JSON")
+      }
+    }
+  }
+}
+
+pub effect fn encoded(value: &Value) -> Bytes
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut count = Sink { bytes: Bytes.make(), count: 0, counting: true }
+  run Effect.catchAll(Json.writeWith(value, &JsonOptions.indented(2)), badJson)
+    |> Effect.provideMut<Writer>(&mut count)
+  let mut sink = Sink {
+    bytes: run Bytes.makeWithCapacity(count.count + 1),
+    count: 0,
+    counting: false,
+  }
+  run Effect.catchAll(Json.writeWith(value, &JsonOptions.indented(2)), badJson)
+    |> Effect.provideMut<Writer>(&mut sink)
+  let _added = Bytes.appendWithinCapacity(&mut sink.bytes, 10)
+  return move sink.bytes
+}
+
+effect fn badJson<E>(error: E) -> ()
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  drop error
+  run Task.abort("cannot serialize benchmark JSON")
+}
+
+pub fn object() -> Value {
+  return Value.Object { entries: List<JsonEntry>.make() }
+}
+
+pub fn array() -> Value {
+  return Value.Array { values: List<Value>.make() }
+}
+
+pub fn integer(value: u64) -> Value {
+  return Value.Number { value: JsonNumber.Unsigned { value: value } }
+}
+
+pub fn number(value: f64) -> Value {
+  return Value.Number { value: JsonNumber.Float { value: value } }
+}
+
+pub fn boolean(value: bool) -> Value {
+  return Value.Bool { value: value }
+}
+
+pub effect fn stringValue(value: string) -> Value
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return Value.String { text: run String.copy(value) }
+}
+
+pub effect fn set(object: &mut Value, key: string, value: Value) -> ()
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match &mut object.* {
+    Value.Object { entries } => {
+      let mut i: usize = 0
+      while i < entries.length() {
+        if String.view(&entries.asSlice()[i].key) == key {
+          let mut fields = entries.asMutSlice()
+          fields[i].value = move value
+          return
+        }
+        i = i + 1
+      }
+      run entries.append(JsonEntry { key: run String.copy(key), value: move value })
+    }
+    _ => run Task.abort("expected JSON object")
+  }
+}
+
+pub effect fn push(array: &mut Value, value: Value) -> ()
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match &mut array.* {
+    Value.Array { values } => run values.append(move value)
+    _ => run Task.abort("expected JSON array")
+  }
+}
+
+pub effect fn field<'a>(object: &'a Value, key: string) -> &'a Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move Json.field(object, key) {
+    Option<&'a Value>.Some { value } => {
+      return value
+    }
+    _ => run Task.abort("missing required JSON field")
+  }
+}
+
+pub effect fn entries<'a>(object: &'a Value) -> &'a [JsonEntry]
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match &object.* {
+    Value.Object { entries } => {
+      return entries.asSlice()
+    }
+    _ => run Task.abort("expected JSON object")
+  }
+}
+
+pub effect fn items<'a>(array: &'a Value) -> &'a [Value]
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match &array.* {
+    Value.Array { values } => {
+      return values.asSlice()
+    }
+    _ => run Task.abort("expected JSON array")
+  }
+}
+
+pub effect fn str<'a>(value: &'a Value) -> string<'a>
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match &value.* {
+    Value.String { text } => {
+      return String.view(&text)
+    }
+    _ => run Task.abort("expected JSON string")
+  }
+}
+
+pub effect fn uint(value: &Value) -> u64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  if let Option<u64>.Some { value: integer } = Json.asU64(Option<&Value>.some(value)) {
+    return integer
+  }
+  if let Option<f64>.Some { value: floating } = Json.asF64(Option<&Value>.some(value)) {
+    if floating >= 0.0 && floating <= 9007199254740991.0 && f64.floor(floating) == floating {
+      return f64.toU64(floating)
+    }
+  }
+  run Task.abort("expected unsigned JSON integer")
+}
+
+pub effect fn real(value: &Value) -> f64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move Json.asF64(Option<&Value>.some(value)) {
+    Option<f64>.Some { value: found } => {
+      return found
+    }
+    _ => run Task.abort("expected finite JSON number")
+  }
+}
+
+pub effect fn counter(value: &Value) -> u64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  if let Value.String { text } = &value.* {
+    let raw = String.utf8Bytes(String.view(&text))
+    if raw.length == 0 {
+      run Task.abort("empty benchmark checksum counter")
+    }
+    let mut i: usize = 0
+    while i < raw.length {
+      if raw[i] < 48 || raw[i] > 57 {
+        run Task.abort("invalid unsigned checksum counter")
+      }
+      i = i + 1
+    }
+    match move u64.parse(String.view(&text)) {
+      Result<u64, ParseError>.Success { value: found } => {
+        return found
+      }
+      _ => run Task.abort("benchmark checksum counter exceeds u64")
+    }
+  }
+  let result = run uint(value)
+  if result > 9007199254740991 {
+    run Task.abort("numeric checksum must be a safe integer; use a decimal string")
+  }
+  return result
+}
+
+pub effect fn path(value: string) -> Path
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  let root = run Task.root()
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run WindowsPath.resolve(&root, value)
+  } else {
+    if String.startsWith(value, "/") {
+      return run Path.make(value)
+    }
+    return run Path.resolve(&root, value)
+  }
+}
+
+static if Intrinsic.targetOperatingSystem() == "windows" {
+  import silk.platform.windows.path { WindowsPath }
+}
+
+pub effect fn pathText<'a>(value: &'a Path) -> string<'a>
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move Path.view(value) {
+    Option<string<'a>>.Some { value: found } => {
+      return found
+    }
+    _ => run Task.abort("benchmark paths must be UTF-8")
+  }
+}
+
+pub effect fn name<'a>(value: &'a Path) -> string<'a>
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  match move Path.name(value) {
+    Option<string<'a>>.Some { value: found } => {
+      return found
+    }
+    _ => run Task.abort("benchmark filenames must be UTF-8")
+  }
+}
+
+pub effect fn load(value: string) -> Bytes
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let file = run path(value)
+  return run FileSystem.readFile(&file)
+}
+
+pub effect fn loadJson(value: string) -> Value
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let bytes = run load(value)
+  return run parse(bytes.asSlice())
+}
+
+pub effect fn save(value: string, data: &[u8]) -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let file = run path(value)
+  run FileSystem.writeFileWithParents(&file, data)
+}
+
+pub effect fn replaceChanged(file: &Path, data: &[u8]) -> ()
+  ! FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  if run FileSystem.exists(file) {
+    let previous = run FileSystem.readFile(file)
+    if sameBytes(previous.asSlice(), data) {
+      return
+    }
+  }
+  run FileSystem.writeFileWithParents(file, data)
+}
+
+pub fn sameBytes(a: &[u8], b: &[u8]) -> bool {
+  if a.length != b.length {
+    return false
+  }
+  let mut i: usize = 0
+  while i < a.length {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+pub effect fn hex(data: &[u8]) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut result = run Bytes.makeWithCapacity(data.length * 2)
+  let digits = b"0123456789abcdef"
+  let mut i: usize = 0
+  while i < data.length {
+    let _a = result.appendWithinCapacity(digits[u8.toUsize(u8.shiftRight(data[i], 4))])
+    let _b = result.appendWithinCapacity(digits[u8.toUsize(data[i] & 15)])
+    i = i + 1
+  }
+  return run text(move result)
+}
+
+pub effect fn hash(data: &[u8]) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let digest = Sha256.hash(data)
+  return run hex(&digest)
+}
+
+pub effect fn fileHash(file: &Path) -> String
+  ! TaskError | FileError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  let bytes = run FileSystem.readFile(file)
+  return run hash(bytes.asSlice())
+}
+
+pub effect fn emit(report: &Value, output: string) -> ()
+  ! TaskError | WriterError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let bytes = run encoded(report)
+  if output != "" {
+    run save(output, bytes.asSlice())
+  } else {
+    let mut writer = StdoutWriter.make()
+    run Writer.writeAll(bytes.asSlice()) |> Effect.provideMut<Writer>(&mut writer)
+  }
+}
+
+pub effect fn log(message: string) -> ()
+  ! WriterError {
+  let mut writer = StderrWriter.make()
+  run Writer.writeString(message) |> Effect.provideMut<Writer>(&mut writer)
+  run Writer.writeString("\n") |> Effect.provideMut<Writer>(&mut writer)
+}
+
+pub effect fn variable(key: string, fallback: string) -> String
+  ! TaskError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  match move run HostInput.variableNamed(key) {
+    Option<Bytes>.Some { value } => {
+      return run text(move value)
+    }
+    _ => {
+      return run String.copy(fallback)
+    }
+  }
+}
+
+pub fn selected(values: &[String], value: string) -> bool {
+  let mut i: usize = 0
+  while i < values.length {
+    if String.view(&values[i]) == value {
+      return true
+    }
+    i = i + 1
+  }
+  return false
+}
+
+pub fn before(left: string, right: string) -> bool {
+  let a = String.utf8Bytes(left)
+  let b = String.utf8Bytes(right)
+  let mut i: usize = 0
+  while i < a.length && i < b.length {
+    if a[i] != b[i] {
+      return a[i] < b[i]
+    }
+    i = i + 1
+  }
+  return a.length < b.length
+}
+
+pub effect fn print(message: string) -> ()
+  ! WriterError {
+  let mut writer = StdoutWriter.make()
+  run Writer.writeString(message) |> Effect.provideMut<Writer>(&mut writer)
+  run Writer.writeString("\n") |> Effect.provideMut<Writer>(&mut writer)
+}
+
+pub effect fn argument(path: &Path) -> String
+  ! TaskError | FileError | OutOfMemoryError
+  ? &mut Allocator {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return run text(run WindowsPath.toArgumentBytes(path))
+  } else {
+    return run String.copy(run pathText(path))
+  }
+}

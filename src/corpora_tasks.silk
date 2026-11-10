@@ -1,0 +1,460 @@
+import corpora { CorpusFailure }
+import corpora as C
+import corpora_specs as Specs
+import corpora_suites as Suites
+import corpora_reftests as Reftests
+import corpora_references as References
+import task_support as Support
+import bench_process as Process
+import silk.cli.command { CommandLine, Command, Opt }
+import silk.cli.task { Task }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator }
+import silk.system.filesystem { FileSystem, Path, DirectoryEntry }
+import silk.system.child_process { ChildProcess }
+import silk.system.host_input { HostInput }
+import silk.text.string { String }
+import silk.text.format { Format, ParseError }
+
+pub struct SpecOptions {
+  pub lock: String,
+  pub cache: String,
+  pub update: bool,
+  pub offline: bool,
+  pub only: List<String>
+}
+
+impl CommandLine for SpecOptions {
+  static fn command() -> Command<Self> {
+    return Command<Self>.make(
+      "fetch-specs",
+      "Fetch and verify the complete hash-pinned specification catalog",
+    )
+      |> Command.option("lock", Opt.plain() |> Opt.default("modules/specs.lock.json"))
+      |> Command.option("cache", Opt.plain() |> Opt.default("modules/.cache/specs"))
+  }
+}
+
+pub struct SuiteOptions {
+  pub lock: String,
+  pub cacheDir: String,
+  pub suite: String,
+  pub full: bool,
+  pub offline: bool,
+  pub update: bool,
+  pub revision: String
+}
+
+impl CommandLine for SuiteOptions {
+  static fn command() -> Command<Self> {
+    return Command<Self>.make(
+      "fetch-suites",
+      "Fetch authenticated resvg, W3C SVG 1.1 and WPT corpora",
+    )
+      |> Command.option("lock", Opt.plain() |> Opt.default("modules/tests/suites.lock.json"))
+      |> Command.option("cacheDir", Opt.plain() |> Opt.default("modules/tests/.cache/suites"))
+      |> Command.option("suite", Opt.plain() |> Opt.default("resvg"))
+  }
+}
+
+pub struct ReferenceOptions {
+  pub suite: String,
+  pub lock: String,
+  pub cacheDir: String,
+  pub full: bool,
+  pub expectations: String,
+  pub manifest: String,
+  pub malformed: bool,
+  pub validate: bool,
+  pub renderer: String,
+  pub timeout: String,
+  pub report: String,
+  pub diffDir: String,
+}
+
+impl CommandLine for ReferenceOptions {
+  static fn command() -> Command<Self> {
+    return Command<Self>.make("reftests", "Discover, validate and render reviewed SVG references")
+      |> Command.option("suite", Opt.plain() |> Opt.default("resvg"))
+      |> Command.option("lock", Opt.plain() |> Opt.default("modules/tests/suites.lock.json"))
+      |> Command.option("cacheDir", Opt.plain() |> Opt.default("modules/tests/.cache/suites"))
+      |> Command.option("timeout", Opt.plain() |> Opt.default("30"))
+  }
+}
+
+pub union CorporaCommands {
+  FetchSpecs { pub specs: SpecOptions },
+  FetchSuites { pub suites: SuiteOptions },
+  Reftests { pub refs: ReferenceOptions },
+}
+
+impl CommandLine for CorporaCommands {
+  static fn command() -> Command<Self> {
+    return Command<Self>.make("corpora", "Authenticated SVG corpora and reference comparisons")
+      |> Command.flatten("specs")
+      |> Command.flatten("suites")
+      |> Command.flatten("refs")
+  }
+}
+
+pub effect fn perform(command: CorporaCommands) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  match move command {
+    CorporaCommands.FetchSpecs { specs } => {
+      run fetchSpecs(&specs)
+    }
+    CorporaCommands.FetchSuites { suites } => {
+      run fetchSuites(&suites)
+    }
+    CorporaCommands.Reftests { refs } => {
+      run references(&refs)
+    }
+  }
+}
+
+pub effect fn fetchSpecs(options: &SpecOptions) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let root = run Task.root()
+  let lock = run Reftests.resolve(&root, String.view(&options.lock))
+  let cache = run Reftests.resolve(&root, String.view(&options.cache))
+  let mut only = List<String>.make()
+  let mut index: usize = 0
+  while index < List<String>.length(&options.only) {
+    run List<String>.append(
+      &mut only,
+      run String.copy(String.view(&List<String>.asSlice(&options.only)[index])),
+    )
+    index = index + 1
+  }
+  let args = Specs.Options { update: options.update, offline: options.offline, only: move only }
+  let urls = run Specs.catalog()
+  let curl = if options.offline {
+    run Path.join(&root, "curl")
+  } else {
+    run Process.locate("curl")
+  }
+  let count = run Specs.synchronize(&lock, &cache, &curl, &urls, &args)
+  let number = run Support.number(count)
+  let message = run Support.cat(
+    &[
+      if options.update {
+        "Pinned "
+      } else {
+        "Verified "
+      },
+      String.view(&number),
+      " specifications in ",
+      String.view(&options.cache),
+    ],
+  )
+  run Support.printLine(String.view(&message))
+}
+
+pub effect fn fetchSuites(options: &SuiteOptions) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let root = run Task.root()
+  let lockPath = run Reftests.resolve(&root, String.view(&options.lock))
+  let cache = run Reftests.resolve(&root, String.view(&options.cacheDir))
+  let name = String.view(&options.suite)
+  if name != "resvg" && name != "w3c-svg11" && name != "wpt" {
+    run C.reject("unknown suite")
+  }
+  if String.view(&options.revision) != "" && !options.update {
+    run C.reject("--revision requires --update")
+  }
+  if options.update && options.offline {
+    run C.reject("--update cannot be used offline")
+  }
+  let mut lock = run Suites.loadLock(&lockPath)
+  let curl = if options.offline {
+    run Path.join(&root, "curl")
+  } else {
+    run Process.locate("curl")
+  }
+  if options.update {
+    run Suites.updateSuite(&mut lock, name, String.view(&options.revision), &cache, &curl)
+    run C.writeJson(&lockPath, &lock)
+    run Support.printLine("Updated suite pins; review lock and expectations before committing.")
+  } else {
+    let directory = run Suites.fetchSuite(&lock, name, &cache, &curl, options.full, options.offline)
+    run Support.printLine(References.pathText(&directory))
+  }
+}
+
+pub effect fn references(options: &ReferenceOptions) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let root = run Task.root()
+  let lock = run Reftests.resolve(&root, String.view(&options.lock))
+  let cache = run Reftests.resolve(&root, String.view(&options.cacheDir))
+  let renderer = if String.view(&options.renderer) == "" {
+    C.array()
+  } else {
+    run Json.parse(String.utf8Bytes(String.view(&options.renderer)))
+  }
+  let timeout = match move Format.f64Value(String.view(&options.timeout)) {
+    Result<f64, ParseError>.Success { value } => value
+    Result<f64, ParseError>.Failure { .. } => run Task.abort(
+      "timeout must be a positive finite number",
+    )
+  }
+  let args = Reftests.Options {
+    suite: run String.copy(String.view(&options.suite)),
+    full: options.full,
+    malformed: options.malformed,
+    validate: options.validate,
+    timeout: timeout,
+    manifest: run String.copy(String.view(&options.manifest)),
+    expectations: run String.copy(String.view(&options.expectations)),
+    renderer: move renderer,
+    report: run String.copy(String.view(&options.report)),
+    diffDir: run String.copy(String.view(&options.diffDir)),
+  }
+
+  // Reference execution only verifies existing source caches; it never invokes this downloader.
+  let curl = run Path.join(&root, "curl")
+  let report = run Reftests.runSuite(&root, &lock, &cache, &curl, &args)
+  run printReport(&report)
+}
+
+effect fn printReport(report: &Value) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut text = String.make()
+  run C.encode(&mut text, report)
+  run Support.printLine(String.view(&text))
+  if (Json.asI64(Json.field(report, "gate_failures")) |> Option<i64>.unwrapOr(1)) != 0 {
+    run C.reject("reference gate failures; inspect report")
+  }
+}
+
+effect fn command(words: &[string]) -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut result = C.array()
+  let mut index: usize = 0
+  while index < words.length {
+    run C.append(&mut result, run C.stringValue(words[index]))
+    index = index + 1
+  }
+  return move result
+}
+
+pub effect fn gate(offline: bool, skipFetch: bool) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let binary = run Support.build("svg-render-test-harness", "svg-render-test-harness", true, false)
+  run Task.exec(String.view(&binary), &["--help"])
+  run Task.exec(String.view(&binary), &["--version"])
+  let root = run Task.root()
+  let lockPath = run Path.join(&root, "modules/tests/suites.lock.json")
+  let cache = run Path.join(&root, "modules/tests/.cache/suites")
+  let curl = if offline || skipFetch {
+    run Path.join(&root, "curl")
+  } else {
+    run Process.locate("curl")
+  }
+  let names = [
+    "own",
+    "css",
+    "structure",
+    "clip-shapes",
+    "masking",
+    "clipping",
+    "compositing",
+    "painting",
+    "images",
+    "filters",
+    "text",
+    "animation",
+    "color",
+    "malformed",
+  ]
+  let mut index: usize = 0
+  while index < names.length {
+    let name = names[index]
+    let mut options = run Reftests.defaults()
+    options.suite = run String.copy("own")
+    options.manifest = run Support.cat(&["modules/tests/fixtures/", name, "/manifest.json"])
+    options.malformed = name == "malformed"
+    options.renderer = run command(
+      &[String.view(&binary), "{input}", "-o", "{output}", "--font-dir", "modules/tests/fonts"],
+    )
+    options.report = run Support.cat(&["build/svg/", name, ".json"])
+    options.diffDir = run Support.cat(&["build/svg/", name, "-diffs"])
+    let report = run Reftests.runSuite(&root, &lockPath, &cache, &curl, &options)
+    run printReport(&report)
+    index = index + 1
+  }
+  if !skipFetch {
+    let mut only = List<String>.make()
+    let ids = ["svg2-coords", "svg2-paths", "svg2-conform", "fetch", "infra"]
+    index = 0
+    while index < ids.length {
+      run List<String>.append(&mut only, run String.copy(ids[index]))
+      index = index + 1
+    }
+    let specs = SpecOptions {
+      lock: run String.copy("modules/specs.lock.json"),
+      cache: run String.copy("modules/.cache/specs"),
+      update: false,
+      offline: offline,
+      only: move only,
+    }
+    run fetchSpecs(&specs)
+    let lock = run Suites.loadLock(&lockPath)
+    let _directory = run Suites.fetchSuite(&lock, "resvg", &cache, &curl, false, offline)
+    let mut options = run Reftests.defaults()
+    options.renderer = run command(
+      &[
+        String.view(&binary),
+        "{input}",
+        "-o",
+        "{output}",
+        "--font-dir",
+        "modules/tests/fonts",
+        "--width",
+        "300",
+      ],
+    )
+    options.report = run String.copy("build/svg/resvg-curated.json")
+    options.diffDir = run String.copy("build/svg/resvg-curated-diffs")
+    let report = run Reftests.runSuite(&root, &lockPath, &cache, &curl, &options)
+    run printReport(&report)
+  }
+  run Support.printLine(
+    if skipFetch {
+      "SVG rendering gate passed. External references skipped by request."
+    } else {
+      "SVG rendering gate passed."
+    },
+  )
+}
+
+effect fn copyTree(source: &Path, destination: &Path) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  run FileSystem.createDirectoriesRecursively(destination)
+  let entries = run FileSystem.listDirectory(source)
+  let mut index: usize = 0
+  while index < List<DirectoryEntry>.length(&entries) {
+    let entry = &List<DirectoryEntry>.asSlice(&entries)[index]
+    let name = Path.name(&entry.path) |> Option<string>.unwrapOr("")
+    let output = run C.contained(destination, name)
+    if entry.kind.code == 1 {
+      run copyTree(&entry.path, &output)
+    } else {
+      let bytes = run FileSystem.readFile(&entry.path)
+      run FileSystem.writeFile(&output, Bytes.asSlice(&bytes))
+    }
+    index = index + 1
+  }
+}
+
+pub effect fn conformance(offline: bool) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let binary = run Support.build("svg-render-test-harness", "svg-render-test-harness", true, false)
+  let root = run Task.root()
+  let lockPath = run Path.join(&root, "modules/tests/suites.lock.json")
+  let cache = run Path.join(&root, "modules/tests/.cache/suites")
+  let curl = if offline {
+    run Path.join(&root, "curl")
+  } else {
+    run Process.locate("curl")
+  }
+  let lock = run Suites.loadLock(&lockPath)
+  let suites = ["w3c-svg11", "resvg", "wpt"]
+  let mut failed = false
+  let mut index: usize = 0
+  while index < suites.length {
+    let completed = run Effect.result(
+      conformanceSuite(
+        &root,
+        &lockPath,
+        &cache,
+        &curl,
+        &lock,
+        String.view(&binary),
+        suites[index],
+        offline,
+      ),
+    )
+    match move completed {
+      Result<(), CorpusFailure>.Success { .. } => {}
+      Result<(), CorpusFailure>.Failure { error } => {
+        failed = true
+        let message = run C.errorMessage(move error)
+        run Support.printLine(String.view(&message))
+      }
+    }
+    index = index + 1
+  }
+  if failed {
+    run C.reject("SVG conformance failed; inspect per-suite reports")
+  }
+}
+
+effect fn conformanceSuite(
+  root: &Path,
+  lockPath: &Path,
+  cache: &Path,
+  curl: &Path,
+  lock: &Value,
+  binary: string,
+  suite: string,
+  offline: bool,
+) -> ()
+  ! CorpusFailure
+  ? &mut HostInput | &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  let suiteRoot = run Suites.fetchSuite(lock, suite, cache, curl, true, offline)
+  let mut options = run Reftests.defaults()
+  options.suite = run String.copy(suite)
+  options.full = true
+  options.renderer = run command(
+    &[binary, "{input}", "-o", "{output}", "--resources-dir", "{root}"],
+  )
+  let extras = if suite == "w3c-svg11" {
+    run command(&["--viewport-width", "480", "--viewport-height", "360"])
+  } else if suite == "resvg" {
+    run command(
+      &["--width", "300", "--font-dir", "{root}/crates/resvg/tests/fonts", "--language", "en"],
+    )
+  } else {
+    let fonts = run Path.join(root, "build/wpt-fonts")
+    let source = run Path.join(&suiteRoot, "fonts")
+    run copyTree(&source, &fonts)
+    let freeSans = run Path.make("/usr/share/fonts/truetype/freefont/FreeSans.ttf")
+    let bytes = run FileSystem.readFile(&freeSans)
+    let destination = run Path.join(&fonts, "FreeSans.ttf")
+    run FileSystem.writeFile(&destination, Bytes.asSlice(&bytes))
+    run command(
+      &[
+        "--viewport-width",
+        "800",
+        "--viewport-height",
+        "600",
+        "--font-dir",
+        References.pathText(&fonts),
+      ],
+    )
+  }
+  let words = run C.values(&extras)
+  let mut index: usize = 0
+  while index < words.length {
+    run C.append(&mut options.renderer, run Json.copy(&words[index]))
+    index = index + 1
+  }
+  options.report = run Support.cat(&["build/svg-conformance/", suite, ".json"])
+  options.diffDir = run Support.cat(&["build/svg-conformance/", suite, "-diffs"])
+  let report = run Reftests.runSuite(root, lockPath, cache, curl, &options)
+  run printReport(&report)
+}

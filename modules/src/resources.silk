@@ -460,7 +460,7 @@ effect fn percentLength(data: &[u8], maximum: usize) -> usize
   let mut cursor: usize = 0
   let mut length: usize = 0
   while cursor < data.length {
-    let byte = run nextPercent(data, &mut cursor)
+    drop run nextPercent(data, &mut cursor)
     if length == maximum {
       fail ResourceError.TooLarge
     }
@@ -493,7 +493,7 @@ effect fn base64Length(data: &[u8]) -> usize
   let result = Base64.decodedLength(data)
   return match &result {
     Result<usize, Base64Error>.Success { value } => value
-    Result<usize, Base64Error>.Failure { error } => {
+    Result<usize, Base64Error>.Failure { .. } => {
       fail ResourceError.InvalidData
     }
   }
@@ -504,7 +504,7 @@ effect fn base64Into(data: &[u8], output: &mut [u8]) -> usize
   let result = Base64.decodeInto(move output, data)
   return match &result {
     Result<usize, Base64Error>.Success { value } => value
-    Result<usize, Base64Error>.Failure { error } => {
+    Result<usize, Base64Error>.Failure { .. } => {
       fail ResourceError.InvalidData
     }
   }
@@ -633,7 +633,7 @@ effect fn decodeBase64(data: &[u8], maximum: usize) -> Bytes
       fail ResourceError.TooLarge
     }
     let mut direct = run Bytes.zeroed(length)
-    let written = run base64Into(data, Bytes.asMutSlice(&mut direct))
+    drop run base64Into(data, Bytes.asMutSlice(&mut direct))
     return move direct
   }
 

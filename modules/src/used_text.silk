@@ -32,7 +32,6 @@ import svg_text.layout {
   Shift,
   Span,
   Character,
-  Layout,
   TextLength,
   Line,
   Writing,
@@ -1550,10 +1549,10 @@ effect fn regions(
       if let Value.Effect { value } = &styles.catalog.engine.values.get(entry.value).* {
         if let EffectValue.Shapes { sources } = &value {
           match &sources.asSlice()[index] {
-            ClipSource.Shape { shape, reference } => {
+            ClipSource.Shape { shape, .. } => {
               built = run used_clip_shapes.build(&styles.catalog.engine, &shape, viewport)
             }
-            ClipSource.Url { url: ignored } => {
+            ClipSource.Url { .. } => {
               url = true
             }
             _ => {}

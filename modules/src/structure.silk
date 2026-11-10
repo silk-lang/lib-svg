@@ -338,8 +338,8 @@ effect fn resolved(base: &Url, input: &[u8]) -> Option<Url>
       value: move value
     }
     Result<Url, UrlError | OutOfMemoryError>.Failure { error } => match move error {
-      UrlError value => Option<Url>.None
-      OutOfMemoryError value => {
+      UrlError _ => Option<Url>.None
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -499,7 +499,7 @@ effect fn parseDocument(data: &[u8], remaining: usize, expanded: &mut usize) -> 
         }
         fail StructureError.InvalidXml
       }
-      OutOfMemoryError value => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -653,7 +653,7 @@ effect fn externalDocument(
         }
         return Option<DocumentId>.None
       }
-      OutOfMemoryError value => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -738,7 +738,7 @@ effect fn externalDocument(
         }
         Option<XmlDocument>.None
       }
-      OutOfMemoryError value => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -847,7 +847,7 @@ effect fn addressTarget(
                 target = graph.findId(documentId, Bytes.asSlice(&bytes))
               }
               Result<Bytes, UrlError | OutOfMemoryError>.Failure { error } => match move error {
-                UrlError invalid => {}
+                UrlError _ => {}
                 OutOfMemoryError exhausted => {
                   fail move exhausted
                 }

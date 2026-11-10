@@ -83,7 +83,7 @@ effect fn urlLimitIsPreserved(data: &[u8]) -> bool
   let attempted = run Effect.result(fixture(&document))
   return match move attempted {
     Result<StyledDocument, CssError | UrlError | ComputedError | OutOfMemoryError>.Success {
-      value
+      ..
     } => false
     Result<StyledDocument, CssError | UrlError | ComputedError | OutOfMemoryError>.Failure {
       error
@@ -237,7 +237,7 @@ test effect fn uaWhitespaceAndAllElementStyles() -> ()
   let mut i: usize = 0
   while i < XmlDocument.nodes(&doc).length {
     let has = match &result.nodeStyle(XmlNodeId { index: i }) {
-      Option<StyleId>.Some { value } => true
+      Option<StyleId>.Some { .. } => true
       _ => false
     }
     if has != (XmlDocument.nodes(&doc)[i].kind == XmlNodeKind.Element) {

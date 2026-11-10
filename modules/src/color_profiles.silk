@@ -160,7 +160,7 @@ pub effect fn load(graph: &Graph, styles: &StyledGraph<'_>) -> Profiles
               }
               Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => {
                 match &error {
-                  OutOfMemoryError problem => {
+                  OutOfMemoryError _ => {
                     fail OutOfMemoryError {}
                   }
                   _ => {}
@@ -170,7 +170,7 @@ pub effect fn load(graph: &Graph, styles: &StyledGraph<'_>) -> Profiles
           }
           Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
             match &error {
-              OutOfMemoryError problem => {
+              OutOfMemoryError _ => {
                 fail OutOfMemoryError {}
               }
               _ => {}

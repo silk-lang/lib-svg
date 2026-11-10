@@ -17,5 +17,5 @@ TwitterColorEmoji (MIT); the license files sit next to them.
   for vertical text.
 - `TwitterColorEmoji.subset` (MIT, license file next to it): resvg's subset, unchanged, for
   SVG glyph documents.
-- `SvgGlyphs`: written by `scripts/svg-glyph-font.py` (needs fontTools), a tiny font whose
+- `SvgGlyphs`: written by `silk task fixtures svg-glyph-font`, a tiny font whose
   `SVG ` table exercises shared and gzip-compressed glyph documents and context paint.

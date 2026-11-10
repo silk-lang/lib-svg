@@ -1,0 +1,760 @@
+//! Ported benchmark invariants. Native process fixtures are injected at ChildProcess,
+//! never implemented by a shell/JavaScript/Python helper executable.
+import bench { Common }
+import bench_support as B
+import task_support as Support
+import bench_geometry as G
+import bench_harness as H
+import bench_workloads as W
+import bench_images as Images
+import fixtures_common as F
+import silk.cli.parse { Cli, Parsed }
+import silk.cli.task { TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.inflate { Decoder, Format as CompressionFormat, Limits, DecodeError }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.encoding.base64 { Base64, Base64Error }
+import silk.io.writer { WriterError }
+import silk.json.value { Json }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessRequest, ProcessOutcome, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.filesystem_machine { MachineFileSystem }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.testing.testing { Testing, AssertionError }
+import silk.xml.document { XmlDocument, XmlNodeId, XmlNodeKind, XmlError }
+import silk.num.u8
+import silk.num.usize
+
+fn failed<T, E>(result: Result<T, E>) -> bool {
+  return match move result {
+    Result<T, E>.Success { value } => {
+      drop value
+      false
+    }
+    Result<T, E>.Failure { error } => {
+      drop error
+      true
+    }
+  }
+}
+
+effect fn protocolCases() -> ()
+  ! TaskError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let timing = H.Timing { iterations: 5, warmup: 1, samples: 3, timeout: 10.0, callgrind: false }
+  let mut result = run B.parse(
+    b"{\"protocol\":1,\"iterations\":5,\"warmup\":1,\"elapsed_ns\":1,\"width\":1,\"height\":1,\"checksum\":\"18446744073709551615\",\"consumed\":\"18446744073709551610\"}",
+  )
+  run H.validateResult(&result, &timing)
+  run B.set(&mut result, "consumed", run B.stringValue("0"))
+  run Testing.expect(
+    failed(run Effect.result(H.validateResult(&result, &timing))),
+    "changed consumed counter is rejected",
+  )
+  run B.set(&mut result, "consumed", run B.stringValue("18446744073709551610"))
+  run B.set(&mut result, "elapsed_ns", B.integer(0))
+  run Testing.expect(
+    failed(run Effect.result(H.validateResult(&result, &timing))),
+    "zero native elapsed time is rejected",
+  )
+  run B.set(&mut result, "elapsed_ns", B.integer(1))
+  run B.set(&mut result, "checksum", B.integer(18446744073709551615))
+  run Testing.expect(
+    failed(run Effect.result(H.validateResult(&result, &timing))),
+    "unsafe numeric checksum is rejected",
+  )
+  run Testing.expect(
+    (run H.callgrindIr("events: Dr Ir Dw\nsummary: 9 123456 8\n")) == 123456,
+    "Callgrind selects the named Ir column",
+  )
+  run Testing.expect(
+    failed(run Effect.result(H.callgrindIr("events: Dr Dw\nsummary: 9 8\n"))),
+    "Callgrind requires Ir",
+  )
+  run Testing.expect(
+    failed(run Effect.result(H.callgrindIr("events: Ir Dw\nsummary: 9\n"))),
+    "Callgrind requires a complete summary",
+  )
+  let odd = run B.parse(b"[9,1,2]")
+  let even = run B.parse(b"[9,1,2,4]")
+  run Testing.expect(
+    (run H.median(&odd)) == 2.0 && (run H.median(&even)) == 3.0,
+    "median preserves odd and even aggregation",
+  )
+  let parsed = run Cli.parse<Common>(
+    &[
+      "measurement",
+      "--iterations",
+      "3",
+      "--mode",
+      "parse",
+      "--mode",
+      "render",
+      "--fetch-workloads",
+    ],
+  )
+  match move parsed {
+    Parsed<Common>.Run { value } => {
+      run Testing.expect(
+        value.iterations == 3 && value.fetchWorkloads && value.mode.length() == 2,
+        "CLI retains repeated flags and booleans",
+      )
+      run Testing.expect(
+        String.view(&value.mode.asSlice()[0]) == "parse"
+          && String.view(&value.mode.asSlice()[1]) == "render",
+        "mode order is preserved",
+      )
+    }
+    _ => run Testing.expect(false, "CLI accepts measurement options")
+  }
+}
+
+test effect fn exactNativeProtocolCallgrindAndCli() -> ()
+  ! TaskError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run protocolCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn baselineCases() -> ()
+  ! TaskError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let current = run B.parse(
+    b"{\"protocol\":1,\"config\":{\"iterations\":3,\"timer\":\"native monotonic wall clock; Silk monotonic clock separately records process wall time\"},\"workloads\":{\"map\":{\"sha256\":\"a\"}},\"workload_manifest_sha256\":\"manifest\",\"reference_pin\":\"pin\",\"results\":{\"silk\":{\"map/render\":{\"median_ns\":150}}}}",
+  )
+  let mut baseline = run B.parse(
+    b"{\"protocol\":1,\"config\":{\"iterations\":3,\"timer\":\"native monotonic wall clock; Silk monotonic clock separately records process wall time\"},\"workloads\":{\"map\":{\"sha256\":\"a\"}},\"workload_manifest_sha256\":\"manifest\",\"reference_pin\":\"pin\",\"results\":{\"silk\":{\"map/render\":{\"median_ns\":100}}}}",
+  )
+  let ratios = run H.baselineRatios(&current, &baseline)
+  run Testing.expect(
+    (run B.real(run B.field(run B.field(&ratios, "silk"), "map/render"))) == 1.5,
+    "equal metadata permits current/previous measured ratios",
+  )
+  run B.set(&mut baseline, "config", run B.parse(b"{\"iterations\":4}"))
+  run Testing.expect(
+    failed(run Effect.result(H.baselineRatios(&current, &baseline))),
+    "different measurement configuration is rejected",
+  )
+  run B.set(&mut baseline, "config", run Json.copy(run B.field(&current, "config")))
+  run B.set(&mut baseline, "workloads", run B.parse(b"{\"map\":{\"sha256\":\"b\"}}"))
+  run Testing.expect(
+    failed(run Effect.result(H.baselineRatios(&current, &baseline))),
+    "different measured work is rejected",
+  )
+  run B.set(&mut baseline, "workloads", run Json.copy(run B.field(&current, "workloads")))
+  run B.set(&mut baseline, "results", run B.parse(b"{\"silk\":{}}"))
+  run Testing.expect(
+    failed(run Effect.result(H.baselineRatios(&current, &baseline))),
+    "different stages are rejected",
+  )
+}
+
+test effect fn strictMeasuredBaselineCompatibility() -> ()
+  ! TaskError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run baselineCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn tigerCases() -> ()
+  ! TaskError | WriterError | OutOfMemoryError | AssertionError<'static>
+  ? &mut Allocator {
+  let bad = run B.parse(
+    b"{\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"bytes\":13}",
+  )
+  run Testing.expect(
+    failed(run Effect.result(W.verifyAsset(b"not the tiger", &bad))),
+    "modified Tiger download is rejected",
+  )
+  let hash = run B.hash(b"pinned")
+  let mut wrongLength = B.object()
+  run B.set(&mut wrongLength, "sha256", run B.stringValue(String.view(&hash)))
+  run B.set(&mut wrongLength, "bytes", B.integer(1))
+  run Testing.expect(
+    failed(run Effect.result(W.verifyAsset(b"pinned", &wrongLength))),
+    "incorrect Tiger byte count is rejected",
+  )
+  let source = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 900\" id=\"root\"><g transform=\"matrix(2,0,0,2,3,4)\" fill=\"#ffc\" stroke=\"#000\"><path id=\"shape\" d=\"M1 2C3 4 5 6 7 8Z\" stroke-width=\"0.17200001\"/></g></svg>"
+  let mut config = run B.parse(b"{\"viewBox\":\"0 0 900 900\",\"width\":900,\"height\":900}")
+  let normalized = run W.normalizeTiger(source, &config)
+  let expected = b"<?xml version='1.0' encoding='utf-8'?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 900\" id=\"root\" width=\"900\" height=\"900\"><g transform=\"matrix(2,0,0,2,3,4)\" fill=\"#ffc\" stroke=\"#000\"><path id=\"shape\" d=\"M1 2C3 4 5 6 7 8Z\" stroke-width=\"0.17200001\" /></g></svg>"
+  run Testing.expect(
+    B.sameBytes(normalized.asSlice(), expected),
+    "Tiger keeps geometry, paint, order and historical empty-element serialization",
+  )
+  run B.set(&mut config, "viewBox", run B.stringValue("0 0 1 1"))
+  run Testing.expect(
+    failed(run Effect.result(W.normalizeTiger(source, &config))),
+    "Tiger requires the pinned viewBox",
+  )
+}
+
+test effect fn authenticatedTigerAndHistoricalNormalization() -> ()
+  ! TaskError | WriterError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run tigerCases() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+struct TestHost {
+  directory: String
+}
+
+impl HostInput for TestHost {
+  effect fn argumentCount(self: &mut Self) -> usize
+    ! HostInputError {
+    return 0
+  }
+
+  effect fn argument(self: &mut Self, index: usize) -> Option<Bytes>
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    return Option<Bytes>.none()
+  }
+
+  effect fn variable(self: &mut Self, name: &[u8]) -> Option<Bytes>
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    if B.sameBytes(name, b"PATH") || B.sameBytes(name, b"SILK_PROJECT_ROOT") {
+      return Option<Bytes>.some(run Bytes.copy(String.utf8Bytes(String.view(&self.directory))))
+    }
+    return Option<Bytes>.none()
+  }
+
+  effect fn workingDirectory(self: &mut Self) -> Bytes
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    return run Bytes.copy(String.utf8Bytes(String.view(&self.directory)))
+  }
+}
+
+struct TestProcess {
+  calls: usize,
+  protocol: bool
+}
+
+impl ChildProcess for TestProcess {
+  effect fn execute(self: &mut Self, request: &ProcessRequest) -> ProcessOutcome
+    ! ProcessError | OutOfMemoryError
+    ? &mut Allocator {
+    self.calls = self.calls + 1
+    if self.protocol {
+      let args = ChildProcess.arguments(request)
+      let text = unsafe String.fromUtf8Unchecked(args)
+      if !String.contains(text, "render\0") || !String.contains(text, "input.svg\0")
+        || !String.contains(text, "3\01\0") {
+        return ChildProcess.exited(2, Bytes.make(), Bytes.make())
+      }
+      return ChildProcess.exited(
+        0,
+        run Bytes.copy(
+          b"{\"protocol\":1,\"iterations\":3,\"warmup\":1,\"elapsed_ns\":123,\"width\":2,\"height\":3,\"checksum\":\"1\",\"consumed\":\"4\"}",
+        ),
+        Bytes.make(),
+      )
+    }
+
+    // A genuine JPEG fixture isolates the placement generator from an installed cjpeg version.
+    return ChildProcess.exited(0, run F.jpegGray128(512, 384, 0, b""), Bytes.make())
+  }
+}
+
+effect fn temporary() -> Path
+  ! FileError | OutOfMemoryError
+  ? &mut FileSystem | &mut Allocator {
+  let parent = run Path.make(
+    if Support.operatingSystem() == "windows" {
+      "/C:/Windows/Temp"
+    } else {
+      "/tmp"
+    },
+  )
+  return run FileSystem.createTemporaryDirectory(&parent, b"svg-bench-test-")
+}
+
+effect fn geometryCases(directory: &Path) -> ()
+  ! TaskError | FileError | OutOfMemoryError | WriterError | AssertionError<'static>
+  ? &mut Allocator | &mut FileSystem {
+  let names = [
+    "iconset",
+    "instances",
+    "largemap",
+    "mixedcurves",
+    "paintservers",
+    "stylesheets",
+    "compositing",
+    "clipping",
+    "masking",
+    "filters",
+  ]
+  let configs = [
+    "{\"count\":128,\"size\":32,\"seed\":7}",
+    "{\"size\":512,\"grid\":32}",
+    "{\"size\":1024,\"grid\":32}",
+    "{\"size\":512,\"grid\":16}",
+    "{\"size\":512,\"grid\":8}",
+    "{\"size\":512,\"rows\":32,\"columns\":64}",
+    "{\"size\":512,\"grid\":8}",
+    "{\"size\":512,\"grid\":8}",
+    "{\"size\":512,\"grid\":8}",
+    "{\"size\":512,\"grid\":8}",
+  ]
+  let hashes = [
+    "6fe34e85db8f6d9b19c7417050aca4fe401c75507a607cb882e524cc63fed082",
+    "dc4b7a27e5194ea68307cfd3f81e76e9b1f86b8cc0216d77795bb0ad5a0f1604",
+    "c9892aaeb92b1464e7427c1c22494d7e342e3a9d94b125bab1939c20e81964c7",
+    "f0b4b7973efa8f6a6f25bdb609d02abb4f811f1ae89e751f9dfa92f20e9e120c",
+    "a3bb208214276b522b6c15bcb0e9d829c8f6809459f8520e5edee179efffd5a8",
+    "d7bdeb1de19e9c43890c93602e61a967a610d67bd94df33d58444c88b3bc3c6d",
+  ]
+  let lengths: [usize; 6] = [61557, 53028, 163569, 60863, 22171, 186884]
+  let mut n: usize = 0
+  while n < names.length {
+    let config = run B.parse(String.utf8Bytes(configs[n]))
+    let first = run G.generate(names[n], &config)
+    let second = run G.generate(names[n], &config)
+    run Testing.expect(
+      first.length() == second.length() && first.length() > 0,
+      "all generators produce deterministic nonempty workloads",
+    )
+    let mut paths = List<Path>.make()
+    let mut bytes: usize = 0
+    let mut i: usize = 0
+    while i < first.length() {
+      let a = &first.asSlice()[i]
+      let b = &second.asSlice()[i]
+      run Testing.expect(
+        String.view(&a.name) == String.view(&b.name)
+          && String.view(&a.text) == String.view(&b.text),
+        "generated serialized SVG is deterministic",
+      )
+      if n == 0 && i > 0 {
+        run Testing.expect(
+          String.view(&a.text) != String.view(&first.asSlice()[i - 1].text),
+          "icons are distinct",
+        )
+      }
+      let path = run Path.join(directory, String.view(&a.name))
+      run FileSystem.writeFile(&path, String.utf8Bytes(String.view(&a.text)))
+      bytes = bytes + String.byteLength(String.view(&a.text))
+      run paths.append(move path)
+      i = i + 1
+    }
+    if n < hashes.length {
+      let hash = run W.workloadHash(paths.asSlice())
+      run Testing.expect(
+        String.view(&hash) == hashes[n] && bytes == lengths[n],
+        "generated workload retains historical bytes and hash",
+      )
+    }
+    n = n + 1
+  }
+  let left = run Path.join(directory, "left/a.svg")
+  let right = run Path.join(directory, "right/a.svg")
+  run FileSystem.writeFileWithParents(&left, b"<svg/>")
+  run FileSystem.writeFileWithParents(&right, b"<svg/>")
+  let leftFiles = [move left]
+  let rightFiles = [move right]
+  let a = run W.workloadHash(&leftFiles)
+  let b = run W.workloadHash(&rightFiles)
+  run Testing.expect(String.view(&a) == String.view(&b), "workload hash ignores cache location")
+  run FileSystem.writeFile(&rightFiles[0], b"<svg ><path/></svg>")
+  let changed = run W.workloadHash(&rightFiles)
+  run Testing.expect(String.view(&a) != String.view(&changed), "workload hash includes content")
+}
+
+test effect fn deterministicGeometryAndHistoricalHashes() -> ()
+  ! TaskError | FileError | OutOfMemoryError | WriterError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut filesystem = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let directory = run temporary()
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let outcome = run Effect.result(geometryCases(&directory))
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.removeDirectoryRecursively(&directory)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move outcome {
+    Result<
+      (),
+      TaskError | FileError | OutOfMemoryError | WriterError | AssertionError<'static>
+    >.Success {
+      ..
+    } => {}
+    Result<
+      (),
+      TaskError | FileError | OutOfMemoryError | WriterError | AssertionError<'static>
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+}
+
+effect fn preparationCases(directory: &Path) -> ()
+  ! TaskError
+    | ProcessError
+    | FileError
+    | HostInputError
+    | OutOfMemoryError
+    | WriterError
+    | AssertionError<'static>
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let manifest = run B.parse(
+    b"{\"workloads\":{\"iconset\":{\"config\":{\"size\":32,\"count\":8,\"seed\":7}},\"tiger\":{}}}",
+  )
+  let selected = [run String.copy("iconset")]
+  let first = run W.prepare(&manifest, directory, false, &selected)
+  run Testing.expect(
+    first.length() == 1 && String.view(&first.asSlice()[0].name) == "iconset",
+    "preparation honors selected workload",
+  )
+  let path = &first.asSlice()[0].files.asSlice()[0]
+  let original = run FileSystem.readFile(path)
+  run FileSystem.writeFile(path, b"<svg/>")
+  let _second = run W.prepare(&manifest, directory, false, &selected)
+  let repaired = run FileSystem.readFile(path)
+  run Testing.expect(
+    B.sameBytes(original.asSlice(), repaired.asSlice()),
+    "preparation replaces mutated cache content",
+  )
+  let tiger = [run String.copy("tiger")]
+  run Testing.expect(
+    failed(run Effect.result(W.prepare(&manifest, directory, false, &tiger))),
+    "missing Tiger requires explicit download permission",
+  )
+  let binary = run Path.join(directory, "protocol")
+  let input = run Path.join(directory, "input.svg")
+  let timing = H.Timing { iterations: 3, warmup: 1, samples: 1, timeout: 10.0, callgrind: false }
+  let invoked = run H.invoke(&binary, "render", &input, &timing)
+  run Testing.expect(
+    (run B.uint(run B.field(&invoked.result, "elapsed_ns"))) == 123 && invoked.wall > 0.0,
+    "native invocation passes protocol arguments and reports wall time",
+  )
+}
+
+test effect fn preparationAndNativeInvocation() -> ()
+  ! TaskError
+    | ProcessError
+    | FileError
+    | HostInputError
+    | OutOfMemoryError
+    | WriterError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut filesystem = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let directory = run temporary()
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let directoryText = run B.pathText(&directory) |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut host = TestHost {
+    directory: run String.copy(directoryText) |> Effect.provideMut<Allocator>(&mut allocator),
+  }
+  let limiter = run Path.join(
+    &directory,
+    if Support.operatingSystem() == "darwin" {
+      "gtimeout"
+    } else {
+      "timeout"
+    },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.writeFile(&limiter, b"") |> Effect.provideMut<FileSystem>(&mut filesystem)
+  let mut process = TestProcess { calls: 0, protocol: true }
+  let outcome = run Effect.result(preparationCases(&directory))
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.removeDirectoryRecursively(&directory)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move outcome {
+    Result<
+      (),
+      TaskError
+        | ProcessError
+        | FileError
+        | HostInputError
+        | OutOfMemoryError
+        | WriterError
+        | AssertionError<'static>
+    >.Success {
+      ..
+    } => {}
+    Result<
+      (),
+      TaskError
+        | ProcessError
+        | FileError
+        | HostInputError
+        | OutOfMemoryError
+        | WriterError
+        | AssertionError<'static>
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+}
+
+effect fn decodeUrl(url: string) -> Bytes
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let comma = String.find(url, ",") |> Option<usize>.unwrapOr(String.byteLength(url))
+  let raw = String.utf8Bytes(String.slice(url, comma + 1, String.byteLength(url) - comma - 1))
+  let length = Base64.decodedLength(raw) |> Result<usize, Base64Error>.unwrapOr(0)
+  let mut bytes = run Bytes.zeroed(length)
+  let _decoded = Base64.decodeInto(bytes.asMutSlice(), raw)
+  return move bytes
+}
+
+fn be32(bytes: &[u8], at: usize) -> usize {
+  return u8.toUsize(bytes[at]) * 16777216 + u8.toUsize(bytes[at + 1]) * 65536
+    + u8.toUsize(bytes[at + 2]) * 256
+    + u8.toUsize(bytes[at + 3])
+}
+
+effect fn samplingPixels() -> ()
+  ! TaskError | OutOfMemoryError | DecodeError | AssertionError<'static>
+  ? &mut Allocator {
+  let url = run Images.samplingSource(3, 2)
+  let data = run decodeUrl(String.view(&url))
+  let bytes = data.asSlice()
+  run Testing.expect(
+    be32(bytes, 16) == 48 && be32(bytes, 20) == 32,
+    "sampling expansion preserves dimensions",
+  )
+  let mut compressed = Bytes.make()
+  let mut at: usize = 8
+  while at < bytes.length {
+    let length = be32(bytes, at)
+    if B.sameBytes(Slice.view(bytes, at + 4, 4), b"IDAT") {
+      run compressed.append(Slice.view(bytes, at + 8, length))
+    }
+    at = at + length + 12
+  }
+  let mut decoder = run Decoder.make(
+    CompressionFormat.Zlib,
+    Limits {
+      maxInputBytes: 10000000,
+      maxOutputBytes: 10000000,
+      maxMemoryBytes: 1000000,
+      maxMembers: 1,
+      maxHeaderBytes: 65536,
+    },
+  )
+  let mut rows = run Bytes.zeroed((48 * 3 + 1) * 32)
+  let decoded = decoder.step(compressed.asSlice(), rows.asMutSlice(), true)
+  run Testing.expect(!failed(move decoded), "sampling PNG data inflates")
+  let pixels = rows.asSlice()
+  run Testing.expect(
+    B.sameBytes(Slice.view(pixels, 1, 9), &[0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    "expanded first pixel spans three pixels",
+  )
+  run Testing.expect(
+    B.sameBytes(Slice.view(pixels, 10, 3), &[17, 0, 31]),
+    "expanded next RGB pixel uses independent source coordinates",
+  )
+  run Testing.expect(
+    B.sameBytes(Slice.view(pixels, 0, 145), Slice.view(pixels, 145, 145)),
+    "expanded first row repeats twice",
+  )
+}
+
+test effect fn independentlyExpandedSamplingPixels() -> ()
+  ! TaskError | OutOfMemoryError | DecodeError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  run samplingPixels() |> Effect.provideMut<Allocator>(&mut allocator)
+}
+
+effect fn imageCases(directory: &Path) -> ()
+  ! TaskError
+    | ProcessError
+    | FileError
+    | HostInputError
+    | OutOfMemoryError
+    | WriterError
+    | XmlError
+    | AssertionError<'static>
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let nested = run Path.join(directory, "nested")
+  let oriented = run Path.join(directory, "orientation")
+  let sampling = run Path.join(directory, "sampling")
+  let images = run Path.join(directory, "images")
+  run Images.generateNested(&nested)
+  run Images.generateOrientation(&oriented)
+  run Images.generateSampling(&sampling)
+  run Images.generateImages(&images)
+  let nestedFiles = run FileSystem.listDirectory(&nested)
+  let orientedFiles = run FileSystem.listDirectory(&oriented)
+  let samplingFiles = run FileSystem.listDirectory(&sampling)
+  let imageFiles = run FileSystem.listDirectory(&images)
+  run Testing.expect(
+    nestedFiles.length() == 6 && orientedFiles.length() == 6 && samplingFiles.length() == 6
+      && imageFiles.length() == 4,
+    "all generated image workload/control files are retained",
+  )
+  let variedPath = run Path.join(&nested, "embedded-viewports.svg")
+  let variedBytes = run FileSystem.readFile(&variedPath)
+  let varied = run XmlDocument.parse(variedBytes.asSlice())
+  let mut count: usize = 0
+  let mut child = varied.firstChild(varied.root())
+  while let Option<XmlNodeId>.Some { value } = child {
+    if varied.kind(value) == XmlNodeKind.Element {
+      count = count + 1
+      if count == 16 {
+        run Testing.expect(
+          (varied.attribute(value, "", "width") |> Option<string>.unwrapOr("")) == "23",
+          "varied nested viewport widths are preserved",
+        )
+      }
+    }
+    child = varied.nextSibling(value)
+  }
+  run Testing.expect(count == 16, "nested shared and varied controls contain sixteen instances")
+  let controlPath = run Path.join(&oriented, "control-1.svg")
+  let controlBytes = run FileSystem.readFile(&controlPath)
+  let control = run XmlDocument.parse(controlBytes.asSlice())
+  let image = control.firstChild(control.root())
+    |> Option<XmlNodeId>.unwrapOr(XmlNodeId { index: 0 })
+  let url = control.attribute(image, "", "href") |> Option<string>.unwrapOr("")
+  let embeddedBytes = run decodeUrl(url)
+  let embedded = run XmlDocument.parse(embeddedBytes.asSlice())
+  let expected = ["magenta", "blue", "red", "yellow", "cyan", "lime"]
+  count = 0
+  child = embedded.firstChild(embedded.root())
+  while let Option<XmlNodeId>.Some { value } = child {
+    if embedded.kind(value) == XmlNodeKind.Element {
+      run Testing.expect(
+        (embedded.attribute(value, "", "fill") |> Option<string>.unwrapOr("")) == expected[count],
+        "orientation control is independently pre-oriented",
+      )
+      count = count + 1
+    }
+    child = embedded.nextSibling(value)
+  }
+  run Testing.expect(count == 6, "orientation control retains all six source cells")
+  let names = ["jpeg-1.svg", "jpeg-64.svg", "png-1.svg", "png-64.svg"]
+  let mut n: usize = 0
+  while n < names.length {
+    let file = run Path.join(&images, names[n])
+    let bytes = run FileSystem.readFile(&file)
+    let document = run XmlDocument.parse(bytes.asSlice())
+    child = document.firstChild(document.root())
+    let mut firstUrl = String.make()
+    count = 0
+    while let Option<XmlNodeId>.Some { value } = child {
+      if document.kind(value) == XmlNodeKind.Element {
+        let url = document.attribute(value, "", "href") |> Option<string>.unwrapOr("")
+        if count == 0 {
+          firstUrl = run String.copy(url)
+        }
+        run Testing.expect(url == String.view(&firstUrl), "all placements share one encoded image")
+        count = count + 1
+      }
+      child = document.nextSibling(value)
+    }
+    let expectedCount: usize = if n % 2 == 0 {
+      1
+    } else {
+      64
+    }
+    run Testing.expect(
+      count == expectedCount,
+      "image workloads retain one and sixty-four placements",
+    )
+    let decoded = run decodeUrl(String.view(&firstUrl))
+    if n >= 2 {
+      run Testing.expect(
+        be32(decoded.asSlice(), 16) == 512 && be32(decoded.asSlice(), 20) == 384
+          && decoded.asSlice()[25] == 0,
+        "PNG workload is 512x384 grayscale",
+      )
+    } else {
+      run Testing.expect(
+        decoded.asSlice()[0] == 255 && decoded.asSlice()[1] == 216,
+        "JPEG workload retains JPEG payload",
+      )
+    }
+    n = n + 1
+  }
+}
+
+test effect fn allImageControlsAndPlacements() -> ()
+  ! TaskError
+    | ProcessError
+    | FileError
+    | HostInputError
+    | OutOfMemoryError
+    | WriterError
+    | XmlError
+    | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut filesystem = run MachineFileSystem.make() |> Effect.provideMut<Allocator>(&mut allocator)
+  let directory = run temporary()
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let directoryText = run B.pathText(&directory) |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut host = TestHost {
+    directory: run String.copy(directoryText) |> Effect.provideMut<Allocator>(&mut allocator),
+  }
+  let limiter = run Path.join(
+    &directory,
+    if Support.operatingSystem() == "darwin" {
+      "gtimeout"
+    } else {
+      "timeout"
+    },
+  )
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let cjpeg = run Path.join(&directory, "cjpeg") |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.writeFile(&limiter, b"") |> Effect.provideMut<FileSystem>(&mut filesystem)
+  run FileSystem.writeFile(&cjpeg, b"") |> Effect.provideMut<FileSystem>(&mut filesystem)
+  let mut process = TestProcess { calls: 0, protocol: false }
+  let outcome = run Effect.result(imageCases(&directory))
+    |> Effect.provideMut<HostInput>(&mut host)
+    |> Effect.provideMut<ChildProcess>(&mut process)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  run FileSystem.removeDirectoryRecursively(&directory)
+    |> Effect.provideMut<FileSystem>(&mut filesystem)
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  match move outcome {
+    Result<
+      (),
+      TaskError
+        | ProcessError
+        | FileError
+        | HostInputError
+        | OutOfMemoryError
+        | WriterError
+        | XmlError
+        | AssertionError<'static>
+    >.Success {
+      ..
+    } => {}
+    Result<
+      (),
+      TaskError
+        | ProcessError
+        | FileError
+        | HostInputError
+        | OutOfMemoryError
+        | WriterError
+        | XmlError
+        | AssertionError<'static>
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+}

@@ -108,14 +108,14 @@ Geometry, codecs and CPU/GPU backends are pinned [lib-graphics](https://github.c
 From the repository root:
 
 ```sh
-node modules/scripts/check
+silk task check
 ```
 
 The gate type-checks and tests every SVG package. It then builds the release CLI and renders the
 project's own reference tests (including 53 exact-RGBA painting tests), malformed inputs, and a
 curated subset of the resvg suite. Every result is compared with a reviewed expectation, so a
 known failure is recorded as one and never counted as a pass. It runs in the `svg` CI
-workflow. `node modules/scripts/test-gpu` compares SVG CPU/GPU rendering; unrelated
+workflow. `silk task test-gpu` compares SVG CPU/GPU rendering; unrelated
 graphics package gates stay in lib-graphics. [Testing](docs/testing.md) covers
 specification/suite caches, expectations and the reftest runner.
 

@@ -1,0 +1,390 @@
+import corpora { CorpusError, CorpusFailure }
+import corpora as C
+import corpora_encoding as Encoding
+import task_support as Support
+import bench_process as Process
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator }
+import silk.system.filesystem { FileSystem, Path }
+import silk.system.child_process { ChildProcess }
+import silk.system.host_input { HostInput }
+import silk.text.string { String }
+import silk.num.u8
+
+fn at(source: &[u8], offset: usize, token: &[u8]) -> bool {
+  if offset > source.length || token.length > source.length - offset {
+    return false
+  }
+  let mut index: usize = 0
+  while index < token.length {
+    if source[offset + index] != token[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+fn xmlSpace(source: &[u8], offset: usize, version11: bool) -> usize {
+  if offset >= source.length {
+    return 0
+  }
+  let c = source[offset]
+  if c == 9 || c == 10 || c == 13 || c == 32 {
+    return 1
+  }
+  if version11 && at(source, offset, b"\xc2\x85") {
+    return 2
+  }
+  if version11 && at(source, offset, b"\xe2\x80\xa8") {
+    return 3
+  }
+  return 0
+}
+
+fn classSpace(source: &[u8], offset: usize) -> usize {
+  let c = source[offset]
+  if (c >= 9 && c <= 13) || c == 32 {
+    return 1
+  }
+  if at(source, offset, b"\xc2\xa0") {
+    return 2
+  }
+  if at(source, offset, b"\xe1\x9a\x80") || at(source, offset, b"\xe2\x80\xaf")
+    || at(source, offset, b"\xe2\x81\x9f")
+    || at(source, offset, b"\xe3\x80\x80")
+    || at(source, offset, b"\xef\xbb\xbf") {
+    return 3
+  }
+  if offset + 2 < source.length && c == 226 && source[offset + 1] == 128
+    && ((source[offset + 2] >= 128 && source[offset + 2] <= 138) || source[offset + 2] == 168
+      || source[offset + 2] == 169) {
+    return 3
+  }
+  return 0
+}
+
+fn hasWait(value: string) -> bool {
+  let bytes = String.utf8Bytes(value)
+  let mut begin: usize = 0
+  let mut index: usize = 0
+  while index < bytes.length {
+    let space = classSpace(bytes, index)
+    if space != 0 {
+      if String.slice(value, begin, index - begin) == "reftest-wait" {
+        return true
+      }
+      index = index + space
+      begin = index
+    } else {
+      index = index + 1
+    }
+  }
+  return String.slice(value, begin, bytes.length - begin) == "reftest-wait"
+}
+
+fn local(name: string) -> string {
+  let bytes = String.utf8Bytes(name)
+  let mut index: usize = 0
+  let mut start: usize = 0
+  while index < bytes.length {
+    if bytes[index] == 58 {
+      start = index + 1
+    }
+    index = index + 1
+  }
+  return String.slice(name, start, bytes.length - start)
+}
+
+effect fn through(source: &[u8], begin: usize, token: &[u8]) -> usize
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut index = begin
+  while index < source.length {
+    if at(source, index, token) {
+      return index + token.length
+    }
+    index = index + 1
+  }
+  fail CorpusError { message: run String.copy("unterminated XML markup") }
+}
+
+effect fn attribute(source: &[u8], version11: bool) -> String
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut output = Bytes.make()
+  let mut index: usize = 0
+  while index < source.length {
+    let spaces = xmlSpace(source, index, version11)
+    if spaces != 0 {
+      run Bytes.append(&mut output, b" ")
+      if source[index] == 13 && index + 1 < source.length && source[index + 1] == 10 {
+        index = index + 1
+      } else if source[index] == 13 && version11 && at(source, index + 1, b"\xc2\x85") {
+        index = index + 2
+      }
+      index = index + spaces
+    } else if source[index] == 38 {
+      let end = run through(source, index + 1, b";")
+      let entity = Slice.view<u8>(source, index + 1, end - index - 2)
+      let text = unsafe String.fromUtf8Unchecked(entity)
+      let mut scalar: u32 = 0
+      if text == "amp" {
+        scalar = 38
+      } else if text == "lt" {
+        scalar = 60
+      } else if text == "gt" {
+        scalar = 62
+      } else if text == "apos" {
+        scalar = 39
+      } else if text == "quot" {
+        scalar = 34
+      } else if entity.length > 1 && entity[0] == 35 {
+        let hex = entity[1] == 120
+        let mut digit: usize = if hex {
+          2
+        } else {
+          1
+        }
+        let base: u32 = if hex {
+          16
+        } else {
+          10
+        }
+        if digit == entity.length {
+          run C.reject("empty XML character reference")
+        }
+        while digit < entity.length {
+          let c = entity[digit]
+          let value: u32 = if c >= 48 && c <= 57 {
+            u8.toU32(c - 48)
+          } else if hex && c >= 65 && c <= 70 {
+            u8.toU32(c - 55)
+          } else if hex && c >= 97 && c <= 102 {
+            u8.toU32(c - 87)
+          } else {
+            255
+          }
+          if value >= base || scalar > (1114111 - value) / base {
+            run C.reject("invalid XML character reference")
+          }
+          scalar = scalar * base + value
+          digit = digit + 1
+        }
+      } else {
+        run C.reject("unknown XML entity")
+      }
+      if scalar == 0 || scalar > 1114111 || (scalar >= 55296 && scalar <= 57343) {
+        run C.reject("invalid XML character reference")
+      }
+      run Encoding.scalar(&mut output, scalar)
+      index = end
+    } else {
+      run Bytes.append(&mut output, Slice.view<u8>(source, index, 1))
+      index = index + 1
+    }
+  }
+  return run String.copy(unsafe String.fromUtf8Unchecked(Bytes.asSlice(&output)))
+}
+
+fn upperMatch(source: &[u8], offset: usize, token: &[u8]) -> bool {
+  if token.length > source.length - offset {
+    return false
+  }
+  let mut index: usize = 0
+  while index < token.length {
+    let c = source[offset + index]
+    if (if c >= 97 && c <= 122 {
+      c - 32
+    } else {
+      c
+    })
+      != token[index] {
+      return false
+    }
+    index = index + 1
+  }
+  return true
+}
+
+// Xerces validates all XML and namespace syntax; this scanner only classifies SVG eligibility.
+pub effect fn eligible(source: &[u8]) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let text = unsafe String.fromUtf8Unchecked(source)
+  let mut i: usize = 0
+  while i < source.length {
+    if source[i] == 60
+      && (upperMatch(source, i, b"<!DOCTYPE") || upperMatch(source, i, b"<!ENTITY")) {
+      run C.reject("DTD/entity-dependent WPT needs manual adaptation")
+    }
+    i = i + 1
+  }
+  let declarationEnd = if at(source, 0, b"<?xml") {
+    run through(source, 5, b"?>")
+  } else {
+    0
+  }
+  let declaration = String.slice(text, 0, declarationEnd)
+  let version11 = String.contains(declaration, "\"1.1\"") || String.contains(declaration, "'1.1'")
+  let mut root = false
+  i = 0
+  while i < source.length {
+    if source[i] != 60 {
+      i = i + 1
+      continue
+    }
+    if at(source, i, b"<!--") {
+      i = run through(source, i + 4, b"-->")
+      continue
+    }
+    if at(source, i, b"<![CDATA[") {
+      i = run through(source, i + 9, b"]]>")
+      continue
+    }
+    if at(source, i, b"<?") {
+      i = run through(source, i + 2, b"?>")
+      continue
+    }
+    if at(source, i, b"</") {
+      i = run through(source, i + 2, b">")
+      continue
+    }
+    i = i + 1
+    let start = i
+    while i < source.length && source[i] != 62 && source[i] != 47
+      && xmlSpace(source, i, version11) == 0 {
+      i = i + 1
+    }
+    let name = String.slice(text, start, i - start)
+    let localName = local(name)
+    if localName == "script" {
+      run C.reject("script or event handler required")
+    }
+    if localName == "foreignObject" {
+      run C.reject("foreignObject HTML layout requires manual adaptation")
+    }
+    let first = !root
+    let mut namespace = String.make()
+    let mut namespaceName = String.make()
+    if first {
+      namespaceName = run String.copy("xmlns")
+      if localName != "svg" {
+        run C.reject("HTML layout or non-SVG document required")
+      }
+      let prefixLength = String.utf8Bytes(name).length - String.utf8Bytes(localName).length
+      if prefixLength != 0 {
+        run String.append(&mut namespaceName, ":")
+        run String.append(&mut namespaceName, String.slice(name, 0, prefixLength - 1))
+      }
+    }
+    while i < source.length {
+      let spaces = xmlSpace(source, i, version11)
+      if spaces != 0 {
+        i = i + spaces
+        continue
+      }
+      if source[i] == 62 {
+        i = i + 1
+        break
+      }
+      if source[i] == 47 && i + 1 < source.length && source[i + 1] == 62 {
+        i = i + 2
+        break
+      }
+      let attrStart = i
+      while i < source.length && source[i] != 61 && xmlSpace(source, i, version11) == 0 {
+        i = i + 1
+      }
+      let attr = String.slice(text, attrStart, i - attrStart)
+      while i < source.length && xmlSpace(source, i, version11) != 0 {
+        i = i + xmlSpace(source, i, version11)
+      }
+      if i >= source.length || source[i] != 61 {
+        run C.reject("malformed XML attribute")
+      }
+      i = i + 1
+      while i < source.length && xmlSpace(source, i, version11) != 0 {
+        i = i + xmlSpace(source, i, version11)
+      }
+      if i >= source.length || (source[i] != 34 && source[i] != 39) {
+        run C.reject("malformed XML attribute quote")
+      }
+      let quote = source[i]
+      i = i + 1
+      let valueStart = i
+      while i < source.length && source[i] != quote {
+        i = i + 1
+      }
+      if i == source.length {
+        run C.reject("unterminated XML attribute")
+      }
+      if String.startsWith(local(attr), "on") {
+        run C.reject("script or event handler required")
+      }
+      if attr == "class" || (first && attr == String.view(&namespaceName)) {
+        let value = run attribute(Slice.view<u8>(source, valueStart, i - valueStart), version11)
+        if attr == "class" && hasWait(String.view(&value)) {
+          run C.reject("script-driven reftest-wait required")
+        }
+        if first && attr == String.view(&namespaceName) {
+          namespace = move value
+        }
+      }
+      i = i + 1
+    }
+    if first && String.view(&namespace) != "http://www.w3.org/2000/svg" {
+      run C.reject("HTML layout or non-SVG document required")
+    }
+    root = true
+  }
+  if !root {
+    run C.reject("missing SVG document element")
+  }
+}
+
+effect fn validateIn(source: &[u8], directory: &Path) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  let path = run Path.join(directory, "input.xml")
+  run FileSystem.writeFile(&path, source)
+  let validator = run Support.path(
+    if Support.operatingSystem() == "windows" {
+      ".cache/xerces/bin/SAX2Count.exe"
+    } else {
+      ".cache/xerces/bin/SAX2Count"
+    },
+  )
+  let executable = run C.nativePath(&validator)
+  let filename = run C.nativePath(&path)
+  let args = ["-v=never", "-s", "-i", unsafe String.fromUtf8Unchecked(Bytes.asSlice(&filename))]
+  let result = run Process.execute(
+    unsafe String.fromUtf8Unchecked(Bytes.asSlice(&executable)),
+    &args,
+    30.0,
+    true,
+  )
+  if result.status != 0 {
+    run C.reject("malformed XML or invalid XML namespace bindings")
+  }
+}
+
+pub effect fn validate(source: &[u8]) -> ()
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut HostInput | &mut Allocator {
+  run eligible(source)
+  let scratch = run Support.path("build/svg/.scratch")
+  run FileSystem.createDirectoriesRecursively(&scratch)
+  let temporary = run FileSystem.temporaryDirectory(&scratch, "xml-validation-")
+  let result = run Effect.result(validateIn(source, &temporary.path))
+  run FileSystem.releaseIgnored(move temporary)
+  match move result {
+    Result<(), CorpusFailure>.Success { .. } => {}
+    Result<(), CorpusFailure>.Failure { error } => {
+      fail move error
+    }
+  }
+}

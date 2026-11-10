@@ -21,8 +21,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -30,18 +28,28 @@ jobs:
             ~/.silk
             modules/.cache
             modules/tests/.cache
-          key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock.json', '**/silk.toml', 'modules/*.lock.json', 'modules/tests/suites.lock.json') }}
+          key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bootstrap/src/tasks.silk', '**/silk.toml', 'modules/*.lock.json', 'modules/tests/suites.lock.json') }}
       - name: Bootstrap pinned Silk
-        run: node scripts/install-silk.mjs
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
+      # Tasks are compiled programs: provision Clang 22 before any task.
+      - name: Bootstrap Linux Clang
+        run: |
+          test -x /usr/bin/clang-22 && test -x /usr/lib/llvm-22/bin/ld.lld || { sudo apt-get update && sudo apt-get install -y clang-22 lld-22; }
+          echo "SILK_CLANG=/usr/bin/clang-22" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
       - name: Fetch exact dependency revisions serially
         run: silk check --manifest-path modules/gpu/tests/silk.toml
+      - name: Install task prerequisites and corpus fonts
+        run: sudo apt-get update && sudo apt-get install -y cmake git g++ coreutils libarchive-dev libjpeg-turbo-progs fonts-dejavu-core fonts-freefont-ttf
+      - run: silk task --manifest-path bootstrap/silk.toml install-lexbor
+      - run: silk task --manifest-path bootstrap/silk.toml install-xerces
       - name: Prepare LLVM and lavapipe
-        run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs" --linux-gpu
-      - name: Install corpus fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
-      - run: node modules/scripts/check
-      - run: node modules/scripts/test-gpu
-      - run: node scripts/check-wasm.mjs
+        run: silk task setup-ci --linux-gpu
+      - run: silk task check
+      - run: silk task test-gpu
+      - run: silk task check-wasm
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -57,17 +65,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: node scripts/install-silk.mjs
+      - name: Bootstrap pinned Silk
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
+      - name: Bootstrap Linux Clang
+        run: |
+          test -x /usr/bin/clang-22 && test -x /usr/lib/llvm-22/bin/ld.lld || { sudo apt-get update && sudo apt-get install -y clang-22 lld-22; }
+          echo "SILK_CLANG=/usr/bin/clang-22" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
       - run: silk check --manifest-path modules/gpu/tests/silk.toml
-      - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
-      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-freefont-ttf
+      - run: sudo apt-get update && sudo apt-get install -y cmake git g++ coreutils libarchive-dev fonts-dejavu-core fonts-freefont-ttf
+      - run: silk task --manifest-path bootstrap/silk.toml install-lexbor
+      - run: silk task --manifest-path bootstrap/silk.toml install-xerces
+      - run: silk task setup-ci
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: modules/tests/.cache/suites
           key: svg-conformance-${{ hashFiles('modules/tests/suites.lock.json') }}
-      - run: node scripts/conformance.mjs
+      - run: silk task conformance
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -84,16 +100,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: node scripts/install-silk.mjs
+      - name: Bootstrap pinned Silk
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
+      - name: Bootstrap Linux Clang
+        run: |
+          test -x /usr/bin/clang-22 && test -x /usr/lib/llvm-22/bin/ld.lld || { sudo apt-get update && sudo apt-get install -y clang-22 lld-22; }
+          echo "SILK_CLANG=/usr/bin/clang-22" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
       - run: silk check --manifest-path modules/gpu/tests/silk.toml
-      - run: node "$(node scripts/repository-root.mjs lib-native)/scripts/setup-ci.mjs"
+      - run: sudo apt-get update && sudo apt-get install -y cmake git g++ coreutils libarchive-dev libjpeg-turbo-progs
+      - run: silk task --manifest-path bootstrap/silk.toml install-lexbor
+      - run: silk task --manifest-path bootstrap/silk.toml install-xerces
+      - run: silk task setup-ci
       - name: Install recorded Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
       - run: silk build --release --manifest-path modules/bench/silk.toml
-      - run: node modules/scripts/rust-bench/build
-      - run: node modules/scripts/bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+      - run: silk task benchmarks rust-build
+      - run: silk task benchmarks bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

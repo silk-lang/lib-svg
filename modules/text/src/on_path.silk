@@ -145,11 +145,11 @@ pub effect fn polylines(path: &Path, closes: &mut List<bool>) -> List<List<Point
             run chord(&mut subpaths, to)
             current = to
           }
-          Segment.QuadraticTo { control, to } => {
+          Segment.QuadraticTo { to, .. } => {
             run curve(&mut subpaths, segment, current)
             current = to
           }
-          Segment.CubicTo { control1, control2, to } => {
+          Segment.CubicTo { to, .. } => {
             run curve(&mut subpaths, segment, current)
             current = to
           }
@@ -162,11 +162,11 @@ pub effect fn polylines(path: &Path, closes: &mut List<bool>) -> List<List<Point
                   run chord(&mut subpaths, to)
                   from = to
                 }
-                Segment.QuadraticTo { control, to } => {
+                Segment.QuadraticTo { to, .. } => {
                   run curve(&mut subpaths, piece, from)
                   from = to
                 }
-                Segment.CubicTo { control1, control2, to } => {
+                Segment.CubicTo { to, .. } => {
                   run curve(&mut subpaths, piece, from)
                   from = to
                 }

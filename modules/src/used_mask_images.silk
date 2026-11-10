@@ -276,11 +276,11 @@ pub effect fn place(
   // A third step restores the aspect ratio when only one axis rounds and the
   // other mask-size component is auto.
   let autoX = match &sizeValue {
-    LayerSize.Explicit { x, y } => x.isNone()
+    LayerSize.Explicit { x, .. } => x.isNone()
     _ => false
   }
   let autoY = match &sizeValue {
-    LayerSize.Explicit { x, y } => y.isNone()
+    LayerSize.Explicit { y, .. } => y.isNone()
     _ => false
   }
   if repeat.x == Repeat.Round && repeat.y != Repeat.Round && autoY && original[0] > 0.0 {
@@ -427,7 +427,7 @@ effect fn resolveStops(
   let mut i: usize = 0
   while i < count {
     let specified = match &source[i] {
-      CssStop.ColorStop { color, position } => match &position {
+      CssStop.ColorStop { position, .. } => match &position {
         Option<ExprId>.Some { value } => Option<f64>.some(
           run length(&mut engine.*, style, value, basis),
         )
@@ -499,14 +499,14 @@ effect fn resolveStops(
       _ => 0.0
     }
     match &source[i] {
-      CssStop.ColorStop { color, position: ignored } => {
+      CssStop.ColorStop { color, .. } => {
         run result.append(Stop { position: position, color: run stopColor(color, current) })
       }
-      CssStop.Hint { position: ignored } => {
+      CssStop.Hint { .. } => {
         // A hint always sits between two color stops.
         let before = result.asSlice()[result.length() - 1]
         let afterColor = match &source[i + 1] {
-          CssStop.ColorStop { color, position: unused } => run stopColor(color, current)
+          CssStop.ColorStop { color, .. } => run stopColor(color, current)
           _ => {
             fail RenderError.InvalidGeometry
           }

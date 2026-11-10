@@ -1,0 +1,998 @@
+import silk.collections.slice { Slice }
+// Independent SVG 2 CR paint-server fixture oracles. Do not use renderer mesh or hatch
+// routines here: these references must detect errors in the implementation under test.
+import fixtures_common as common
+import fixtures_common { FixtureError, Capture }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.io.writer { Writer, WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.num.f64
+import silk.num.i32
+import silk.num.u8
+import silk.num.usize
+import silk.text.format { Format, ParseError }
+import silk.text.string { String }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.json.value { Value }
+import silk.json.scanner { JsonError }
+
+const SPEC: string = "https://www.w3.org/TR/2016/CR-SVG2-20160915/pservers.html#"
+
+struct Mesh<'a> {
+  xs: &'a [f64],
+  ys: &'a [f64],
+  colors: List<[f64; 4]>,
+  du: List<[f64; 4]>,
+  dv: List<[f64; 4]>,
+  bicubic: bool,
+}
+
+// Derivatives per unit chord length, independently following MeshPatchPainting.
+fn slope(
+  points: &[f64],
+  colors: &[[f64; 4]],
+  channel: usize,
+  offset: usize,
+  stride: usize,
+  k: usize,
+) -> f64 {
+  let length = f64.abs(points[k + 1] - points[k])
+  if length == 0.0 {
+    return 0.0
+  }
+  return (colors[offset + (k + 1) * stride][channel] - colors[offset + k * stride][channel])
+    / length
+}
+
+fn monotone(
+  points: &[f64],
+  colors: &[[f64; 4]],
+  channel: usize,
+  offset: usize,
+  stride: usize,
+  out: &mut [[f64; 4]],
+) -> () {
+  let n = points.length - 1
+  if n == 1 {
+    let delta = slope(points, colors, channel, offset, stride, 0)
+    out[offset][channel] = delta
+    out[offset + stride][channel] = delta
+    return
+  }
+  let mut k: usize = 1
+  while k < n {
+    let before = slope(points, colors, channel, offset, stride, k - 1)
+    let after = slope(points, colors, channel, offset, stride, k)
+    let mut d = (before + after) / 2.0
+    if before * after < 0.0 {
+      d = 0.0
+    } else {
+      if f64.abs(d) > f64.abs(3.0 * before) {
+        d = 3.0 * before
+      }
+      if f64.abs(d) > f64.abs(3.0 * after) {
+        d = 3.0 * after
+      }
+    }
+    out[offset + k * stride][channel] = d
+    k = k + 1
+  }
+  out[offset][channel] = 2.0 * slope(points, colors, channel, offset, stride, 0)
+    - out[offset + stride][channel]
+  out[offset + n * stride][channel] = 2.0 * slope(points, colors, channel, offset, stride, n - 1)
+    - out[offset + (n - 1) * stride][channel]
+}
+
+effect fn makeMesh<'a>(xs: &'a [f64], ys: &'a [f64], rgb: &[[u8; 3]], bicubic: bool) -> Mesh<'a>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut colors = run List<[f64; 4]>.makeWithCapacity(rgb.length)
+  let mut du = run List<[f64; 4]>.makeWithCapacity(rgb.length)
+  let mut dv = run List<[f64; 4]>.makeWithCapacity(rgb.length)
+  let mut i: usize = 0
+  while i < rgb.length {
+    run colors.append(
+      [u8.toF64(rgb[i][0]) / 255.0, u8.toF64(rgb[i][1]) / 255.0, u8.toF64(rgb[i][2]) / 255.0, 1.0],
+    )
+    run du.append([0.0; 4])
+    run dv.append([0.0; 4])
+    i = i + 1
+  }
+  let mut channel: usize = 0
+  while channel < 4 {
+    let mut r: usize = 0
+    while r < ys.length {
+      monotone(xs, colors.asSlice(), channel, r * xs.length, 1, du.asMutSlice())
+      r = r + 1
+    }
+    let mut c: usize = 0
+    while c < xs.length {
+      monotone(ys, colors.asSlice(), channel, c, xs.length, dv.asMutSlice())
+      c = c + 1
+    }
+    channel = channel + 1
+  }
+  return Mesh { xs: xs, ys: ys, colors: move colors, du: move du, dv: move dv, bicubic: bicubic }
+}
+
+fn hermite(t: f64) -> [f64; 4] {
+  let t3 = f64.pow(t, 3.0)
+  let t2 = f64.pow(t, 2.0)
+  return [2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t, 3.0 * t2 - 2.0 * t3, t3 - t2]
+}
+
+fn sample(mesh: &Mesh<'_>, x: f64, y: f64) -> [f64; 4] {
+  let xs = mesh.xs
+  let ys = mesh.ys
+  let mut c: usize = 0
+  let mut r: usize = 0
+  while c + 2 < xs.length && xs[c + 1] < x {
+    c = c + 1
+  }
+  while r + 2 < ys.length && ys[r + 1] < y {
+    r = r + 1
+  }
+  let w = xs[c + 1] - xs[c]
+  let height = ys[r + 1] - ys[r]
+  let u = (x - xs[c]) / w
+  let v = (y - ys[r]) / height
+  let corners = [
+    r * xs.length + c,
+    r * xs.length + c + 1,
+    (r + 1) * xs.length + c + 1,
+    (r + 1) * xs.length + c,
+  ]
+  let colors = mesh.colors.asSlice()
+  let du = mesh.du.asSlice()
+  let dv = mesh.dv.asSlice()
+  let mut out = [0.0; 4]
+  let mut k: usize = 0
+  while k < 4 {
+    let col = [
+      colors[corners[0]][k],
+      colors[corners[1]][k],
+      colors[corners[2]][k],
+      colors[corners[3]][k],
+    ]
+    if !mesh.bicubic {
+      out[k] = (1.0 - u) * (1.0 - v) * col[0] + u * (1.0 - v) * col[1] + u * v * col[2]
+        + (1.0 - u) * v * col[3]
+    } else {
+      let a = hermite(u)
+      let b = hermite(v)
+      let su = [
+        du[corners[0]][k] * w,
+        du[corners[1]][k] * w,
+        du[corners[2]][k] * w,
+        du[corners[3]][k] * w,
+      ]
+      let sv = [
+        dv[corners[0]][k] * height,
+        dv[corners[1]][k] * height,
+        dv[corners[2]][k] * height,
+        dv[corners[3]][k] * height,
+      ]
+      let value = b[0] * (a[0] * col[0] + a[2] * col[1]) + b[2] * (a[0] * col[3] + a[2] * col[2])
+        + b[0] * (a[1] * su[0] + a[3] * su[1])
+        + b[2] * (a[1] * su[3] + a[3] * su[2])
+        + b[1] * (a[0] * sv[0] + a[2] * sv[1])
+        + b[3] * (a[0] * sv[3] + a[2] * sv[2])
+      out[k] = f64.min(1.0, f64.max(0.0, value))
+    }
+    k = k + 1
+  }
+  return out
+}
+
+effect fn quantize(value: f64) -> usize
+  ! FixtureError {
+  let clamped = f64.min(1.0, f64.max(0.0, value))
+  let scaled = clamped * 255.0 + 0.5
+  if f64.abs(scaled - f64.round(scaled)) < 0.000001 {
+    fail FixtureError { message: "colour channel rounds ambiguously; adjust the fixture" }
+  }
+  return f64.toUsize(scaled)
+}
+
+effect fn hexColor(rgb: [usize; 3]) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let digits = b"0123456789abcdef"
+  let bytes: [u8; 7] = [
+    35,
+    digits[rgb[0] / 16],
+    digits[rgb[0] % 16],
+    digits[rgb[1] / 16],
+    digits[rgb[1] % 16],
+    digits[rgb[2] / 16],
+    digits[rgb[2] % 16],
+  ]
+  run Writer.writeAll(&bytes)
+}
+
+effect fn pixels(mesh: &Mesh<'_>, width: usize, height: usize) -> ()
+  ! FixtureError | WriterError
+  ? &mut Writer {
+  let mut first = true
+  let mut py: usize = 0
+  while py < height {
+    let mut start: usize = 0
+    let mut previous: i32 = -1
+    let mut px: usize = 0
+    while px <= width {
+      let x = usize.toF64(px) + 0.5
+      let y = usize.toF64(py) + 0.5
+      let mut key: i32 = -1
+      if px < width && mesh.xs[0] < x && x < mesh.xs[mesh.xs.length - 1] && mesh.ys[0] < y
+        && y < mesh.ys[mesh.ys.length - 1] {
+        let color = sample(mesh, x, y)
+        let red = run quantize(color[0])
+        let green = run quantize(color[1])
+        let blue = run quantize(color[2])
+        key = usize.toI32(red * 65536 + green * 256 + blue)
+      }
+      if px == 0 || key != previous {
+        if previous >= 0 {
+          if !first {
+            run Writer.writeString("\n")
+          }
+          first = false
+          run Format.format(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"1\" fill=\"",
+            &.{ x: start, y: py, width: px - start },
+          )
+          let packed = i32.toUsize(previous)
+          run hexColor([packed / 65536, (packed / 256) % 256, packed % 256])
+          run Writer.writeString("\"/>")
+        }
+        start = px
+        previous = key
+      }
+      px = px + 1
+    }
+    py = py + 1
+  }
+}
+
+effect fn segment(index: usize, a: [f64; 2], b: [f64; 2], last: bool) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let dx = b[0] - a[0]
+  let dy = b[1] - a[1]
+  let form = index % 4
+  if form == 0 {
+    run Writer.writeString("l")
+    if !last {
+      run Format.format(" {x},{y}", &.{ x: dx, y: dy })
+    }
+  } else if form == 1 {
+    run Writer.writeString("L")
+    if !last {
+      run Format.format(" {x} {y}", &.{ x: b[0], y: b[1] })
+    }
+  } else {
+    let mut points = [[dx / 3.0, dy / 3.0], [2.0 * dx / 3.0, 2.0 * dy / 3.0], [dx, dy]]
+    if form == 3 {
+      let mut p: usize = 0
+      while p < 3 {
+        points[p][0] = a[0] + points[p][0]
+        points[p][1] = a[1] + points[p][1]
+        p = p + 1
+      }
+      run Writer.writeString("C")
+    } else {
+      run Writer.writeString("c")
+    }
+    let count: usize = if last {
+      2
+    } else {
+      3
+    }
+    let mut p: usize = 0
+    while p < count {
+      run Format.format(" {x},{y}", &.{ x: points[p][0], y: points[p][1] })
+      p = p + 1
+    }
+  }
+}
+
+effect fn markup(mesh: &Mesh<'_>, ident: string, x: string, y: string, extra: string) -> ()
+  ! WriterError
+  ? &mut Writer {
+  run Format.format(
+    "<meshgradient id=\"{id}\" {x} {y}{extra}>",
+    &.{ id: ident, x: x, y: y, extra: extra },
+  )
+  let mut index: usize = 0
+  let mut r: usize = 0
+  while r + 1 < mesh.ys.length {
+    run Writer.writeString("\n  <meshrow>")
+    let mut c: usize = 0
+    while c + 1 < mesh.xs.length {
+      run Writer.writeString("\n    <meshpatch>")
+      let corner = [
+        [mesh.xs[c], mesh.ys[r]],
+        [mesh.xs[c + 1], mesh.ys[r]],
+        [mesh.xs[c + 1], mesh.ys[r + 1]],
+        [mesh.xs[c], mesh.ys[r + 1]],
+      ]
+      let rc = [
+        r * mesh.xs.length + c,
+        r * mesh.xs.length + c + 1,
+        (r + 1) * mesh.xs.length + c + 1,
+        (r + 1) * mesh.xs.length + c,
+      ]
+      let mut side: usize = 0
+      while side < 4 {
+        if !((side == 0 && r > 0) || (side == 3 && c > 0)) {
+          run Writer.writeString("\n      <stop path=\"")
+          run segment(
+            index,
+            corner[side],
+            corner[(side + 1) % 4],
+            side == 3 || (side == 2 && c > 0),
+          )
+          index = index + 1
+          run Writer.writeString("\"")
+          let defined = (side == 0 && (r > 0 || c > 0)) || (side == 1 && r > 0)
+            || (side == 3 && c > 0)
+          if !defined {
+            let color = mesh.colors.asSlice()[rc[side]]
+            run Writer.writeString(" stop-color=\"")
+            run hexColor(
+              [
+                f64.toUsize(f64.round(color[0] * 255.0)),
+                f64.toUsize(f64.round(color[1] * 255.0)),
+                f64.toUsize(f64.round(color[2] * 255.0)),
+              ],
+            )
+            run Writer.writeString("\"")
+          }
+          run Writer.writeString("/>")
+        }
+        side = side + 1
+      }
+      run Writer.writeString("\n    </meshpatch>")
+      c = c + 1
+    }
+    run Writer.writeString("\n  </meshrow>")
+    r = r + 1
+  }
+  run Writer.writeString("\n</meshgradient>")
+}
+
+fn across(row: usize, column: usize, rows: usize) -> f64 {
+  if row == 0 || row == rows {
+    return 0.0
+  }
+  return 0.18 * f64.sin(usize.toF64(row) * 2.3 + usize.toF64(column) * 1.3)
+}
+
+fn down(row: usize, column: usize, columns: usize) -> f64 {
+  if column == 0 || column == columns {
+    return 0.0
+  }
+  return 0.2 * f64.cos(usize.toF64(row) * 1.6 + usize.toF64(column) * 2.1)
+}
+
+fn corner(row: usize, column: usize, rows: usize, columns: usize) -> [f64; 2] {
+  let i = usize.toF64(row)
+  let j = usize.toF64(column)
+  let xWave = if column > 0 && column < columns {
+    9.0 * f64.sin(i * 1.7 + j * 0.9)
+  } else {
+    0.0
+  }
+  let yWave = if row > 0 && row < rows {
+    10.0 * f64.cos(i * 1.1 + j * 1.9)
+  } else {
+    0.0
+  }
+  return [
+    20.0 + 280.0 * j / usize.toF64(columns) + xWave,
+    20.0 + 200.0 * i / usize.toF64(rows) + yWave,
+  ]
+}
+
+// Python round(x, 2) uses decimal rounding, not round(x * 100) at a binary tie.
+// Formatting with two fractional digits supplies the same half-even decimal rule;
+// parsing then shortest-formatting drops trailing zeros as the original fmt did.
+struct NumberText {
+  bytes: [u8; 384],
+  length: usize,
+}
+
+impl Writer for NumberText {
+  effect fn writeAll(self: &mut Self, bytes: &[u8]) -> ()
+    ! WriterError
+    ? &mut Writer {
+    if bytes.length > 384 - self.length {
+      fail Writer.failure()
+    }
+    let mut i: usize = 0
+    while i < bytes.length {
+      self.bytes[self.length] = bytes[i]
+      self.length = self.length + 1
+      i = i + 1
+    }
+  }
+
+  effect fn flush(self: &mut Self) -> () ! WriterError ? &mut Writer {}
+}
+
+effect fn rounded(value: f64) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let mut text = NumberText { bytes: [0; 384], length: 0 }
+  run Format.format("{:.2}", &.(value)) |> Effect.provideMut<Writer>(&mut text)
+  let view = unsafe String.fromUtf8Unchecked(Slice.view(&text.bytes, 0, text.length))
+  match move Format.f64Value(view) {
+    Result<f64, ParseError>.Success { value: number } => {
+      run Format.display(&number)
+    }
+    Result<f64, ParseError>.Failure { error: _ } => {
+      fail Writer.failure()
+    }
+  }
+}
+
+effect fn curvedEdge(a: [f64; 2], b: [f64; 2], bend: f64, colored: bool, color: string) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let dx = b[0] - a[0]
+  let dy = b[1] - a[1]
+  let points = [
+    [a[0] + dx / 3.0 - dy * bend, a[1] + dy / 3.0 + dx * bend],
+    [a[0] + 2.0 * dx / 3.0 + dy * bend, a[1] + 2.0 * dy / 3.0 - dx * bend],
+    b,
+  ]
+  run Writer.writeString("\n      <stop path=\"C")
+  let mut p: usize = 0
+  while p < 3 {
+    run Writer.writeString(" ")
+    run rounded(points[p][0])
+    run Writer.writeString(",")
+    run rounded(points[p][1])
+    p = p + 1
+  }
+  run Writer.writeString("\"")
+  if colored {
+    run Format.format(" stop-color=\"{}\"", &.(color))
+  }
+  run Writer.writeString("/>")
+}
+
+effect fn curvedMesh(ident: string, color: string, rows: usize, columns: usize) -> ()
+  ! WriterError
+  ? &mut Writer {
+  run Format.format(
+    "<meshgradient id=\"{}\" x=\"20\" y=\"20\" gradientUnits=\"userSpaceOnUse\">",
+    &.(ident),
+  )
+  let mut i: usize = 0
+  while i < rows {
+    run Writer.writeString("\n  <meshrow>")
+    let mut j: usize = 0
+    while j < columns {
+      let tl = corner(i, j, rows, columns)
+      let tr = corner(i, j + 1, rows, columns)
+      let br = corner(i + 1, j + 1, rows, columns)
+      let bl = corner(i + 1, j, rows, columns)
+      run Writer.writeString("\n    <meshpatch>")
+      if i == 0 {
+        run curvedEdge(tl, tr, across(i, j, rows), j == 0, color)
+      }
+      run curvedEdge(tr, br, down(i, j + 1, columns), i == 0, color)
+      run curvedEdge(br, bl, -across(i + 1, j, rows), true, color)
+      if j == 0 {
+        run curvedEdge(bl, tl, -down(i, j, columns), true, color)
+      }
+      run Writer.writeString("\n    </meshpatch>")
+      j = j + 1
+    }
+    run Writer.writeString("\n  </meshrow>")
+    i = i + 1
+  }
+  run Writer.writeString("\n</meshgradient>")
+}
+
+effect fn meshInput(
+  mesh: &Mesh<'_>,
+  ident: string,
+  x: string,
+  y: string,
+  extra: string,
+  after: string,
+) -> ()
+  ! WriterError
+  ? &mut Writer {
+  run Writer.writeString("<defs>\n")
+  run markup(mesh, ident, x, y, extra)
+  run Writer.writeString(after)
+}
+
+effect fn inputBody(
+  mesh: &Mesh<'_>,
+  ident: string,
+  x: string,
+  y: string,
+  extra: string,
+  after: string,
+) -> String
+  ! WriterError {
+  let mut output = Capture { bytes: Bytes.make() }
+  run meshInput(mesh, ident, x, y, extra, after) |> Effect.provideMut<Writer>(&mut output)
+  return unsafe String.fromBytesUnchecked(move output.bytes)
+}
+
+effect fn pixelBody(mesh: &Mesh<'_>, width: usize, height: usize) -> String
+  ! WriterError | FixtureError {
+  let mut output = Capture { bytes: Bytes.make() }
+  run pixels(mesh, width, height) |> Effect.provideMut<Writer>(&mut output)
+  return unsafe String.fromBytesUnchecked(move output.bytes)
+}
+
+effect fn emitCase(
+  root: &Path,
+  cases: &mut List<Value>,
+  id: string,
+  width: usize,
+  height: usize,
+  input: string,
+  reference: string,
+  reason: string,
+  anchor: string,
+) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let inputSvg = run common.svg(width, height, input, true)
+  let referenceSvg = run common.svg(width, height, reference, true)
+  let inputRelative = run common.fmt("inputs/{}.svg", &.(id))
+  let referenceRelative = run common.fmt("references/{}.svg", &.(id))
+  let inputPath = run common.fmt("modules/tests/fixtures/painting/{}", &.(inputRelative.view()))
+  let referencePath = run common.fmt(
+    "modules/tests/fixtures/painting/{}",
+    &.(referenceRelative.view()),
+  )
+  run common.text(root, inputPath.view(), inputSvg.view())
+  run common.text(root, referencePath.view(), referenceSvg.view())
+  let spec = run common.fmt("{}{}", &.(SPEC, anchor))
+  let record = run common.caseRecord(
+    id,
+    inputRelative.view(),
+    referenceRelative.view(),
+    reason,
+    spec.view(),
+  )
+  run cases.append(move record)
+}
+
+const BAD_MESH: string = "<defs>\n<meshgradient id=\"ragged\" gradientUnits=\"userSpaceOnUse\" x=\"2\" y=\"2\">\n  <meshrow><meshpatch>\n    <stop path=\"l 8,0\" stop-color=\"red\"/><stop path=\"l 0,8\" stop-color=\"red\"/>\n    <stop path=\"l -8,0\" stop-color=\"red\"/><stop path=\"l\" stop-color=\"red\"/>\n  </meshpatch><meshpatch>\n    <stop path=\"l 8,0\"/><stop path=\"l 0,8\" stop-color=\"red\"/><stop path=\"l\" stop-color=\"red\"/>\n  </meshpatch></meshrow>\n  <meshrow><meshpatch>\n    <stop path=\"l 0,8\"/><stop path=\"l -8,0\" stop-color=\"red\"/><stop path=\"l\" stop-color=\"red\"/>\n  </meshpatch></meshrow>\n</meshgradient>\n<meshgradient id=\"moveto\" gradientUnits=\"userSpaceOnUse\" x=\"22\" y=\"2\">\n  <meshrow><meshpatch>\n    <stop path=\"m 8,0\" stop-color=\"red\"/><stop path=\"l 0,8\" stop-color=\"red\"/>\n    <stop path=\"l -8,0\" stop-color=\"red\"/><stop path=\"l\" stop-color=\"red\"/>\n  </meshpatch></meshrow>\n</meshgradient>\n<meshgradient id=\"short\" gradientUnits=\"userSpaceOnUse\" x=\"2\" y=\"22\">\n  <meshrow><meshpatch>\n    <stop path=\"l 8,0\" stop-color=\"red\"/><stop path=\"l 0,8\" stop-color=\"red\"/>\n  </meshpatch></meshrow>\n</meshgradient>\n</defs>\n<rect x=\"2\" y=\"2\" width=\"16\" height=\"16\" fill=\"url(#ragged)\"/>\n<rect x=\"22\" y=\"2\" width=\"8\" height=\"8\" fill=\"url(#moveto)\"/>\n<rect x=\"2\" y=\"22\" width=\"8\" height=\"8\" fill=\"url(#short)\"/>"
+
+effect fn curvedInput() -> ()
+  ! WriterError
+  ? &mut Writer {
+  run Writer.writeString("<defs>\n")
+  run curvedMesh("m", "#2878c8", 3, 4)
+  run Writer.writeString(
+    "\n</defs>\n<rect x=\"22\" y=\"22\" width=\"276\" height=\"196\" fill=\"url(#m)\"/>",
+  )
+}
+
+pub effect fn mesh(root: &Path) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let mut cases = run List<Value>.makeWithCapacity(5)
+  let gx = [4.0, 16.0, 36.0]
+  let gy = [3.0, 13.0, 27.0]
+  let gc: [[u8; 3]; 9] = [
+    [200, 30, 40],
+    [40, 180, 70],
+    [20, 60, 210],
+    [240, 200, 20],
+    [90, 10, 150],
+    [250, 250, 250],
+    [10, 10, 10],
+    [30, 220, 230],
+    [230, 120, 60],
+  ]
+  let grid = run makeMesh(&gx, &gy, &gc, false)
+  let gridInput = run inputBody(
+    &grid,
+    "m",
+    "x=\"4\"",
+    "y=\"3\"",
+    " gradientUnits=\"userSpaceOnUse\"",
+    "\n</defs>\n<rect x=\"4\" y=\"3\" width=\"32\" height=\"24\" fill=\"url(#m)\"/>",
+  )
+  let gridReference = run pixelBody(&grid, 40, 30)
+  run emitCase(
+    root,
+    &mut cases,
+    "mesh-bilinear-grid",
+    40,
+    30,
+    gridInput.view(),
+    gridReference.view(),
+    "A two by two mesh shares edges and corner colours between neighbouring patches; straight edges written as l, L, c and C make each patch affine, so pixel centres take the bilinear corner interpolation exactly.",
+    "MeshStructure",
+  )
+
+  let ux = [0.0, 0.5, 1.0]
+  let uy = [0.0, 1.0]
+  let uc: [[u8; 3]; 6] = [
+    [250, 40, 40],
+    [40, 40, 250],
+    [40, 200, 40],
+    [250, 220, 40],
+    [240, 240, 240],
+    [120, 30, 120],
+  ]
+  let unit = run makeMesh(&ux, &uy, &uc, false)
+  let bbox = [8.0, 4.0, 24.0, 16.0]
+  let mut px = [0.0; 3]
+  let mut py = [0.0; 2]
+  let mut i: usize = 0
+  while i < ux.length {
+    px[i] = bbox[0] + bbox[2] * ux[i]
+    i = i + 1
+  }
+  i = 0
+  while i < uy.length {
+    py[i] = bbox[1] + bbox[3] * (0.25 + 0.5 * uy[i])
+    i = i + 1
+  }
+  let placed = run makeMesh(&px, &py, &uc, false)
+  let unitInput = run inputBody(
+    &unit,
+    "base",
+    "x=\"0\"",
+    "y=\"0\"",
+    "",
+    "\n<meshgradient id=\"m\" href=\"#base\" transform=\"translate(0 0.25) scale(1 0.5)\"/>\n</defs>\n<rect x=\"8\" y=\"4\" width=\"24\" height=\"16\" fill=\"url(#m)\"/>",
+  )
+  let unitReference = run pixelBody(&placed, 40, 24)
+  run emitCase(
+    root,
+    &mut cases,
+    "mesh-bbox-template",
+    40,
+    24,
+    unitInput.view(),
+    unitReference.view(),
+    "A meshgradient without children uses its template's rows; object-bounding-box path data are bbox fractions, and the referencing element's transform halves the mesh height. The rest of the rectangle is unpainted.",
+    "MeshGradientAttributes",
+  )
+
+  let sx = [2.0, 10.0, 22.0, 38.0]
+  let sy = [2.0, 12.0, 26.0]
+  let sc: [[u8; 3]; 12] = [
+    [250, 10, 10],
+    [200, 90, 30],
+    [60, 200, 90],
+    [10, 40, 250],
+    [30, 30, 200],
+    [240, 240, 20],
+    [230, 20, 230],
+    [20, 230, 230],
+    [240, 140, 10],
+    [10, 120, 60],
+    [100, 100, 100],
+    [250, 250, 250],
+  ]
+  let smooth = run makeMesh(&sx, &sy, &sc, true)
+  let smoothInput = run inputBody(
+    &smooth,
+    "m",
+    "x=\"2\"",
+    "y=\"2\"",
+    " gradientUnits=\"userSpaceOnUse\" type=\"bicubic\"",
+    "\n</defs>\n<rect x=\"2\" y=\"2\" width=\"36\" height=\"24\" fill=\"url(#m)\"/>",
+  )
+  let smoothReference = run pixelBody(&smooth, 40, 28)
+  run emitCase(
+    root,
+    &mut cases,
+    "mesh-bicubic",
+    40,
+    28,
+    smoothInput.view(),
+    smoothReference.view(),
+    "type=\"bicubic\" uses monotone corner derivatives along mesh rows and columns, zero cross derivatives and chord-scaled Hermite interpolation, clamped to [0, 1].",
+    "MeshPatchPainting",
+  )
+  run emitCase(
+    root,
+    &mut cases,
+    "mesh-in-error",
+    40,
+    32,
+    BAD_MESH,
+    "",
+    "A row with fewer patches than the first, a stop path that is not c, C, l or L, and a patch with too few stops put the mesh in error; such meshes paint nothing.",
+    "MeshStructure",
+  )
+
+  let mut curved = Capture { bytes: Bytes.make() }
+  run curvedInput() |> Effect.provideMut<Writer>(&mut curved)
+  let curvedText = unsafe String.fromBytesUnchecked(move curved.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "mesh-curved-seam",
+    320,
+    240,
+    curvedText.view(),
+    "<rect x=\"22\" y=\"22\" width=\"276\" height=\"196\" fill=\"#2878c8\"/>",
+    "Neighbouring patches meet along their shared edges, curved or not: a one-colour mesh paints every pixel it covers.",
+    "MeshPatchPainting",
+  )
+  run common.saveManifest(
+    root,
+    "modules/tests/fixtures/painting/manifest.json",
+    cases.asSlice(),
+    "",
+    false,
+    false,
+    true,
+  )
+}
+
+effect fn bandRects(
+  count: usize,
+  start: usize,
+  step: usize,
+  size: usize,
+  vertical: bool,
+  length: usize,
+  color: string,
+) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let mut m: usize = 0
+  while m < count {
+    if m > 0 {
+      run Writer.writeString("\n")
+    }
+    let a = start + m * step
+    if vertical {
+      run Format.format(
+        "<rect x=\"{a}\" y=\"0\" width=\"{size}\" height=\"{length}\" fill=\"{color}\"/>",
+        &.{ a: a, size: size, length: length, color: color },
+      )
+    } else {
+      run Format.format(
+        "<rect x=\"0\" y=\"{a}\" width=\"{length}\" height=\"{size}\" fill=\"{color}\"/>",
+        &.{ a: a, size: size, length: length, color: color },
+      )
+    }
+    m = m + 1
+  }
+}
+
+effect fn lineReference() -> ()
+  ! WriterError
+  ? &mut Writer {
+  run bandRects(5, 2, 8, 2, true, 24, "#2050d0")
+  run Writer.writeString("\n")
+  run bandRects(5, 6, 8, 2, true, 24, "#d03020")
+}
+
+effect fn bboxReference() -> ()
+  ! WriterError
+  ? &mut Writer {
+  let mut m: usize = 0
+  while m < 4 {
+    if m > 0 {
+      run Writer.writeString("\n")
+    }
+    run Format.format(
+      "<rect x=\"{}\" y=\"4\" width=\"2\" height=\"20\" fill=\"#a020a0\"/>",
+      &.(4 + 10 * m),
+    )
+    m = m + 1
+  }
+}
+
+effect fn overflowInput() -> ()
+  ! WriterError
+  ? &mut Writer {
+  let names = ["hidden", "visible"]
+  let mut i: usize = 0
+  while i < 2 {
+    run Format.format(
+      "<defs><hatch id=\"{name}\" hatchUnits=\"userSpaceOnUse\" pitch=\"6\" overflow=\"{name}\">\n  <hatchpath offset=\"5\" stroke=\"#202020\" stroke-width=\"4\"/>\n</hatch></defs>\n<rect y=\"{y}\" width=\"36\" height=\"10\" fill=\"url(#{name})\"/>\n",
+      &.{ name: names[i], y: i * 14 },
+    )
+    i = i + 1
+  }
+}
+
+effect fn overflowReference() -> ()
+  ! WriterError
+  ? &mut Writer {
+  let mut m: usize = 0
+  while m < 6 {
+    if m > 0 {
+      run Writer.writeString("\n")
+    }
+    run Format.format(
+      "<rect x=\"{}\" y=\"0\" width=\"3\" height=\"10\" fill=\"#202020\"/>",
+      &.(6 * m + 3),
+    )
+    m = m + 1
+  }
+  run Writer.writeString("\n<rect x=\"0\" y=\"14\" width=\"1\" height=\"10\" fill=\"#202020\"/>")
+  m = 0
+  while m < 5 {
+    run Format.format(
+      "\n<rect x=\"{}\" y=\"14\" width=\"4\" height=\"10\" fill=\"#202020\"/>",
+      &.(6 * m + 3),
+    )
+    m = m + 1
+  }
+  run Writer.writeString("\n<rect x=\"33\" y=\"14\" width=\"3\" height=\"10\" fill=\"#202020\"/>")
+}
+
+// Explicit independent repetition: moveto sections remain separate; implicit
+// moveto sections join the preceding section's final vertex.
+effect fn strips(
+  pitch: i32,
+  count: usize,
+  section: &[[i32; 2]],
+  period: i32,
+  joined: bool,
+  top: i32,
+  bottom: i32,
+  clip: string,
+  color: string,
+  extra: string,
+) -> ()
+  ! WriterError
+  ? &mut Writer {
+  let mut m: usize = 0
+  while m < count {
+    if m > 0 {
+      run Writer.writeString("\n")
+    }
+    run Format.format("<path clip-path=\"url(#{})\" d=\"", &.(clip))
+    let dx = usize.toI32(m) * pitch
+
+    // Floor division, including negative origins, matches Python //.
+    let mut quotient = top / period
+    if top < 0 && top % period != 0 {
+      quotient = quotient - 1
+    }
+    let mut k = quotient - 1
+    let mut first = true
+    while k * period <= bottom + period {
+      if !first {
+        run Writer.writeString(" ")
+      }
+      if !joined || first {
+        run Format.format("M {} {} ", &.(section[0][0] + dx, section[0][1] + k * period))
+      }
+      let mut p: usize = 1
+      while p < section.length {
+        if p > 1 {
+          run Writer.writeString(" ")
+        }
+        run Format.format("L {} {}", &.(section[p][0] + dx, section[p][1] + k * period))
+        p = p + 1
+      }
+      first = false
+      k = k + 1
+    }
+    run Format.format("\" fill=\"none\" stroke=\"{}\"{}/>", &.(color, extra))
+    m = m + 1
+  }
+}
+
+effect fn pathsReference() -> ()
+  ! WriterError
+  ? &mut Writer {
+  run Writer.writeString(
+    "<clipPath id=\"ca\"><rect width=\"40\" height=\"30\"/></clipPath>\n<clipPath id=\"cb\"><rect width=\"48\" height=\"30\"/></clipPath>\n",
+  )
+  let separate = [[2, 0], [8, 5], [2, 10]]
+  let joined = [[10, 0], [4, 0], [10, 6]]
+  run strips(10, 4, &separate, 10, false, 0, 30, "ca", "#c03000", "")
+  run Writer.writeString("\n<g transform=\"translate(0 32)\">\n")
+  run strips(14, 4, &joined, 6, true, 0, 30, "cb", "#0040c0", " stroke-width=\"2\"")
+  run Writer.writeString("\n</g>")
+}
+
+pub effect fn hatch(root: &Path) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let mut cases = run List<Value>.makeWithCapacity(5)
+  let mut lines = Capture { bytes: Bytes.make() }
+  run lineReference() |> Effect.provideMut<Writer>(&mut lines)
+  let linesText = unsafe String.fromBytesUnchecked(move lines.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "hatch-lines",
+    40,
+    24,
+    "<defs><hatch id=\"h\" hatchUnits=\"userSpaceOnUse\" pitch=\"8\">\n  <hatchpath offset=\"3\" stroke=\"#2050d0\" stroke-width=\"2\"/>\n  <hatchpath offset=\"7\" stroke=\"#d03020\" stroke-width=\"2\"/>\n</hatch></defs>\n<rect width=\"40\" height=\"24\" fill=\"url(#h)\"/>",
+    linesText.view(),
+    "Each hatchpath without d is a line along the strip at its offset, stroked with its own solid stroke; strips repeat every pitch from x.",
+    "HatchpathNotes",
+  )
+
+  let mut rotated = Capture { bytes: Bytes.make() }
+  run bandRects(5, 3, 8, 2, false, 32, "#108040") |> Effect.provideMut<Writer>(&mut rotated)
+  let rotatedText = unsafe String.fromBytesUnchecked(move rotated.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "hatch-rotate-template",
+    32,
+    40,
+    "<defs><hatch id=\"base\" hatchUnits=\"userSpaceOnUse\" pitch=\"8\">\n  <hatchpath offset=\"3\" stroke=\"#108040\" stroke-width=\"2\"/>\n</hatch>\n<hatch id=\"h\" href=\"#base\" rotate=\"90\" x=\"5\" y=\"1\"/></defs>\n<rect width=\"32\" height=\"40\" fill=\"url(#h)\"/>",
+    rotatedText.view(),
+    "href copies pitch and the hatchpath children; rotate turns the strips so they stack down the page from the origin (x, y).",
+    "HatchElementAttributes",
+  )
+
+  let mut bbox = Capture { bytes: Bytes.make() }
+  run bboxReference() |> Effect.provideMut<Writer>(&mut bbox)
+  let bboxText = unsafe String.fromBytesUnchecked(move bbox.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "hatch-bbox-units",
+    40,
+    28,
+    "<defs><hatch id=\"h\" pitch=\"0.25\" x=\"0.05\">\n  <hatchpath offset=\"3\" stroke=\"#a020a0\" stroke-width=\"2\"/>\n</hatch></defs>\n<rect x=\"0\" y=\"4\" width=\"40\" height=\"20\" fill=\"url(#h)\"/>",
+    bboxText.view(),
+    "x and pitch are bounding-box fractions (2 and 10 user units here) while hatchpath offsets and stroke widths stay in user units.",
+    "HatchElementAttributes",
+  )
+
+  let mut overflow = Capture { bytes: Bytes.make() }
+  run overflowInput() |> Effect.provideMut<Writer>(&mut overflow)
+  let overflowText = unsafe String.fromBytesUnchecked(move overflow.bytes)
+  let mut overflowRef = Capture { bytes: Bytes.make() }
+  run overflowReference() |> Effect.provideMut<Writer>(&mut overflowRef)
+  let overflowRefText = unsafe String.fromBytesUnchecked(move overflowRef.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "hatch-overflow",
+    36,
+    24,
+    overflowText.view(),
+    overflowRefText.view(),
+    "The UA style sheet makes hatch overflow hidden, clipping strokes to their strip; overflow visible draws the parts beyond it.",
+    "HatchNotes",
+  )
+
+  let mut paths = Capture { bytes: Bytes.make() }
+  run pathsReference() |> Effect.provideMut<Writer>(&mut paths)
+  let pathsText = unsafe String.fromBytesUnchecked(move paths.bytes)
+  run emitCase(
+    root,
+    &mut cases,
+    "hatch-paths",
+    92,
+    62,
+    "<defs><hatch id=\"a\" hatchUnits=\"userSpaceOnUse\" pitch=\"10\">\n  <hatchpath d=\"M 2,0 L 8,5 L 2,10\" fill=\"none\" stroke=\"#c03000\"/>\n</hatch>\n<hatch id=\"b\" hatchUnits=\"userSpaceOnUse\" pitch=\"14\">\n  <hatchpath d=\"L 4,0 10,6\" stroke=\"#0040c0\" stroke-width=\"2\"/>\n</hatch></defs>\n<rect width=\"40\" height=\"30\" fill=\"url(#a)\"/>\n<rect width=\"48\" height=\"30\" fill=\"url(#b)\" transform=\"translate(0 32)\"/>",
+    pathsText.view(),
+    "A hatchpath d repeats down the strip by the y of its last point; without an initial moveto it starts at that point's x on the strip origin line and continues one subpath, joined with stroke-linejoin. Hatch path fills are ignored.",
+    "HatchpathNotes",
+  )
+  run common.saveManifest(
+    root,
+    "modules/tests/fixtures/painting/manifest.json",
+    cases.asSlice(),
+    "",
+    false,
+    false,
+    true,
+  )
+}

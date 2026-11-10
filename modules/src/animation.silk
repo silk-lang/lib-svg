@@ -811,7 +811,7 @@ effect fn color(bytes: &[u8]) -> Option<[f64; 4]>
   let tokens = match move parsed {
     Result<TokenBuffer, CssError | OutOfMemoryError>.Success { value } => move value
     Result<TokenBuffer, CssError | OutOfMemoryError>.Failure { error } => match move error {
-      CssError problem => {
+      CssError _ => {
         return Option<[f64; 4]>.None
       }
       OutOfMemoryError problem => {
@@ -858,7 +858,7 @@ effect fn parse(animation: &Animation, bytes: &[u8]) -> Value
     let parsed = run numbers(bytes, false)
     let mut list = List<f64>.make()
     match &parsed {
-      Value.Numbers { pieces, numbers: values } => run list.appendSlice(values.asSlice())
+      Value.Numbers { numbers: values, .. } => run list.appendSlice(values.asSlice())
       _ => {}
     }
     return run transformValue(animation.transform, list.asSlice())
@@ -1033,8 +1033,8 @@ effect fn combine(left: &Value, right: &Value, amount: f64, sum: bool) -> Value
 
 fn distance(left: &Value, right: &Value) -> f64 {
   match &left.* {
-    Value.Numbers { pieces, numbers: first } => {
-      if let Value.Numbers { pieces: others, numbers: second } = &right.* {
+    Value.Numbers { numbers: first, .. } => {
+      if let Value.Numbers { numbers: second, .. } = &right.* {
         if first.length() == second.length() {
           let a = first.asSlice()
           let b = second.asSlice()
@@ -1098,7 +1098,7 @@ effect fn writeNumber(out: &mut Bytes, value: f64) -> ()
   let mut buffer = NumberText { bytes: [0; 40], length: 0 }
   let written = run Effect.result(Format.display(&finite) |> Effect.provideMut<Writer>(&mut buffer))
   match move written {
-    Result<(), WriterError>.Success { value: done } => run out.append(
+    Result<(), WriterError>.Success { .. } => run out.append(
       Slice.view<u8>(&buffer.bytes, 0, buffer.length),
     )
     _ => run out.append(b"0")
@@ -1158,7 +1158,7 @@ effect fn transformText(kind: TransformType, value: &Value, out: &mut Bytes) -> 
       TransformType.SkewY => b"skewY("
     },
   )
-  if let Value.Numbers { pieces, numbers: values } = &value.* {
+  if let Value.Numbers { numbers: values, .. } = &value.* {
     let list = values.asSlice()
     let mut k: usize = 0
     while k < list.length {
@@ -1186,7 +1186,7 @@ effect fn zero(like: &Value) -> Value
       }
       return Value.Numbers { pieces: run copyPieces(&pieces), numbers: move list }
     }
-    Value.Color { channels } => {
+    Value.Color { .. } => {
       return Value.Color { channels: [0.0, 0.0, 0.0, 0.0] }
     }
     _ => {}
@@ -2180,7 +2180,7 @@ effect fn pair(x: f64, y: f64) -> Value
 }
 
 fn coordinates(value: &Value) -> [f64; 2] {
-  if let Value.Numbers { pieces, numbers } = &value.* {
+  if let Value.Numbers { numbers, .. } = &value.* {
     let list = numbers.asSlice()
     if list.length >= 2 {
       return [list[0], list[1]]
@@ -2209,7 +2209,7 @@ effect fn vertices(path: &Path, out: &mut List<f64>) -> ()
     let segment = segments[k]
     drop run prefix.append(segment)
     let counted = match segment {
-      Segment.MoveTo { to } => k == 0
+      Segment.MoveTo { .. } => k == 0
       _ => true
     }
     if counted {

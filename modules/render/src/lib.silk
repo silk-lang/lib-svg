@@ -17,7 +17,6 @@ import svg_raster.cpu
 import vector.geometry_error { GeometryError }
 pub import environment { Environment }
 import environment
-import native_environment
 import svg_core.resources { Resolver, ResourceError, ProcessingMode }
 import svg_core.animation
 import svg_core.document_styles
@@ -275,7 +274,7 @@ effect fn styled<'a, 'h>(
         entries[i].tree = Option<RenderTree<'h>>.some(move value)
       }
       Result<RenderTree<'h>, RenderError | OutOfMemoryError>.Failure { error } => match &error {
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
         RenderError problem => {

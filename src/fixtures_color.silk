@@ -1,0 +1,2006 @@
+// Independent ICC/PNG colour fixture oracle. Do not import the renderer's ICC implementation:
+// the profiles and the expected colours must remain independent of the code under test.
+import fixtures_common as common
+import fixtures_common { Chunk, FixtureError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.ownership { Copy }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.text.string { String }
+import silk.io.writer { Writer, WriterError }
+import silk.io.writer_native { StdoutWriter }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.text.format { Format }
+import silk.json.value { Json, Value }
+import silk.json.scanner { JsonError }
+import silk.compress.deflate { EncodeError }
+import silk.num.f64
+import silk.num.i64
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+const D50: [f64; 3] = [0.964202880859375, 1.0, 0.8249053955078125]
+
+const SRGB: [f64; 9] = [
+  0.4360747,
+  0.3850649,
+  0.1430804,
+  0.2225045,
+  0.7168786,
+  0.0606169,
+  0.0139322,
+  0.0971045,
+  0.7141733,
+]
+
+const WIDE: [f64; 9] = [0.6097, 0.2053, 0.1492, 0.3111, 0.6257, 0.0632, 0.0195, 0.0609, 0.7446]
+
+const UNIT: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+const SPEC_ICC: string = "https://www.color.org/specification/ICC.1-2022-05.pdf#page=115"
+
+const SPEC_LUT: string = "https://www.color.org/specification/ICC.1-2022-05.pdf#page=65"
+
+const SPEC_EMBED: string = "https://www.color.org/specification/ICC.1-2022-05.pdf#page=97"
+
+const PIXELS: [[u8; 4]; 8] = [
+  [255, 0, 0, 255],
+  [0, 255, 0, 255],
+  [0, 0, 255, 255],
+  [255, 255, 255, 255],
+  [128, 128, 128, 255],
+  [64, 32, 200, 255],
+  [10, 240, 90, 255],
+  [0, 0, 0, 255],
+]
+
+const GRAYS: [[u8; 4]; 6] = [
+  [0, 0, 0, 255],
+  [32, 32, 32, 255],
+  [64, 64, 64, 255],
+  [128, 128, 128, 255],
+  [192, 192, 192, 255],
+  [255, 255, 255, 255],
+]
+
+const ALPHAS: [[u8; 4]; 4] = [
+  [200, 40, 90, 128],
+  [10, 250, 30, 64],
+  [255, 255, 255, 255],
+  [90, 90, 200, 1],
+]
+
+// Python round(), used in ICC serialization, rounds ties to even (not f64.round).
+fn even(value: f64) -> i64 {
+  let low = f64.floor(value)
+  let n = f64.toI64(low)
+  let fraction = value - low
+  if fraction > 0.5 || (fraction == 0.5 && n % 2 != 0) {
+    return n + 1
+  }
+  return n
+}
+
+effect fn byte(out: &mut Bytes, value: u8) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return run Bytes.append(&mut out, &[value])
+}
+
+effect fn pad(out: &mut Bytes) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  while Bytes.length(&out.*) % 4 != 0 {
+    run byte(&mut out, 0)
+  }
+}
+
+effect fn fixedWrite(out: &mut Bytes, value: f64) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let n = even(value * 65536.0)
+  return run common.be32(
+    &mut out,
+    i64.toU32(
+      if n < 0 {
+        n + 4294967296
+      } else {
+        n
+      },
+    ),
+  )
+}
+
+fn set32(out: &mut Bytes, at: usize, value: u32) -> () {
+  let mut data = Bytes.asMutSlice(&mut out)
+  data[at] = u32.toU8(value / 16777216)
+  data[at + 1] = u32.toU8(value / 65536 % 256)
+  data[at + 2] = u32.toU8(value / 256 % 256)
+  data[at + 3] = u32.toU8(value % 256)
+}
+
+fn markOffset(out: &mut Bytes, field: usize) -> () {
+  let length = Bytes.length(&out.*)
+  set32(&mut out, field, usize.toU32(length))
+}
+
+effect fn xyz(x: f64, y: f64, z: f64) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.copy(b"XYZ \0\0\0\0")
+  run fixedWrite(&mut out, x)
+  run fixedWrite(&mut out, y)
+  run fixedWrite(&mut out, z)
+  return move out
+}
+
+effect fn curve(values: &[u32]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.copy(b"curv\0\0\0\0")
+  run common.be32(&mut out, usize.toU32(values.length))
+  let mut i: usize = 0
+  while i < values.length {
+    run common.be16(&mut out, values[i])
+    i = i + 1
+  }
+  run pad(&mut out)
+  return move out
+}
+
+effect fn gammaCurve(gamma: f64) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  return run curve(&[i64.toU32(even(gamma * 256.0))])
+}
+
+effect fn para(kind: u32, values: &[f64]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.copy(b"para\0\0\0\0")
+  run common.be16(&mut out, kind)
+  run common.be16(&mut out, 0)
+  let mut i: usize = 0
+  while i < values.length {
+    run fixedWrite(&mut out, values[i])
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn profile(space: &[u8], names: &[string], bodies: &[&[u8]], pcs: &[u8]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.zeroed(132 + 12 * names.length)
+  let mut i: usize = 0
+  while i < names.length {
+    let name = String.utf8Bytes(names[i])
+    let at = 132 + 12 * i
+    let mut data = Bytes.asMutSlice(&mut out)
+    let mut j: usize = 0
+    while j < 4 {
+      data[at + j] = name[j]
+      j = j + 1
+    }
+    markOffset(&mut out, at + 4)
+    set32(&mut out, at + 8, usize.toU32(bodies[i].length))
+    run Bytes.append(&mut out, bodies[i])
+    run pad(&mut out)
+    i = i + 1
+  }
+  markOffset(&mut out, 0)
+  set32(&mut out, 128, usize.toU32(names.length))
+  let mut white = Bytes.make()
+  run fixedWrite(&mut white, D50[0])
+  run fixedWrite(&mut white, D50[1])
+  run fixedWrite(&mut white, D50[2])
+  let mut data = Bytes.asMutSlice(&mut out)
+  let signature = b"none\x02\x40\0\0mntr"
+  i = 0
+  while i < 12 {
+    data[4 + i] = signature[i]
+    data[68 + i] = Bytes.asSlice(&white)[i]
+    i = i + 1
+  }
+  i = 0
+  while i < 4 {
+    data[16 + i] = space[i]
+    data[20 + i] = pcs[i]
+    data[36 + i] = b"acsp"[i]
+    i = i + 1
+  }
+  return move out
+}
+
+effect fn rgbProfile(matrix: &[f64; 9], r: &[u8], g: &[u8], b: &[u8]) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let red = run xyz(matrix[0], matrix[3], matrix[6])
+  let green = run xyz(matrix[1], matrix[4], matrix[7])
+  let blue = run xyz(matrix[2], matrix[5], matrix[8])
+  return run profile(
+    b"RGB ",
+    &["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"],
+    &[Bytes.asSlice(&red), Bytes.asSlice(&green), Bytes.asSlice(&blue), r, g, b],
+    b"XYZ ",
+  )
+}
+
+fn read16(d: &[u8], o: usize) -> usize {
+  return u8.toUsize(d[o]) * 256 + u8.toUsize(d[o + 1])
+}
+
+fn read32(d: &[u8], o: usize) -> usize {
+  return u8.toUsize(d[o]) * 16777216 + u8.toUsize(d[o + 1]) * 65536 + read16(d, o + 2)
+}
+
+fn fixed(d: &[u8], o: usize) -> f64 {
+  let raw = read32(d, o)
+  let value = usize.toF64(raw) / 65536.0
+  return if raw >= 2147483648 {
+    value - 65536.0
+  } else {
+    value
+  }
+}
+
+fn signature(d: &[u8], at: usize, text: string) -> bool {
+  let bytes = String.utf8Bytes(text)
+  let mut i: usize = 0
+  while i < bytes.length {
+    if d[at + i] != bytes[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn find(d: &[u8], name: string) -> usize {
+  let mut i: usize = 0
+  while i < read32(d, 128) {
+    let at = 132 + i * 12
+    if signature(d, at, name) {
+      return read32(d, at + 4)
+    }
+    i = i + 1
+  }
+  return 0
+}
+
+fn clamp(v: f64) -> f64 {
+  return if v != v || v <= 0.0 {
+    0.0
+  } else if v >= 1.0 {
+    1.0
+  } else {
+    v
+  }
+}
+
+fn power(b: f64, e: f64) -> f64 {
+  return if b <= 0.0 {
+    0.0
+  } else {
+    f64.pow(b, e)
+  }
+}
+
+fn evaluateAt(d: &[u8], o: usize, x: f64) -> f64 {
+  if signature(d, o, "curv") {
+    let n = read32(d, o + 8)
+    if n == 0 {
+      return x
+    }
+    if n == 1 {
+      return power(x, usize.toF64(read16(d, o + 12)) / 256.0)
+    }
+    let p = x * usize.toF64(n - 1)
+    let mut i = f64.toUsize(f64.floor(p))
+    if i >= n - 1 {
+      i = n - 2
+    }
+    let lo = usize.toF64(read16(d, o + 12 + i * 2)) / 65535.0
+    let hi = usize.toF64(read16(d, o + 14 + i * 2)) / 65535.0
+    return clamp(lo + (hi - lo) * (p - usize.toF64(i)))
+  }
+  let kind = read16(d, o + 8)
+  let counts: [usize; 5] = [1, 3, 4, 5, 7]
+  let mut ps: [f64; 7] = [0.0; 7]
+  ps[1] = 1.0
+  let mut k: usize = 0
+  while k < counts[kind] {
+    ps[k] = fixed(d, o + 12 + 4 * k)
+    k = k + 1
+  }
+  let g = ps[0]
+  let a = ps[1]
+  let b = ps[2]
+  let c = ps[3]
+  let v = if kind == 0 {
+    power(x, g)
+  } else if kind == 1 {
+    if x >= -b / a {
+      power(a * x + b, g)
+    } else {
+      0.0
+    }
+  } else if kind == 2 {
+    if x >= -b / a {
+      power(a * x + b, g) + c
+    } else {
+      c
+    }
+  } else if kind == 3 {
+    if x >= ps[4] {
+      power(a * x + b, g)
+    } else {
+      c * x
+    }
+  } else {
+    if x >= ps[4] {
+      power(a * x + b, g) + ps[5]
+    } else {
+      c * x + ps[6]
+    }
+  }
+  return clamp(v)
+}
+
+fn multiply(a: [f64; 9], b: [f64; 9]) -> [f64; 9] {
+  let mut result: [f64; 9] = [0.0; 9]
+  let mut r: usize = 0
+  while r < 3 {
+    let mut c: usize = 0
+    while c < 3 {
+      result[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c]
+      c = c + 1
+    }
+    r = r + 1
+  }
+  return result
+}
+
+fn inverse(m: [f64; 9]) -> [f64; 9] {
+  let c0 = m[4] * m[8] - m[5] * m[7]
+  let c1 = m[5] * m[6] - m[3] * m[8]
+  let c2 = m[3] * m[7] - m[4] * m[6]
+  let det = m[0] * c0 + m[1] * c1 + m[2] * c2
+  return [
+    c0 / det,
+    (m[2] * m[7] - m[1] * m[8]) / det,
+    (m[1] * m[5] - m[2] * m[4]) / det,
+    c1 / det,
+    (m[0] * m[8] - m[2] * m[6]) / det,
+    (m[2] * m[3] - m[0] * m[5]) / det,
+    c2 / det,
+    (m[1] * m[6] - m[0] * m[7]) / det,
+    (m[0] * m[4] - m[1] * m[3]) / det,
+  ]
+}
+
+fn vector(m: [f64; 9], p: [f64; 3]) -> [f64; 3] {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
+    m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
+    m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
+  ]
+}
+
+fn decode(v: f64) -> f64 {
+  return if v <= 0.04045 {
+    v / 12.92
+  } else {
+    f64.pow((v + 0.055) / 1.055, 2.4)
+  }
+}
+
+fn encode(value: f64) -> f64 {
+  let v = clamp(value)
+  return clamp(
+    if v <= 0.0031308 {
+      v * 12.92
+    } else {
+      1.055 * f64.pow(v, 1.0 / 2.4) - 0.055
+    },
+  )
+}
+
+fn encodedPixel(v: [f64; 3]) -> [u8; 3] {
+  return [
+    f64.toU8(f64.floor(encode(v[0]) * 255.0 + 0.5)),
+    f64.toU8(f64.floor(encode(v[1]) * 255.0 + 0.5)),
+    f64.toU8(f64.floor(encode(v[2]) * 255.0 + 0.5)),
+  ]
+}
+
+struct Lut {
+  kind: usize,
+  offset: usize,
+  inputs: usize,
+  lab: bool,
+  precision: usize,
+  grid: [usize; 4],
+  inputCount: usize,
+  outputCount: usize,
+  clut: usize,
+  a: [usize; 4],
+  m: [usize; 4],
+  b: [usize; 4],
+  matrix: usize,
+}
+
+impl Copy for Lut {}
+
+fn noLut() -> Lut {
+  return Lut {
+    kind: 0,
+    offset: 0,
+    inputs: 0,
+    lab: false,
+    precision: 0,
+    grid: [0; 4],
+    inputCount: 0,
+    outputCount: 0,
+    clut: 0,
+    a: [0; 4],
+    m: [0; 4],
+    b: [0; 4],
+    matrix: 0,
+  }
+}
+
+struct Transform {
+  kind: usize,
+  tables: [[f64; 256]; 3],
+  matrix: [f64; 9],
+  lut: Lut
+}
+
+fn noTransform() -> Transform {
+  return Transform { kind: 0, tables: [[0.0; 256]; 3], matrix: UNIT, lut: noLut() }
+}
+
+fn iccTransform(d: &[u8]) -> Transform {
+  let mut t = noTransform()
+  let pcs = inverse(SRGB)
+  if signature(d, 16, "GRAY") {
+    let mut i: usize = 0
+    while i < 256 {
+      let v = evaluateAt(d, find(d, "kTRC"), usize.toF64(i) / 255.0)
+      t.tables[0][i] = v
+      t.tables[1][i] = v
+      t.tables[2][i] = v
+      i = i + 1
+    }
+    let w = vector(pcs, D50)
+    t.matrix = [w[0], 0.0, 0.0, 0.0, w[1], 0.0, 0.0, 0.0, w[2]]
+    t.kind = 1
+    return move t
+  }
+  if !signature(d, 16, "RGB ") || find(d, "rXYZ") == 0 {
+    return move t
+  }
+  let mut source: [f64; 9] = [0.0; 9]
+  let names = ["rXYZ", "gXYZ", "bXYZ"]
+  let curves = ["rTRC", "gTRC", "bTRC"]
+  let mut c: usize = 0
+  while c < 3 {
+    let o = find(d, names[c])
+    source[c] = fixed(d, o + 8)
+    source[3 + c] = fixed(d, o + 12)
+    source[6 + c] = fixed(d, o + 16)
+    let mut i: usize = 0
+    let trc = find(d, curves[c])
+    while i < 256 {
+      t.tables[c][i] = evaluateAt(d, trc, usize.toF64(i) / 255.0)
+      i = i + 1
+    }
+    c = c + 1
+  }
+  t.matrix = multiply(pcs, source)
+  t.kind = 1
+  return move t
+}
+
+fn bradford(x: f64, y: f64, z: f64) -> [f64; 9] {
+  let cone: [f64; 9] = [0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296]
+  let s = vector(cone, [x, y, z])
+  let t = vector(cone, D50)
+  let scale: [f64; 9] = [t[0] / s[0], 0.0, 0.0, 0.0, t[1] / s[1], 0.0, 0.0, 0.0, t[2] / s[2]]
+  return multiply(inverse(cone), multiply(scale, cone))
+}
+
+fn pngTransform(gamma: usize, chrm: &[u32]) -> Transform {
+  let mut t = noTransform()
+  t.kind = 1
+  if chrm.length != 0 {
+    let wx0 = u32.toF64(chrm[0]) / 100000.0
+    let wy0 = u32.toF64(chrm[1]) / 100000.0
+    let rx = u32.toF64(chrm[2]) / 100000.0
+    let ry = u32.toF64(chrm[3]) / 100000.0
+    let gx = u32.toF64(chrm[4]) / 100000.0
+    let gy = u32.toF64(chrm[5]) / 100000.0
+    let bx = u32.toF64(chrm[6]) / 100000.0
+    let by = u32.toF64(chrm[7]) / 100000.0
+    let primary: [f64; 9] = [
+      rx / ry,
+      gx / gy,
+      bx / by,
+      1.0,
+      1.0,
+      1.0,
+      (1.0 - rx - ry) / ry,
+      (1.0 - gx - gy) / gy,
+      (1.0 - bx - by) / by,
+    ]
+    let wx = wx0 / wy0
+    let wz = (1.0 - wx0 - wy0) / wy0
+    let sv = inverse(primary)
+    let sr = sv[0] * wx + sv[1] + sv[2] * wz
+    let sg = sv[3] * wx + sv[4] + sv[5] * wz
+    let sb = sv[6] * wx + sv[7] + sv[8] * wz
+    let toXyz = multiply(primary, [sr, 0.0, 0.0, 0.0, sg, 0.0, 0.0, 0.0, sb])
+    t.matrix = multiply(inverse(SRGB), multiply(bradford(wx, 1.0, wz), toXyz))
+  }
+  let mut i: usize = 0
+  while i < 256 {
+    let v = if gamma != 0 {
+      power(usize.toF64(i) / 255.0, 100000.0 / usize.toF64(gamma))
+    } else {
+      decode(usize.toF64(i) / 255.0)
+    }
+    t.tables[0][i] = v
+    t.tables[1][i] = v
+    t.tables[2][i] = v
+    i = i + 1
+  }
+  return move t
+}
+
+// LUT serializers and evaluator retain the original n-dimensional multilinear interpolation,
+// including legacy 16-bit Lab scaling and the A -> CLUT -> M -> matrix -> B ordering.
+effect fn normalized(out: &mut Bytes, value: f64, width: usize) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let n = i64.toU32(
+    even(
+      value
+        * if width == 2 {
+          65535.0
+        } else {
+          255.0
+        },
+    ),
+  )
+  if width == 2 {
+    run common.be16(&mut out, n)
+  } else {
+    run byte(&mut out, u32.toU8(n))
+  }
+}
+
+effect fn mft(
+  kind: usize,
+  inputs: usize,
+  grid: usize,
+  inTable: &[f64],
+  clut: &[f64],
+  outTable: &[f64],
+) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let width: usize = if kind == 2 {
+    2
+  } else {
+    1
+  }
+  let mut out = run Bytes.copy(
+    if kind == 2 {
+      b"mft2\0\0\0\0"
+    } else {
+      b"mft1\0\0\0\0"
+    },
+  )
+  run Bytes.append(&mut out, &[usize.toU8(inputs), 3, usize.toU8(grid), 0])
+  let mut i: usize = 0
+  while i < 9 {
+    run fixedWrite(&mut out, UNIT[i])
+    i = i + 1
+  }
+  if kind == 2 {
+    run common.be16(&mut out, usize.toU32(inTable.length))
+    run common.be16(&mut out, usize.toU32(outTable.length))
+  }
+  let mut c: usize = 0
+  while c < inputs {
+    i = 0
+    while i < inTable.length {
+      run normalized(&mut out, inTable[i], width)
+      i = i + 1
+    }
+    c = c + 1
+  }
+  i = 0
+  while i < clut.length {
+    run normalized(&mut out, clut[i], width)
+    i = i + 1
+  }
+  c = 0
+  while c < 3 {
+    i = 0
+    while i < outTable.length {
+      run normalized(&mut out, outTable[i], width)
+      i = i + 1
+    }
+    c = c + 1
+  }
+  return move out
+}
+
+effect fn placeCurves(out: &mut Bytes, field: usize, curves: &[&[u8]]) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  if curves.length == 0 {
+    return ()
+  }
+  markOffset(&mut out, field)
+  let mut i: usize = 0
+  while i < curves.length {
+    run Bytes.append(&mut out, curves[i])
+    run pad(&mut out)
+    i = i + 1
+  }
+}
+
+effect fn mab(
+  inputs: usize,
+  a: &[&[u8]],
+  grid: &[u8],
+  clut: &[f64],
+  precision: usize,
+  m: &[&[u8]],
+  matrix: &[f64],
+  b: &[&[u8]],
+) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut out = run Bytes.copy(b"mAB \0\0\0\0")
+  run Bytes.append(&mut out, &[usize.toU8(inputs), 3, 0, 0])
+  let zeros: [u8; 20] = [0; 20]
+  run Bytes.append(&mut out, &zeros)
+  run placeCurves(&mut out, 12, b)
+  if matrix.length != 0 {
+    markOffset(&mut out, 16)
+    let mut i: usize = 0
+    while i < matrix.length {
+      run fixedWrite(&mut out, matrix[i])
+      i = i + 1
+    }
+    run pad(&mut out)
+  }
+  run placeCurves(&mut out, 20, m)
+  if clut.length != 0 {
+    markOffset(&mut out, 24)
+    let mut header: [u8; 20] = [0; 20]
+    let mut i: usize = 0
+    while i < grid.length {
+      header[i] = grid[i]
+      i = i + 1
+    }
+    header[16] = usize.toU8(precision)
+    run Bytes.append(&mut out, &header)
+    i = 0
+    while i < clut.length {
+      run normalized(&mut out, clut[i], precision)
+      i = i + 1
+    }
+    run pad(&mut out)
+  }
+  run placeCurves(&mut out, 28, a)
+  return move out
+}
+
+fn curveLength(d: &[u8], at: usize) -> usize {
+  if signature(d, at, "curv") {
+    return (12 + read32(d, at + 8) * 2 + 3) / 4 * 4
+  }
+  let counts: [usize; 5] = [1, 3, 4, 5, 7]
+  return 12 + 4 * counts[read16(d, at + 8)]
+}
+
+fn curveOffsets(d: &[u8], at: usize, count: usize) -> [usize; 4] {
+  let mut out: [usize; 4] = [0; 4]
+  if at == 0 {
+    return out
+  }
+  let mut p = at
+  let mut i: usize = 0
+  while i < count {
+    out[i] = p
+    p = p + curveLength(d, p)
+    i = i + 1
+  }
+  return out
+}
+
+fn lutParse(d: &[u8], o: usize, lab: bool) -> Lut {
+  let mut lut = noLut()
+  lut.offset = o
+  lut.inputs = u8.toUsize(d[o + 8])
+  lut.lab = lab
+  if signature(d, o, "mft1") || signature(d, o, "mft2") {
+    let wide = signature(d, o, "mft2")
+    lut.kind = if wide {
+      2
+    } else {
+      1
+    }
+    lut.precision = lut.kind
+    lut.inputCount = if wide {
+      read16(d, o + 48)
+    } else {
+      256
+    }
+    lut.outputCount = if wide {
+      read16(d, o + 50)
+    } else {
+      256
+    }
+    let header: usize = if wide {
+      52
+    } else {
+      48
+    }
+    lut.clut = o + header + lut.inputCount * lut.inputs * lut.precision
+    let mut i: usize = 0
+    while i < lut.inputs {
+      lut.grid[i] = u8.toUsize(d[o + 10])
+      i = i + 1
+    }
+    return lut
+  }
+  lut.kind = 3
+  lut.b = curveOffsets(d, o + read32(d, o + 12), 3)
+  let matrix = read32(d, o + 16)
+  let m = read32(d, o + 20)
+  let clut = read32(d, o + 24)
+  let a = read32(d, o + 28)
+  if matrix != 0 {
+    lut.matrix = o + matrix
+  }
+  if m != 0 {
+    lut.m = curveOffsets(d, o + m, 3)
+  }
+  if a != 0 {
+    lut.a = curveOffsets(d, o + a, lut.inputs)
+  }
+  if clut != 0 {
+    let mut i: usize = 0
+    while i < lut.inputs {
+      lut.grid[i] = u8.toUsize(d[o + clut + i])
+      i = i + 1
+    }
+    lut.precision = u8.toUsize(d[o + clut + 16])
+    lut.clut = o + clut + 20
+  }
+  return lut
+}
+
+fn lutFor(d: &[u8], intent: usize) -> Lut {
+  let name = if intent == 0 {
+    "A2B0"
+  } else if intent == 2 {
+    "A2B2"
+  } else {
+    "A2B1"
+  }
+  let first = find(d, name)
+  let offset = if first != 0 {
+    first
+  } else {
+    find(d, "A2B0")
+  }
+  return if offset == 0 {
+    noLut()
+  } else {
+    lutParse(d, offset, signature(d, 20, "Lab "))
+  }
+}
+
+fn lutTransform(d: &[u8], intent: usize) -> Transform {
+  let mut t = noTransform()
+  let selected = if intent == 4 {
+    if read32(d, 64) <= 3 {
+      read32(d, 64)
+    } else {
+      0
+    }
+  } else {
+    intent
+  }
+  t.lut = lutFor(d, selected)
+  if t.lut.kind != 0 {
+    t.kind = 2
+  }
+  return move t
+}
+
+fn sample(d: &[u8], at: usize, width: usize) -> f64 {
+  return if width == 2 {
+    usize.toF64(read16(d, at)) / 65535.0
+  } else {
+    u8.toF64(d[at]) / 255.0
+  }
+}
+
+fn tableAt(d: &[u8], start: usize, count: usize, width: usize, x: f64) -> f64 {
+  let p = clamp(x) * usize.toF64(count - 1)
+  let mut i = f64.toUsize(f64.floor(p))
+  if i >= count - 1 {
+    i = count - 2
+  }
+  let lo = sample(d, start + i * width, width)
+  let hi = sample(d, start + (i + 1) * width, width)
+  return lo + (hi - lo) * (p - usize.toF64(i))
+}
+
+fn clutEvaluate(d: &[u8], lut: &Lut, values: [f64; 4]) -> [f64; 3] {
+  let mut base: [usize; 4] = [0; 4]
+  let mut fraction: [f64; 4] = [0.0; 4]
+  let mut stride: [usize; 4] = [0; 4]
+  let mut step: usize = 3
+  let mut k = lut.inputs
+  let mut corners: usize = 1
+  while k != 0 {
+    k = k - 1
+    stride[k] = step
+    step = step * lut.grid[k]
+    corners = corners * 2
+    let p = clamp(values[k]) * usize.toF64(lut.grid[k] - 1)
+    let mut i = f64.toUsize(f64.floor(p))
+    if i >= lut.grid[k] - 1 {
+      i = lut.grid[k] - 2
+    }
+    base[k] = i
+    fraction[k] = p - usize.toF64(i)
+  }
+  let mut out: [f64; 3] = [0.0; 3]
+  let mut corner: usize = 0
+  while corner < corners {
+    let mut weight = 1.0
+    let mut at: usize = 0
+    let mut divisor = corners / 2
+    k = 0
+    while k < lut.inputs {
+      let bit = corner / divisor % 2
+      weight = weight
+        * if bit == 1 {
+          fraction[k]
+        } else {
+          1.0 - fraction[k]
+        }
+      at = at + (base[k] + bit) * stride[k]
+      divisor = divisor / 2
+      k = k + 1
+    }
+    k = 0
+    while k < 3 {
+      out[k] = out[k] + weight * sample(d, lut.clut + (at + k) * lut.precision, lut.precision)
+      k = k + 1
+    }
+    corner = corner + 1
+  }
+  return out
+}
+
+fn labInverse(t: f64) -> f64 {
+  return if t > 6.0 / 29.0 {
+    t * t * t
+  } else {
+    (t - 4.0 / 29.0) * 108.0 / 841.0
+  }
+}
+
+fn decodePcs(lut: &Lut, pcs: [f64; 3]) -> [f64; 3] {
+  if !lut.lab {
+    let scale = 65535.0 / 32768.0
+    return [pcs[0] * scale, pcs[1] * scale, pcs[2] * scale]
+  }
+  let legacy = if lut.kind == 2 {
+    65535.0 / 65280.0
+  } else {
+    1.0
+  }
+  let l = pcs[0] * legacy * 100.0
+  let a = pcs[1] * legacy * 255.0 - 128.0
+  let b = pcs[2] * legacy * 255.0 - 128.0
+  let fy = (l + 16.0) / 116.0
+  return [
+    D50[0] * labInverse(fy + a / 500.0),
+    D50[1] * labInverse(fy),
+    D50[2] * labInverse(fy - b / 200.0),
+  ]
+}
+
+fn lutEvaluate(d: &[u8], lut: &Lut, inputs: [f64; 4]) -> [f64; 3] {
+  let mut values: [f64; 4] = [0.0; 4]
+  let mut pcs: [f64; 3] = [0.0; 3]
+  let mut k: usize = 0
+  if lut.kind == 1 || lut.kind == 2 {
+    let width = lut.precision
+    let header: usize = if lut.kind == 2 {
+      52
+    } else {
+      48
+    }
+    let tables = lut.offset + header
+    while k < lut.inputs {
+      values[k] = tableAt(d, tables + k * lut.inputCount * width, lut.inputCount, width, inputs[k])
+      k = k + 1
+    }
+    pcs = clutEvaluate(d, lut, values)
+    let mut size = 3 * width
+    k = 0
+    while k < lut.inputs {
+      size = size * lut.grid[k]
+      k = k + 1
+    }
+    k = 0
+    while k < 3 {
+      pcs[k] = tableAt(
+        d,
+        lut.clut + size + k * lut.outputCount * width,
+        lut.outputCount,
+        width,
+        pcs[k],
+      )
+      k = k + 1
+    }
+  } else {
+    while k < lut.inputs {
+      values[k] = if lut.a[0] != 0 {
+        evaluateAt(d, lut.a[k], clamp(inputs[k]))
+      } else {
+        clamp(inputs[k])
+      }
+      k = k + 1
+    }
+    pcs = if lut.precision != 0 {
+      clutEvaluate(d, lut, values)
+    } else {
+      [values[0], values[1], values[2]]
+    }
+    if lut.m[0] != 0 {
+      k = 0
+      while k < 3 {
+        pcs[k] = evaluateAt(d, lut.m[k], clamp(pcs[k]))
+        k = k + 1
+      }
+    }
+    if lut.matrix != 0 {
+      let mut f: [f64; 12] = [0.0; 12]
+      k = 0
+      while k < 12 {
+        f[k] = fixed(d, lut.matrix + 4 * k)
+        k = k + 1
+      }
+      let x = pcs[0]
+      let y = pcs[1]
+      let z = pcs[2]
+      pcs = [
+        clamp(f[0] * x + f[1] * y + f[2] * z + f[9]),
+        clamp(f[3] * x + f[4] * y + f[5] * z + f[10]),
+        clamp(f[6] * x + f[7] * y + f[8] * z + f[11]),
+      ]
+    }
+    k = 0
+    while k < 3 {
+      pcs[k] = evaluateAt(d, lut.b[k], clamp(pcs[k]))
+      k = k + 1
+    }
+  }
+  return decodePcs(lut, pcs)
+}
+
+fn convert(d: &[u8], t: &Transform, p: [u8; 3]) -> [u8; 3] {
+  if t.kind == 0 {
+    return p
+  }
+  if t.kind == 2 {
+    let xyz = lutEvaluate(
+      d,
+      &t.lut,
+      [u8.toF64(p[0]) / 255.0, u8.toF64(p[1]) / 255.0, u8.toF64(p[2]) / 255.0, 0.0],
+    )
+    return encodedPixel(vector(inverse(SRGB), xyz))
+  }
+  return encodedPixel(
+    vector(
+      t.matrix,
+      [t.tables[0][u8.toUsize(p[0])], t.tables[1][u8.toUsize(p[1])], t.tables[2][u8.toUsize(p[2])]],
+    ),
+  )
+}
+
+fn isIdentity(d: &[u8], t: &Transform) -> bool {
+  if t.kind == 0 {
+    return true
+  }
+  let mut v: usize = 0
+  while v < 256 {
+    let n = usize.toU8(v)
+    let probes: [[u8; 3]; 4] = [[n, 0, 0], [0, n, 0], [0, 0, n], [n, n, n]]
+    let mut i: usize = 0
+    while i < 4 {
+      let out = convert(d, t, probes[i])
+      if out[0] != probes[i][0] || out[1] != probes[i][1] || out[2] != probes[i][2] {
+        return false
+      }
+      i = i + 1
+    }
+    v = v + 1
+  }
+  return true
+}
+
+struct DeviceColor {
+  valid: bool,
+  rgb: [f64; 3]
+}
+
+fn deviceColor(d: &[u8], comps: &[f64], intent: usize) -> DeviceColor {
+  let invalid = DeviceColor { valid: false, rgb: [0.0; 3] }
+  if d.length == 0 {
+    return move invalid
+  }
+  let lut = lutFor(d, intent)
+  let mut linear: [f64; 3] = [0.0; 3]
+  if lut.kind != 0 {
+    if comps.length != lut.inputs {
+      return move invalid
+    }
+    let mut inputs: [f64; 4] = [0.0; 4]
+    let mut k: usize = 0
+    while k < comps.length {
+      inputs[k] = clamp(comps[k])
+      k = k + 1
+    }
+    linear = vector(inverse(SRGB), lutEvaluate(d, &lut, inputs))
+  } else if signature(d, 16, "GRAY") {
+    if comps.length != 1 {
+      return move invalid
+    }
+    let y = evaluateAt(d, find(d, "kTRC"), clamp(comps[0]))
+    let w = vector(inverse(SRGB), D50)
+    linear = [w[0] * y, w[1] * y, w[2] * y]
+  } else if signature(d, 16, "RGB ") && find(d, "rXYZ") != 0 {
+    if comps.length != 3 {
+      return move invalid
+    }
+    let t = iccTransform(d)
+    linear = vector(
+      t.matrix,
+      [
+        evaluateAt(d, find(d, "rTRC"), clamp(comps[0])),
+        evaluateAt(d, find(d, "gTRC"), clamp(comps[1])),
+        evaluateAt(d, find(d, "bTRC"), clamp(comps[2])),
+      ],
+    )
+  } else {
+    return move invalid
+  }
+  return DeviceColor { valid: true, rgb: [encode(linear[0]), encode(linear[1]), encode(linear[2])] }
+}
+
+effect fn iccp(d: &[u8]) -> Chunk
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let compressed = run common.compressed(d, false)
+  let mut body = run Bytes.copy(b"probe\0\0")
+  run Bytes.append(&mut body, Bytes.asSlice(&compressed))
+  return Chunk { kind: "iCCP", body: move body }
+}
+
+effect fn numbers(kind: string<'static>, values: &[u32]) -> Chunk
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut body = Bytes.make()
+  let mut i: usize = 0
+  while i < values.length {
+    run common.be32(&mut body, values[i])
+    i = i + 1
+  }
+  return Chunk { kind: kind, body: move body }
+}
+
+effect fn png(pixels: &[[u8; 4]], chunks: &[Chunk], colorType: u8) -> Bytes
+  ! OutOfMemoryError | EncodeError
+  ? &mut Allocator {
+  let channels: usize = if colorType == 0 {
+    1
+  } else if colorType == 6 {
+    4
+  } else {
+    3
+  }
+  let mut rows = run Bytes.makeWithCapacity(1 + pixels.length * channels)
+  run byte(&mut rows, 0)
+  let mut x: usize = 0
+  while x < pixels.length {
+    let mut c: usize = 0
+    while c < channels {
+      run byte(&mut rows, pixels[x][c])
+      c = c + 1
+    }
+    x = x + 1
+  }
+  return run common.png(pixels.length, 1, colorType, Bytes.asSlice(&rows), chunks)
+}
+
+effect fn hexColor(rgb: [u8; 3]) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let digits = b"0123456789abcdef"
+  let mut text: [u8; 7] = [35, 0, 0, 0, 0, 0, 0]
+  let mut i: usize = 0
+  while i < 3 {
+    text[1 + i * 2] = digits[u8.toUsize(rgb[i]) / 16]
+    text[2 + i * 2] = digits[u8.toUsize(rgb[i]) % 16]
+    i = i + 1
+  }
+  return run String.copy(unsafe String.fromUtf8Unchecked(&text))
+}
+
+effect fn reference(
+  pixels: &[[u8; 4]],
+  d: &[u8],
+  t: &Transform,
+  alpha: bool,
+  y: usize,
+  row: bool,
+  xOffset: usize,
+) -> String
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let identity = isIdentity(d, t)
+  let mut body = String.make()
+  let mut x: usize = 0
+  while x < pixels.length {
+    let p = pixels[x]
+    let mut rgb: [u8; 3] = [p[0], p[1], p[2]]
+    if alpha {
+      let a = u8.toUsize(p[3])
+      let mut c: usize = 0
+      while c < 3 {
+        let pre = (u8.toUsize(p[c]) * a + 127) / 255
+        let back = (pre * 255 + a / 2) / a
+        rgb[c] = usize.toU8(
+          if back > 255 {
+            255
+          } else {
+            back
+          },
+        )
+        c = c + 1
+      }
+    }
+    let out = if identity {
+      rgb
+    } else {
+      convert(d, t, rgb)
+    }
+    let fill = run hexColor(out)
+    let rect = if alpha {
+      run common.fmt(
+        "<rect x=\"{x}\" width=\"1\" height=\"1\" fill=\"{fill}\" fill-opacity=\"{alpha}\"/>",
+        &.{ x: x + xOffset, fill: String.view(&fill), alpha: u8.toF64(p[3]) / 255.0 },
+      )
+    } else if row {
+      run common.fmt(
+        "<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"{fill}\"/>",
+        &.{ x: x + xOffset, y: y, fill: String.view(&fill) },
+      )
+    } else {
+      run common.fmt(
+        "<rect x=\"{x}\" width=\"1\" height=\"1\" fill=\"{fill}\"/>",
+        &.{ x: x + xOffset, fill: String.view(&fill) },
+      )
+    }
+    run String.append(&mut body, String.view(&rect))
+    x = x + 1
+  }
+  return move body
+}
+
+effect fn page(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  width: usize,
+  height: usize,
+  body: string,
+  ref: string,
+  reason: string,
+  spec: string,
+) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError
+  ? &mut Allocator | &mut FileSystem {
+  let input = run common.fmt("inputs/{name}.svg", &.{ name: name })
+  let reference = run common.fmt("references/{name}.svg", &.{ name: name })
+  let inputPath = run common.concat(&["modules/tests/fixtures/color/", String.view(&input)])
+  let referencePath = run common.concat(&["modules/tests/fixtures/color/", String.view(&reference)])
+  let inputSvg = run common.svg(width, height, body, false)
+  let referenceSvg = run common.svg(width, height, ref, false)
+  run common.text(root, String.view(&inputPath), String.view(&inputSvg))
+  run common.text(root, String.view(&referencePath), String.view(&referenceSvg))
+  let id = run common.concat(&["color-", name])
+  let record = run common.caseRecord(
+    String.view(&id),
+    String.view(&input),
+    String.view(&reference),
+    reason,
+    spec,
+  )
+  run List<Value>.append(&mut cases, move record)
+}
+
+effect fn add(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  data: &[u8],
+  d: &[u8],
+  t: &Transform,
+  reason: string,
+  spec: string,
+  pixels: &[[u8; 4]],
+  alpha: bool,
+  mime: string,
+) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError
+  ? &mut Allocator | &mut FileSystem {
+  let url = run common.dataUrl(data, mime)
+  let body = run common.fmt(
+    "<image href=\"{url}\" width=\"{width}\" height=\"1\" style=\"image-rendering:optimizeSpeed\"/>",
+    &.{ url: String.view(&url), width: pixels.length },
+  )
+  let ref = run reference(pixels, d, t, alpha, 0, false, 0)
+  return run page(
+    root,
+    &mut cases,
+    name,
+    pixels.length,
+    1,
+    String.view(&body),
+    String.view(&ref),
+    reason,
+    spec,
+  )
+}
+
+effect fn addIcc(
+  root: &Path,
+  cases: &mut List<Value>,
+  name: string,
+  d: &[u8],
+  t: &Transform,
+  reason: string,
+  spec: string,
+  pixels: &[[u8; 4]],
+  colorType: u8,
+) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError | EncodeError
+  ? &mut Allocator | &mut FileSystem {
+  let chunk = run iccp(d)
+  let image = run png(pixels, &[move chunk], colorType)
+  return run add(
+    root,
+    &mut cases,
+    name,
+    Bytes.asSlice(&image),
+    d,
+    t,
+    reason,
+    spec,
+    pixels,
+    colorType == 6,
+    "image/png",
+  )
+}
+
+effect fn cssColor(out: &DeviceColor) -> String
+  ! WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  if !out.valid {
+    return run String.copy("#ff8000")
+  }
+  return run common.fmt(
+    "color(srgb {r} {g} {b})",
+    &.{ r: out.rgb[0], g: out.rgb[1], b: out.rgb[2] },
+  )
+}
+
+effect fn profileElement(name: string, data: &[u8], attrs: string) -> String
+  ! OutOfMemoryError | WriterError | FixtureError
+  ? &mut Allocator {
+  let url = run common.dataUrl(data, "application/vnd.iccprofile")
+  return run common.fmt(
+    "<color-profile name=\"{name}\"{attrs} href=\"{url}\"/>",
+    &.{ name: name, attrs: attrs, url: String.view(&url) },
+  )
+}
+
+effect fn image(data: &[u8], y: usize, attrs: string) -> String
+  ! OutOfMemoryError | WriterError | FixtureError
+  ? &mut Allocator {
+  let url = run common.dataUrl(data, "image/png")
+  if attrs == "wide-style" {
+    return run common.fmt(
+      "<image href=\"{url}\" y=\"{y}\" width=\"8\" height=\"1\" style=\"color-profile:url(#w);image-rendering:optimizeSpeed\"/>",
+      &.{ url: String.view(&url), y: y },
+    )
+  }
+  return run common.fmt(
+    "<image href=\"{url}\" y=\"{y}\" width=\"8\" height=\"1\" {attrs} style=\"image-rendering:optimizeSpeed\"/>",
+    &.{ url: String.view(&url), y: y, attrs: attrs },
+  )
+}
+
+effect fn paintProbe(
+  body: &mut String,
+  ref: &mut String,
+  x: usize,
+  name: string,
+  comps: &[f64],
+  data: &[u8],
+  intent: usize,
+) -> ()
+  ! OutOfMemoryError | WriterError
+  ? &mut Allocator {
+  let mut args = String.make()
+  let mut i: usize = 0
+  while i < comps.length {
+    if i != 0 {
+      run String.append(&mut args, ", ")
+    }
+    let component = run common.fmt("{value}", &.{ value: comps[i] })
+    run String.append(&mut args, String.view(&component))
+    i = i + 1
+  }
+  let input = run common.fmt(
+    "<rect x=\"{x}\" width=\"2\" height=\"2\" fill=\"#ff8000 icc-color({name}, {args})\"/>",
+    &.{ x: x * 2, name: name, args: String.view(&args) },
+  )
+  let color = deviceColor(data, comps, intent)
+  let fill = run cssColor(&color)
+  let output = run common.fmt(
+    "<rect x=\"{x}\" width=\"2\" height=\"2\" fill=\"{fill}\"/>",
+    &.{ x: x * 2, fill: String.view(&fill) },
+  )
+  run String.append(&mut body, String.view(&input))
+  run String.append(&mut ref, String.view(&output))
+}
+
+effect fn paintPages(
+  root: &Path,
+  cases: &mut List<Value>,
+  linear: &[u8],
+  wide: &[u8],
+  gray: &[u8],
+  untagged: &[u8],
+) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError | EncodeError
+  ? &mut Allocator | &mut FileSystem {
+  let linDef = run profileElement("lin", linear, "")
+  let wideDef = run profileElement("wide", wide, " id=\"w\"")
+  let grayDef = run profileElement("g", gray, "")
+  let defs = run common.concat(
+    &[String.view(&linDef), String.view(&wideDef), String.view(&grayDef)],
+  )
+  let specPaint = "https://www.w3.org/TR/SVG11/painting.html#SpecifyingPaint"
+  let mut body = run common.concat(&["<defs>", String.view(&defs), "</defs>"])
+  let mut ref = String.make()
+  run paintProbe(&mut body, &mut ref, 0, "lin", &[0.5, 0.5, 0.5], linear, 0)
+  run paintProbe(&mut body, &mut ref, 1, "wide", &[0.2, 0.7, 0.4], wide, 0)
+  run paintProbe(&mut body, &mut ref, 2, "g", &[0.25], gray, 0)
+  run paintProbe(&mut body, &mut ref, 3, "lin", &[0.5, 0.5], linear, 0)
+  run paintProbe(&mut body, &mut ref, 4, "missing", &[0.1, 0.2, 0.3], b"", 0)
+  run page(
+    root,
+    &mut cases,
+    "icc-paint",
+    10,
+    2,
+    String.view(&body),
+    String.view(&ref),
+    "icc-color() through matrix/TRC and gray profiles; a wrong component count or unknown profile uses the sRGB fallback.",
+    specPaint,
+  )
+
+  let stopValue = deviceColor(wide, &[0.9, 0.1, 0.3], 0)
+  let floodValue = deviceColor(linear, &[0.25, 0.5, 0.75], 0)
+  let stop = run cssColor(&stopValue)
+  let flood = run cssColor(&floodValue)
+  let stopBody = run common.concat(
+    &[
+      "<defs>",
+      String.view(&defs),
+      "<linearGradient id=\"s\"><stop offset=\"0\" stop-color=\"#000 icc-color(wide, 0.9, 0.1, 0.3)\"/><stop offset=\"1\" stop-color=\"#000 icc-color(wide, 0.9, 0.1, 0.3)\"/></linearGradient><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"><feFlood flood-color=\"#000 icc-color(lin, 0.25, 0.5, 0.75)\"/></filter></defs><rect width=\"2\" height=\"2\" fill=\"url(#s)\"/><rect x=\"2\" width=\"2\" height=\"2\" filter=\"url(#f)\"/><rect x=\"4\" width=\"2\" height=\"2\" stroke=\"none\" fill=\"url(#none) #000 icc-color(lin, 0.25, 0.5, 0.75)\"/>",
+    ],
+  )
+  let stopRef = run common.fmt(
+    "<rect width=\"2\" height=\"2\" fill=\"{stop}\"/><rect x=\"2\" width=\"2\" height=\"2\" fill=\"{flood}\"/><rect x=\"4\" width=\"2\" height=\"2\" fill=\"{flood}\"/>",
+    &.{ stop: String.view(&stop), flood: String.view(&flood) },
+  )
+  run page(
+    root,
+    &mut cases,
+    "icc-stop-flood",
+    6,
+    2,
+    String.view(&stopBody),
+    String.view(&stopRef),
+    "stop-color, flood-color and paint-server fallbacks accept icc-color().",
+    specPaint,
+  )
+
+  let embedded = run iccp(wide)
+  let tagged = run png(&PIXELS, &[move embedded], 2)
+  let wideTransform = iccTransform(wide)
+  let linearTransform = iccTransform(linear)
+  let none = noTransform()
+  let mut imageBody = run common.concat(&["<defs>", String.view(&defs), "</defs>"])
+  let mut imageRef = String.make()
+  let attrs = [
+    "",
+    "color-profile=\"sRGB\"",
+    "",
+    "color-profile=\"lin\"",
+    "wide-style",
+    "",
+    "color-profile=\"missing\"",
+  ]
+  let mut y: usize = 0
+  while y < 7 {
+    let data = if y <= 2 || y == 6 {
+      Bytes.asSlice(&tagged)
+    } else {
+      untagged
+    }
+    let img = run image(data, y, attrs[y])
+    if y == 5 {
+      run String.append(&mut imageBody, "<g color-profile=\"lin\">")
+    }
+    run String.append(&mut imageBody, String.view(&img))
+    if y == 5 {
+      run String.append(&mut imageBody, "</g>")
+    }
+    let row = if y == 1 {
+      run reference(&PIXELS, b"", &none, false, y, true, 0)
+    } else if y == 3 || y == 5 {
+      run reference(&PIXELS, linear, &linearTransform, false, y, true, 0)
+    } else {
+      run reference(&PIXELS, wide, &wideTransform, false, y, true, 0)
+    }
+    run String.append(&mut imageRef, String.view(&row))
+    y = y + 1
+  }
+  run page(
+    root,
+    &mut cases,
+    "image-color-profile",
+    8,
+    7,
+    String.view(&imageBody),
+    String.view(&imageRef),
+    "color-profile on images: sRGB ignores the embedded profile per occurrence, names and IRIs select a color-profile element, the property inherits, unknown names keep auto.",
+    "https://www.w3.org/TR/SVG11/color.html#ColorProfileProperty",
+  )
+
+  let sheetValue = deviceColor(wide, &[0.3, 0.6, 0.9], 0)
+  let sheet = run cssColor(&sheetValue)
+  let linearUrl = run common.dataUrl(linear, "application/vnd.iccprofile")
+  let wideUrl = run common.dataUrl(wide, "application/vnd.iccprofile")
+  let sheetImage = run image(untagged, 0, "x=\"2\" color-profile=\"sheet\"")
+  let sheetBody = run common.concat(
+    &[
+      "<style>@color-profile { name: sheet; src: url(\"",
+      String.view(&linearUrl),
+      "\") } @color-profile { name: sheet2; src: url(\"",
+      String.view(&wideUrl),
+      "\") }</style><rect width=\"2\" height=\"2\" fill=\"#000 icc-color(sheet2, 0.3, 0.6, 0.9)\"/>",
+      String.view(&sheetImage),
+    ],
+  )
+  let mut sheetRef = run common.fmt(
+    "<rect width=\"2\" height=\"2\" fill=\"{fill}\"/>",
+    &.{ fill: String.view(&sheet) },
+  )
+  let sheetRow = run reference(&PIXELS, linear, &linearTransform, false, 0, true, 2)
+  run String.append(&mut sheetRef, String.view(&sheetRow))
+  run page(
+    root,
+    &mut cases,
+    "at-color-profile",
+    10,
+    2,
+    String.view(&sheetBody),
+    String.view(&sheetRef),
+    "@color-profile rules name profiles for icc-color() and the color-profile property.",
+    "https://www.w3.org/TR/SVG11/color.html#ColorProfileAtRule",
+  )
+}
+
+effect fn lutPages(root: &Path, cases: &mut List<Value>, untagged: &[u8]) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError | EncodeError
+  ? &mut Allocator | &mut FileSystem {
+  let mut labClut: [f64; 81] = [0.0; 81]
+  let mut i: usize = 0
+  while i < 27 {
+    let r = usize.toF64(i / 9) / 2.0
+    let g = usize.toF64(i / 3 % 3) / 2.0
+    let b = usize.toF64(i % 3) / 2.0
+    labClut[i * 3] = 0.2 * r + 0.7 * g + 0.1 * b
+    labClut[i * 3 + 1] = 0.5 + 0.3 * (r - g)
+    labClut[i * 3 + 2] = 0.5 + 0.3 * (g - b)
+    i = i + 1
+  }
+  let mut curve5: [f64; 5] = [0.0; 5]
+  i = 0
+  while i < 5 {
+    curve5[i] = f64.pow(usize.toF64(i) / 4.0, 1.5)
+    i = i + 1
+  }
+  let mft2Tag = run mft(2, 3, 3, &curve5, &labClut, &[0.0, 0.48, 1.0])
+  let mft2Lab = run profile(b"RGB ", &["A2B0"], &[Bytes.asSlice(&mft2Tag)], b"Lab ")
+  let mut t256: [f64; 256] = [0.0; 256]
+  let mut out256: [f64; 256] = [0.0; 256]
+  i = 0
+  while i < 256 {
+    t256[i] = f64.pow(usize.toF64(i) / 255.0, 1.2)
+    out256[i] = usize.toF64(i) / 255.0
+    i = i + 1
+  }
+  let mft1Tag = run mft(1, 3, 3, &t256, &labClut, &out256)
+  let mft1Lab = run profile(b"RGB ", &["A2B0"], &[Bytes.asSlice(&mft1Tag)], b"Lab ")
+  let mut xyzClut: [f64; 72] = [0.0; 72]
+  i = 0
+  while i < 24 {
+    let r = usize.toF64(i / 8) / 2.0
+    let g = usize.toF64(i / 2 % 4) / 3.0
+    let b = usize.toF64(i % 2)
+    let scale = 32768.0 / 65535.0
+    xyzClut[i * 3] = f64.min(1.0, (0.43 * r + 0.39 * g + 0.14 * b) * scale)
+    xyzClut[i * 3 + 1] = f64.min(1.0, (0.22 * r + 0.72 * g + 0.06 * b) * scale)
+    xyzClut[i * 3 + 2] = f64.min(1.0, (0.01 * r + 0.10 * g + 0.71 * b) * scale)
+    i = i + 1
+  }
+  let identity = run curve(&[])
+  let a22 = run para(0, &[2.2])
+  let m11 = run para(0, &[1.1])
+  let m09 = run gammaCurve(0.9)
+  let bTable = run curve(&[0, 30000, 65535])
+  let a = Bytes.asSlice(&a22)
+  let b = Bytes.asSlice(&bTable)
+  let unit = Bytes.asSlice(&identity)
+  let xyzTag = run mab(
+    3,
+    &[a, a, a],
+    &[3, 4, 2],
+    &xyzClut,
+    2,
+    &[Bytes.asSlice(&m11), unit, Bytes.asSlice(&m09)],
+    &[0.9, 0.0, 0.0, 0.0, 0.95, 0.0, 0.0, 0.0, 0.9, 0.02, 0.01, 0.0],
+    &[b, b, b],
+  )
+  let mabXyz = run profile(b"RGB ", &["A2B0"], &[Bytes.asSlice(&xyzTag)], b"XYZ ")
+  let mut cmykClut: [f64; 48] = [0.0; 48]
+  i = 0
+  while i < 16 {
+    let c = usize.toF64(i / 8)
+    let m = usize.toF64(i / 4 % 2)
+    let y = usize.toF64(i / 2 % 2)
+    let k = usize.toF64(i % 2)
+    cmykClut[i * 3] = f64.max(0.0, 0.95 - 0.3 * c - 0.5 * m - 0.1 * y - 0.8 * k)
+    cmykClut[i * 3 + 1] = 0.5 - 0.2 * c + 0.3 * m - 0.05 * y
+    cmykClut[i * 3 + 2] = 0.5 - 0.1 * c - 0.1 * m + 0.35 * y
+    i = i + 1
+  }
+  let cmykTag = run mab(
+    4,
+    &[unit, unit, unit, unit],
+    &[2, 2, 2, 2],
+    &cmykClut,
+    1,
+    &[],
+    &[],
+    &[unit, unit, unit],
+  )
+  let cmyk = run profile(b"CMYK", &["A2B0"], &[Bytes.asSlice(&cmykTag)], b"Lab ")
+  let mut grayClut: [f64; 15] = [0.0; 15]
+  i = 0
+  while i < 5 {
+    grayClut[i * 3] = usize.toF64(i) / 4.0
+    grayClut[i * 3 + 1] = 0.5
+    grayClut[i * 3 + 2] = 0.5
+    i = i + 1
+  }
+  let grayTag = run mft(2, 1, 5, &[0.0, 1.0], &grayClut, &[0.0, 1.0])
+  let gray = run profile(b"GRAY", &["A2B0"], &[Bytes.asSlice(&grayTag)], b"Lab ")
+  let p20 = run para(0, &[2.0])
+  let p18 = run para(0, &[1.8])
+  let p10 = run para(0, &[1.0])
+  let matrix: [f64; 12] = [0.43, 0.39, 0.14, 0.22, 0.72, 0.06, 0.01, 0.10, 0.71, 0.0, 0.0, 0.0]
+  let perceptual = run mab(
+    3,
+    &[],
+    &[],
+    &[],
+    2,
+    &[],
+    &matrix,
+    &[a, Bytes.asSlice(&p20), Bytes.asSlice(&p18)],
+  )
+  let relCurve = Bytes.asSlice(&p10)
+  let relative = run mab(3, &[], &[], &[], 2, &[], &matrix, &[relCurve, relCurve, relCurve])
+  let red = run xyz(SRGB[0], SRGB[3], SRGB[6])
+  let green = run xyz(SRGB[1], SRGB[4], SRGB[7])
+  let blue = run xyz(SRGB[2], SRGB[5], SRGB[8])
+  let intents = run profile(
+    b"RGB ",
+    &["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC", "A2B0", "A2B1"],
+    &[
+      Bytes.asSlice(&red),
+      Bytes.asSlice(&green),
+      Bytes.asSlice(&blue),
+      unit,
+      unit,
+      unit,
+      Bytes.asSlice(&perceptual),
+      Bytes.asSlice(&relative),
+    ],
+    b"XYZ ",
+  )
+  let names = ["mft2-lab", "mft1-lab", "mab-xyz", "mab-intents"]
+  let profiles = [
+    Bytes.asSlice(&mft2Lab),
+    Bytes.asSlice(&mft1Lab),
+    Bytes.asSlice(&mabXyz),
+    Bytes.asSlice(&intents),
+  ]
+  i = 0
+  while i < 4 {
+    let name = run common.concat(&["lut-", names[i]])
+    let reason = run common.fmt(
+      "PNG iCCP with a LUT-based A2B0 tag ({key}); expected colours evaluated independently.",
+      &.{ key: names[i] },
+    )
+    let transform = lutTransform(profiles[i], 4)
+    run addIcc(
+      root,
+      &mut cases,
+      String.view(&name),
+      profiles[i],
+      &transform,
+      String.view(&reason),
+      SPEC_LUT,
+      &PIXELS,
+      2,
+    )
+    i = i + 1
+  }
+  let grayTransform = lutTransform(Bytes.asSlice(&gray), 4)
+  run addIcc(
+    root,
+    &mut cases,
+    "lut-gray",
+    Bytes.asSlice(&gray),
+    &grayTransform,
+    "Gray lut16Type with a legacy Lab PCS.",
+    SPEC_LUT,
+    &GRAYS,
+    0,
+  )
+
+  let cmykDef = run profileElement("cmyk", Bytes.asSlice(&cmyk), "")
+  let percDef = run profileElement("perc", Bytes.asSlice(&intents), "")
+  let relDef = run profileElement(
+    "rel",
+    Bytes.asSlice(&intents),
+    " rendering-intent=\"relative-colorimetric\"",
+  )
+  let mftDef = run profileElement("mft", Bytes.asSlice(&mft2Lab), "")
+  let defs = run common.concat(
+    &[
+      "<defs>",
+      String.view(&cmykDef),
+      String.view(&percDef),
+      String.view(&relDef),
+      String.view(&mftDef),
+      "</defs>",
+    ],
+  )
+  let mut body = run String.copy(String.view(&defs))
+  let mut ref = String.make()
+  run paintProbe(&mut body, &mut ref, 0, "cmyk", &[0.1, 0.7, 0.2, 0.05], Bytes.asSlice(&cmyk), 0)
+  run paintProbe(&mut body, &mut ref, 1, "cmyk", &[0.9, 0.1, 0.6, 0.3], Bytes.asSlice(&cmyk), 0)
+  run paintProbe(&mut body, &mut ref, 2, "cmyk", &[0.1, 0.2, 0.3], Bytes.asSlice(&cmyk), 0)
+  run paintProbe(&mut body, &mut ref, 3, "perc", &[0.3, 0.6, 0.2], Bytes.asSlice(&intents), 0)
+  run paintProbe(&mut body, &mut ref, 4, "rel", &[0.3, 0.6, 0.2], Bytes.asSlice(&intents), 1)
+  run paintProbe(&mut body, &mut ref, 5, "mft", &[0.8, 0.4, 0.1], Bytes.asSlice(&mft2Lab), 0)
+  run page(
+    root,
+    &mut cases,
+    "lut-paint",
+    12,
+    2,
+    String.view(&body),
+    String.view(&ref),
+    "icc-color() through CMYK and RGB LUT profiles; the element rendering-intent selects A2B1.",
+    SPEC_LUT,
+  )
+  let image0 = run image(untagged, 0, "color-profile=\"perc\"")
+  let image1 = run image(untagged, 1, "color-profile=\"rel\"")
+  let imageBody = run common.concat(
+    &[String.view(&defs), String.view(&image0), String.view(&image1)],
+  )
+  let t0 = lutTransform(Bytes.asSlice(&intents), 0)
+  let t1 = lutTransform(Bytes.asSlice(&intents), 1)
+  let row0 = run reference(&PIXELS, Bytes.asSlice(&intents), &t0, false, 0, true, 0)
+  let row1 = run reference(&PIXELS, Bytes.asSlice(&intents), &t1, false, 1, true, 0)
+  let imageRef = run common.concat(&[String.view(&row0), String.view(&row1)])
+  run page(
+    root,
+    &mut cases,
+    "lut-image-intent",
+    8,
+    2,
+    String.view(&imageBody),
+    String.view(&imageRef),
+    "A color-profile element's rendering-intent picks the AToB tag used for images.",
+    SPEC_LUT,
+  )
+}
+
+pub effect fn color(root: &Path) -> ()
+  ! OutOfMemoryError | FileError | WriterError | JsonError | FixtureError | EncodeError
+  ? &mut Allocator | &mut FileSystem {
+  let srgbCurve = run para(3, &[2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045])
+  let unitCurve = run curve(&[])
+  let wideCurve = run gammaCurve(2.19921875)
+  let tableCurve = run curve(&[0, 4000, 16000, 40000, 65535])
+  let paramR = run para(0, &[1.8])
+  let paramG = run para(1, &[2.2, 1.1, -0.1])
+  let paramB = run para(4, &[2.4, 0.95, 0.05, 0.08, 0.04, 0.01, 0.002])
+  let grayCurve = run gammaCurve(1.0)
+  let s = Bytes.asSlice(&srgbCurve)
+  let u = Bytes.asSlice(&unitCurve)
+  let w = Bytes.asSlice(&wideCurve)
+  let t = Bytes.asSlice(&tableCurve)
+  let srgb = run rgbProfile(&SRGB, s, s, s)
+  let linear = run rgbProfile(&SRGB, u, u, u)
+  let wide = run rgbProfile(&WIDE, w, w, w)
+  let table = run rgbProfile(&SRGB, t, t, t)
+  let parametric = run rgbProfile(
+    &WIDE,
+    Bytes.asSlice(&paramR),
+    Bytes.asSlice(&paramG),
+    Bytes.asSlice(&paramB),
+  )
+  let gray = run profile(b"GRAY", &["kTRC"], &[Bytes.asSlice(&grayCurve)], b"XYZ ")
+  let mut cases = List<Value>.make()
+  let names = ["srgb", "linear", "wide-gamma", "table", "parametric"]
+  let profiles = [
+    Bytes.asSlice(&srgb),
+    Bytes.asSlice(&linear),
+    Bytes.asSlice(&wide),
+    Bytes.asSlice(&table),
+    Bytes.asSlice(&parametric),
+  ]
+  let mut i: usize = 0
+  while i < 5 {
+    let name = run common.concat(&["icc-", names[i]])
+    let reason = run common.fmt(
+      "PNG iCCP matrix/TRC profile ({key}) converted to sRGB; expected colours evaluated independently.",
+      &.{ key: names[i] },
+    )
+    let transform = iccTransform(profiles[i])
+    run addIcc(
+      root,
+      &mut cases,
+      String.view(&name),
+      profiles[i],
+      &transform,
+      String.view(&reason),
+      SPEC_ICC,
+      &PIXELS,
+      2,
+    )
+    i = i + 1
+  }
+  let grayTransform = iccTransform(Bytes.asSlice(&gray))
+  let linearTransform = iccTransform(Bytes.asSlice(&linear))
+  let wideTransform = iccTransform(Bytes.asSlice(&wide))
+  let none = noTransform()
+  run addIcc(
+    root,
+    &mut cases,
+    "icc-gray",
+    Bytes.asSlice(&gray),
+    &grayTransform,
+    "Gray TRC profile (ICC.1:2022 F.2): luminance maps to the PCS white.",
+    SPEC_ICC,
+    &GRAYS,
+    0,
+  )
+  run addIcc(
+    root,
+    &mut cases,
+    "icc-alpha",
+    Bytes.asSlice(&linear),
+    &linearTransform,
+    "Translucent samples convert their straight values; alpha is unchanged.",
+    SPEC_ICC,
+    &ALPHAS,
+    6,
+  )
+  let mut brokenTag = run Bytes.copy(b"mft2\0\0\0\0\x03\x03\x02\0")
+  let zeros: [u8; 36] = [0; 36]
+  run Bytes.append(&mut brokenTag, &zeros)
+  let broken = run profile(b"RGB ", &["A2B0"], &[Bytes.asSlice(&brokenTag)], b"XYZ ")
+  run addIcc(
+    root,
+    &mut cases,
+    "icc-lut-malformed",
+    Bytes.asSlice(&broken),
+    &none,
+    "A truncated lut16Type A2B0 tag is ignored and the samples are treated as sRGB.",
+    SPEC_LUT,
+    &PIXELS,
+    2,
+  )
+  run addIcc(
+    root,
+    &mut cases,
+    "icc-malformed",
+    Slice.view(Bytes.asSlice(&linear), 0, 100),
+    &none,
+    "A truncated profile is ignored and the samples are treated as sRGB.",
+    SPEC_ICC,
+    &PIXELS,
+    2,
+  )
+  let gammaChunk = run numbers("gAMA", &[100000])
+  let wideChunk = run iccp(Bytes.asSlice(&wide))
+  let overGamma = run png(&PIXELS, &[move gammaChunk, move wideChunk], 2)
+  run add(
+    root,
+    &mut cases,
+    "icc-over-gama",
+    Bytes.asSlice(&overGamma),
+    Bytes.asSlice(&wide),
+    &wideTransform,
+    "iCCP takes precedence over gAMA.",
+    "https://www.w3.org/TR/png-3/#11iCCP",
+    &PIXELS,
+    false,
+    "image/png",
+  )
+  let gammaOnly = run numbers("gAMA", &[100000])
+  let gammaPng = run png(&PIXELS, &[move gammaOnly], 2)
+  let gammaTransform = pngTransform(100000, &[])
+  run add(
+    root,
+    &mut cases,
+    "gama",
+    Bytes.asSlice(&gammaPng),
+    b"",
+    &gammaTransform,
+    "gAMA alone: linear = sample^(100000/gAMA) with sRGB primaries ",
+    "https://www.w3.org/TR/png-3/#11gAMA",
+    &PIXELS,
+    false,
+    "image/png",
+  )
+  let chrm: [u32; 8] = [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000]
+  let wideChrm: [u32; 8] = [34570, 35850, 73470, 26530, 15950, 84270, 3660, 100]
+  let gammaWide = run numbers("gAMA", &[55556])
+  let chromaticityWide = run numbers("cHRM", &wideChrm)
+  let widePng = run png(&PIXELS, &[move gammaWide, move chromaticityWide], 2)
+  let chromaticityTransform = pngTransform(55556, &wideChrm)
+  run add(
+    root,
+    &mut cases,
+    "gama-chrm",
+    Bytes.asSlice(&widePng),
+    b"",
+    &chromaticityTransform,
+    "gAMA with cHRM: primaries and white adapted to D50 with Bradford.",
+    "https://www.w3.org/TR/png-3/#11cHRM",
+    &PIXELS,
+    false,
+    "image/png",
+  )
+  let chromaticitySrgb = run numbers("cHRM", &chrm)
+  let chrmPng = run png(&PIXELS, &[move chromaticitySrgb], 2)
+  let chrmTransform = pngTransform(0, &chrm)
+  run add(
+    root,
+    &mut cases,
+    "chrm-srgb",
+    Bytes.asSlice(&chrmPng),
+    b"",
+    &chrmTransform,
+    "cHRM with sRGB primaries and no gAMA keeps sRGB samples.",
+    "https://www.w3.org/TR/png-3/#11cHRM",
+    &PIXELS,
+    false,
+    "image/png",
+  )
+  let srgbBody = run Bytes.copy(b"\0")
+  let srgbChunk = Chunk { kind: "sRGB", body: move srgbBody }
+  let ignoredGamma = run numbers("gAMA", &[100000])
+  let srgbPng = run png(&PIXELS, &[move srgbChunk, move ignoredGamma], 2)
+  run add(
+    root,
+    &mut cases,
+    "srgb-over-gama",
+    Bytes.asSlice(&srgbPng),
+    b"",
+    &none,
+    "An sRGB chunk overrides gAMA and cHRM.",
+    "https://www.w3.org/TR/png-3/#11sRGB",
+    &PIXELS,
+    false,
+    "image/png",
+  )
+  let jpeg = run common.jpegGray128(4, 1, 0, Bytes.asSlice(&linear))
+  let jpegPixels: [[u8; 4]; 4] = [[128, 128, 128, 255]; 4]
+  run add(
+    root,
+    &mut cases,
+    "jpeg-icc",
+    Bytes.asSlice(&jpeg),
+    Bytes.asSlice(&linear),
+    &linearTransform,
+    "JPEG APP2 ICC_PROFILE (ICC.1:2022 Annex B); uniform gray 128 survives the DCT exactly.",
+    SPEC_EMBED,
+    &jpegPixels,
+    false,
+    "image/jpeg",
+  )
+  let untagged = run png(&PIXELS, &[], 2)
+  run paintPages(
+    root,
+    &mut cases,
+    Bytes.asSlice(&linear),
+    Bytes.asSlice(&wide),
+    Bytes.asSlice(&gray),
+    Bytes.asSlice(&untagged),
+  )
+  run lutPages(root, &mut cases, Bytes.asSlice(&untagged))
+  run common.saveManifest(
+    root,
+    "modules/tests/fixtures/color/manifest.json",
+    List<Value>.asSlice(&cases),
+    "",
+    true,
+    false,
+    false,
+  )
+  let mut stdout = StdoutWriter.make()
+  let records = List<Value>.asSlice(&cases)
+  i = 0
+  while i < records.length {
+    let id = Json.field(&records[i], "id")
+      |> Json.asString
+      |> Option<string>.unwrapOr("")
+    run Format.format("{id}\n", &.{ id: id }) |> Effect.provideMut<Writer>(&mut stdout)
+    i = i + 1
+  }
+}

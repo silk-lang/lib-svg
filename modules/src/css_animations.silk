@@ -7,7 +7,7 @@ import silk.core.result { Result }
 import scene { RenderError }
 import structure { Graph, OccurrenceId }
 import document_styles { StyledGraph }
-import stylesheets { Keyframes, Keyframe, KeyframeValue }
+import stylesheets { Keyframes, Keyframe }
 import animation
 import svg_css.properties { Property }
 import svg_css.properties
@@ -807,7 +807,7 @@ pub effect fn sample(graph: &mut Graph, styled: &StyledGraph<'_>, time: f64) -> 
           }
           let propertyName = match String.fromUtf8(property) {
             Result<string, InvalidUtf8>.Success { value } => value
-            Result<string, InvalidUtf8>.Failure { error } => {
+            Result<string, InvalidUtf8>.Failure { .. } => {
               fail RenderError.InvalidXml
             }
           }
@@ -861,7 +861,7 @@ pub effect fn sample(graph: &mut Graph, styled: &StyledGraph<'_>, time: f64) -> 
   while w < pending.length {
     let style = match String.fromUtf8(Bytes.asSlice(&pending[w].style)) {
       Result<string, InvalidUtf8>.Success { value } => value
-      Result<string, InvalidUtf8>.Failure { error } => {
+      Result<string, InvalidUtf8>.Failure { .. } => {
         fail RenderError.InvalidXml
       }
     }

@@ -1,0 +1,395 @@
+import task_support as Support
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.inflate { DecodeError, Decoder, Format, Limits, Progress, Status }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.json.scanner { JsonError }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { DirectoryEntry, FileError, FileSystem, Path }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+import silk.testing.testing { Testing, AssertionError }
+
+struct Pixels {
+  width: u32,
+  height: u32,
+  data: Bytes
+}
+
+fn word(bytes: &[u8], at: usize) -> u32 {
+  return u8.toU32(bytes[at]) * 16777216 + u8.toU32(bytes[at + 1]) * 65536
+    + u8.toU32(bytes[at + 2]) * 256
+    + u8.toU32(bytes[at + 3])
+}
+
+fn little(bytes: &[u8], at: usize) -> u32 {
+  return u8.toU32(bytes[at]) + u8.toU32(bytes[at + 1]) * 256 + u8.toU32(bytes[at + 2]) * 65536
+    + u8.toU32(bytes[at + 3]) * 16777216
+}
+
+fn white(c: u8) -> bool {
+  return c == 32 || (c >= 9 && c <= 13)
+}
+
+fn starts(bytes: &[u8], at: usize, token: &[u8]) -> bool {
+  if token.length > bytes.length - at {
+    return false
+  }
+  let mut i: usize = 0
+  while i < token.length {
+    if bytes[at + i] != token[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn spaceEnd(bytes: &[u8], start: usize) -> usize {
+  let mut at = start
+  while at < bytes.length {
+    if white(bytes[at]) {
+      at = at + 1
+    } else if starts(bytes, at, b"\xc2\xa0") {
+      at = at + 2
+    } else if starts(bytes, at, b"\xe1\x9a\x80") || starts(bytes, at, b"\xe2\x80\xa8")
+      || starts(bytes, at, b"\xe2\x80\xa9")
+      || starts(bytes, at, b"\xe2\x80\xaf")
+      || starts(bytes, at, b"\xe2\x81\x9f")
+      || starts(bytes, at, b"\xe3\x80\x80")
+      || starts(bytes, at, b"\xef\xbb\xbf") {
+      at = at + 3
+    } else if bytes.length - at >= 3 && bytes[at] == 226 && bytes[at + 1] == 128
+      && bytes[at + 2] >= 128
+      && bytes[at + 2] <= 138 {
+      at = at + 3
+    } else {
+      break
+    }
+  }
+  return at
+}
+
+// Preserve the browser parity protocol's lexical resource filter, including malformed SVGs.
+fn loadsFiles(bytes: &[u8]) -> bool {
+  let mut at: usize = 0
+  while at < bytes.length {
+    let mut end = at
+    let mut matched = false
+    if starts(bytes, at, b"href") {
+      end = at + 4
+      end = spaceEnd(bytes, end)
+      if end < bytes.length && bytes[end] == 61 {
+        end = end + 1
+        end = spaceEnd(bytes, end)
+        if end < bytes.length && (bytes[end] == 34 || bytes[end] == 39) {
+          end = end + 1
+          matched = true
+        }
+      }
+    } else if starts(bytes, at, b"url(") {
+      end = at + 4
+      end = spaceEnd(bytes, end)
+      if end < bytes.length && (bytes[end] == 34 || bytes[end] == 39) {
+        end = end + 1
+      }
+      matched = true
+    } else if starts(bytes, at, b"@import") {
+      end = at + 7
+      let start = end
+      end = spaceEnd(bytes, end)
+      if end > start && end < bytes.length && (bytes[end] == 34 || bytes[end] == 39) {
+        end = end + 1
+        matched = true
+      }
+    }
+    if matched {
+      let start = end
+      while end < bytes.length && bytes[end] != 34 && bytes[end] != 39 && bytes[end] != 41 {
+        end = end + 1
+      }
+      let target = Slice.view<u8>(bytes, start, end - start)
+      if target.length != 0 && !starts(target, 0, b"#") && !starts(target, 0, b"data:") {
+        return true
+      }
+      at = end
+    } else {
+      at = at + 1
+    }
+  }
+  return false
+}
+
+effect fn png(path: &Path) -> Pixels
+  ! TaskError | FileError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  let file = run FileSystem.readFile(path)
+  let bytes = Bytes.asSlice(&file)
+  if bytes.length < 33 {
+    run Task.abort("Truncated native PNG")
+  }
+  let mut at: usize = 8
+  let mut width: u32 = 0
+  let mut height: u32 = 0
+  let mut compressed = Bytes.make()
+  while at + 12 <= bytes.length {
+    let length = u32.toUsize(word(bytes, at))
+    if length > bytes.length - at - 12 {
+      run Task.abort("Truncated native PNG chunk")
+    }
+    if bytes[at + 4] == 73 && bytes[at + 5] == 72 && bytes[at + 6] == 68 && bytes[at + 7] == 82 {
+      if length != 13 || bytes[at + 16] != 8 || bytes[at + 17] != 6 {
+        run Task.abort("Expected native RGBA8 PNG")
+      }
+      width = word(bytes, at + 8)
+      height = word(bytes, at + 12)
+    } else if bytes[at + 4] == 73 && bytes[at + 5] == 68 && bytes[at + 6] == 65
+      && bytes[at + 7] == 84 {
+      run Bytes.append(&mut compressed, Slice.view<u8>(bytes, at + 8, length))
+    }
+    at = at + length + 12
+  }
+  if width == 0 || height == 0 || width > 67108864 || height > 67108864 / width {
+    run Task.abort("Invalid native PNG dimensions")
+  }
+  let stride = u32.toUsize(width) * 4
+  let rawLength = (stride + 1) * u32.toUsize(height)
+  let mut raw = run Bytes.zeroed(rawLength)
+  let limits = Limits {
+    maxInputBytes: usize.toU64(Bytes.length(&compressed)),
+    maxOutputBytes: usize.toU64(rawLength),
+    maxMembers: 1,
+    maxHeaderBytes: 2,
+    maxMemoryBytes: 65536,
+  }
+  let mut decoder = match move run Effect.result(Decoder.make(Format.Zlib, move limits)) {
+    Result<Decoder, DecodeError | OutOfMemoryError>.Success { value } => move value
+    Result<Decoder, DecodeError | OutOfMemoryError>.Failure { .. } => run Task.abort(
+      "Cannot decode native PNG",
+    )
+  }
+  match Decoder.step(&mut decoder, Bytes.asSlice(&compressed), Bytes.asMutSlice(&mut raw), true) {
+    Result<Progress, DecodeError>.Success { value } => {
+      if value.status != Status.Finished || value.written != rawLength {
+        run Task.abort("Incomplete native PNG stream")
+      }
+    }
+    Result<Progress, DecodeError>.Failure { .. } => run Task.abort("Invalid native PNG stream")
+  }
+  let data = Bytes.asSlice(&raw)
+  let mut pixels = Bytes.make()
+  let mut y: usize = 0
+  while y < u32.toUsize(height) {
+    let offset = y * (stride + 1)
+    if data[offset] != 0 {
+      run Task.abort("Unexpected native PNG filter")
+    }
+    run Bytes.append(&mut pixels, Slice.view<u8>(data, offset + 1, stride))
+    y = y + 1
+  }
+  return Pixels { width: width, height: height, data: move pixels }
+}
+
+effect fn execute(program: string, args: &[string]) -> bool
+  ! TaskError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  run Task.exec(program, args)
+  return true
+}
+
+effect fn failed<E>(error: E) -> bool {
+  drop error
+  return false
+}
+
+effect fn compare(wasm: string, native: string, scratch: &Path) -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let fontDirectory = run Support.path("modules/tests/fonts")
+  let fontEntries = run FileSystem.listDirectory(&fontDirectory)
+  let fonts = List<DirectoryEntry>.asSlice(&fontEntries)
+  let mut fontPaths = List<String>.make()
+  run List<String>.append(
+    &mut fontPaths,
+    run String.copy("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+  )
+  let mut i: usize = 0
+  while i < fonts.length {
+    let name = Path.name(&fonts[i].path) |> Option<string>.unwrapOr("")
+    if String.endsWith(name, ".ttf") || String.endsWith(name, ".otf") {
+      run List<String>.append(&mut fontPaths, run String.copy(run Support.pathText(&fonts[i].path)))
+    }
+    i = i + 1
+  }
+  let nativePng = run Path.join(scratch, "native.png")
+  let wasmRgba = run Path.join(scratch, "wasm.rgba")
+  let fixtures = run Support.path("modules/tests/fixtures")
+  let directories = run FileSystem.listDirectory(&fixtures)
+  let dirs = List<DirectoryEntry>.asSlice(&directories)
+  let mut compared: usize = 0
+  let mut skipped: usize = 0
+  let mut failures: usize = 0
+  i = 0
+  while i < dirs.length {
+    if dirs[i].kind.code != 1 {
+      i = i + 1
+      continue
+    }
+    let manifest = run Path.join(&dirs[i].path, "manifest.json")
+    if !run FileSystem.exists(&manifest) {
+      i = i + 1
+      continue
+    }
+    let bytes = run FileSystem.readFile(&manifest)
+    let document = match move run Effect.result(Json.parse(Bytes.asSlice(&bytes))) {
+      Result<Value, JsonError | OutOfMemoryError>.Success { value } => move value
+      Result<Value, JsonError | OutOfMemoryError>.Failure { .. } => run Task.abort(
+        "Invalid wasm fixture manifest",
+      )
+    }
+    let cases = match Json.field(&document, "cases") {
+      Option<&Value>.Some { value } => match &value.* {
+        Value.Array { values } => List<Value>.asSlice(&values)
+        _ => run Task.abort("Missing wasm fixture cases")
+      }
+      Option<&Value>.None => run Task.abort("Missing wasm fixture cases")
+    }
+    let mut c: usize = 0
+    while c < cases.length {
+      let input = Json.field(&cases[c], "input")
+        |> Json.asString
+        |> Option<string>.unwrapOr("")
+      let id = Json.field(&cases[c], "id")
+        |> Json.asString
+        |> Option<string>.unwrapOr("")
+      let location = run Path.resolve(&dirs[i].path, input)
+      let source = run FileSystem.readFile(&location)
+      if loadsFiles(Bytes.asSlice(&source)) {
+        skipped = skipped + 1
+        c = c + 1
+        continue
+      }
+      let nativeOk = run Effect.catchAll(
+        execute(
+          native,
+          &[
+            run Support.pathText(&location),
+            "-o",
+            run Support.pathText(&nativePng),
+            "--font-dir",
+            "modules/tests/fonts",
+          ],
+        ),
+        failed,
+      )
+      let mut args = List<string>.make()
+      run List<string>.append(&mut args, "modules/tools/wasm/js/render.mjs")
+      run List<string>.append(&mut args, wasm)
+      run List<string>.append(&mut args, run Support.pathText(&location))
+      run List<string>.append(&mut args, run Support.pathText(&wasmRgba))
+      let paths = List<String>.asSlice(&fontPaths)
+      let mut f: usize = 0
+      while f < paths.length {
+        run List<string>.append(&mut args, String.view(&paths[f]))
+        f = f + 1
+      }
+      let wasmOk = run Effect.catchAll(execute("node", List<string>.asSlice(&args)), failed)
+      compared = compared + 1
+      let mut same = nativeOk == wasmOk
+      if nativeOk && wasmOk {
+        let image = run png(&nativePng)
+        let raw = run FileSystem.readFile(&wasmRgba)
+        let data = Bytes.asSlice(&raw)
+        let expected = Bytes.asSlice(&image.data)
+        same = data.length == expected.length + 8
+        if same {
+          same = little(data, 0) == image.width && little(data, 4) == image.height
+        }
+        let mut p: usize = 0
+        while same && p < expected.length {
+          if data[p + 8] != expected[p] {
+            same = false
+          }
+          p = p + 1
+        }
+      }
+      if !same {
+        failures = failures + 1
+        let message = run Support.cat(&[id, ": native/wasm outcome or RGBA pixels differ"])
+        run Support.printLine(String.view(&message))
+      }
+      c = c + 1
+    }
+    i = i + 1
+  }
+  let comparisons = run Support.number(compared)
+  let skips = run Support.number(skipped)
+  let differences = run Support.number(failures)
+  let summary = run Support.cat(
+    &[
+      String.view(&comparisons),
+      " cases compared, ",
+      String.view(&skips),
+      " skipped (they load files), ",
+      String.view(&differences),
+      " differ",
+    ],
+  )
+  run Support.printLine(String.view(&summary))
+  if failures > 0 {
+    run Task.abort("Native/wasm parity failed")
+  }
+}
+
+pub effect fn check() -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let font = run Support.path("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf")
+  if !run FileSystem.exists(&font) {
+    run Task.abort("Wasm/native corpus parity requires Linux fonts-dejavu-core (DejaVuSerif.ttf)")
+  }
+  let wasm = run Support.build("modules/tools/wasm", "svg-wasm", true, true)
+  let native = run Support.build("svg-render-test-harness", "svg-render-test-harness", true, false)
+  let build = run Support.path("build")
+  run FileSystem.createDirectoriesRecursively(&build)
+  let temporary = run FileSystem.temporaryDirectory(&build, ".wasm-parity-")
+  let scratch = run Path.fromBytes(Path.rawBytes(&temporary.path))
+  run Effect.ensuring(
+    compare(String.view(&wasm), String.view(&native), &scratch),
+    FileSystem.releaseIgnored(move temporary),
+  )
+}
+
+test effect fn resourceFilterPreservesMalformedAndUnicodeInputs() -> ()
+  ! AssertionError<'static> {
+  run Testing.expect(
+    !loadsFiles(b"<svg><text>\xc3\xa9</text><image href='data:image/png;base64,AA'/></svg>"),
+    "data URLs and Unicode stay in parity",
+  )
+  run Testing.expect(
+    !loadsFiles(b"\xff<svg href='#fragment'/>"),
+    "malformed UTF-8 reaches both renderers",
+  )
+  run Testing.expect(
+    loadsFiles(b"<image href\xc2\xa0=\xe2\x80\x89'file.png'/>"),
+    "JavaScript whitespace resource filtering",
+  )
+  run Testing.expect(
+    loadsFiles(b"<style>@import 'theme.css';</style>"),
+    "external CSS is explicitly skipped",
+  )
+  run Testing.expect(
+    !loadsFiles(b"<path style=\"fill:url(#paint)\"/>"),
+    "fragment paints stay in parity",
+  )
+}

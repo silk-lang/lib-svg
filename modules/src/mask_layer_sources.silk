@@ -40,7 +40,7 @@ pub effect fn requests(graph: &Graph, styles: &StyledGraph<'_>) -> List<LayerReq
     }
     let layers = match &engine.values.get(entry.value).* {
       Value.Effect { value } => match &value {
-        EffectValue.Masks { layers, resetBorder } => layers.asSlice()
+        EffectValue.Masks { layers, .. } => layers.asSlice()
         _ => {
           continue
         }
@@ -86,7 +86,7 @@ pub effect fn requests(graph: &Graph, styles: &StyledGraph<'_>) -> List<LayerReq
         }
         Result<Url, UrlError | OutOfMemoryError>.Failure { error } => {
           match &error {
-            OutOfMemoryError value => {
+            OutOfMemoryError _ => {
               fail OutOfMemoryError {}
             }
             _ => {}

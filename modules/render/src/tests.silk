@@ -1,9 +1,10 @@
-import embedded_budget_tests
-import document_images_tests
-import embedded_viewport_tests
-import view_tests
-import lower_tests
-import animated_tests
+// Imported only to register each module's tests with this root.
+import embedded_budget_tests as _embedded_budget_tests
+import document_images_tests as _document_images_tests
+import embedded_viewport_tests as _embedded_viewport_tests
+import view_tests as _view_tests
+import lower_tests as _lower_tests
+import animated_tests as _animated_tests
 import svg_core.structure { Options as StructureOptions, DocumentId, SourceId }
 import lib { RenderOptions, RenderError, HitTarget, Pixmap as Image }
 import lib as renderer
@@ -237,7 +238,7 @@ test effect fn malformedDocumentsAndOversizedTargetsReturnErrors() -> ()
         RenderError.InvalidXml => true
         _ => false
       }
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -257,7 +258,7 @@ test effect fn malformedDocumentsAndOversizedTargetsReturnErrors() -> ()
         RenderError.TooLarge => true
         _ => false
       }
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -480,7 +481,7 @@ effect fn expectInvalidEnvironment(environment: &Environment<'_, '_>) -> ()
         RenderError.InvalidStyleContext => true
         _ => false
       }
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }
@@ -566,7 +567,7 @@ effect fn expectNativeError(
   let matches = match &result {
     Result<NativeHost, NativeHostError | OutOfMemoryError>.Failure { error } => match &error {
       NativeHostError problem => problem == expected
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
     }

@@ -163,7 +163,7 @@ pub fn qualifies(document: &XmlDocument, node: XmlNodeId, config: &Config<'_>) -
   }
   let rank = languageRank(document, node, config)
   return match &rank {
-    Option<usize>.Some { value } => true
+    Option<usize>.Some { .. } => true
     _ => false
   }
 }

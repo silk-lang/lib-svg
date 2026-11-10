@@ -1,0 +1,204 @@
+import silk.cli.command { Command, CommandLine }
+import silk.cli.task { Task, TaskError, TaskSet }
+import silk.collections.bytes { Bytes }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { FileError, FileSystem, Path }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { InvalidUtf8, String }
+
+const LEXBOR_REVISION: string = "7fb22cf5664a331d7c24b113489e566767c9c25a"
+
+const XERCES_REVISION: string = "31b4b3a06105dcd607db9fda9d1883ad7e489bfe"
+
+fn onWindows() -> bool {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return true
+  } else {
+    return false
+  }
+}
+
+union Tasks {
+  InstallLexbor,
+  InstallXerces,
+}
+
+impl CommandLine for Tasks {
+  static fn command() -> Command<Tasks> {
+    return Command<Tasks>.make(
+      "bootstrap",
+      "Build native prerequisites before the main task program",
+    )
+      |> Command.variant(
+        "InstallLexbor",
+        "Build pinned Lexbor 2.5.0 HTML5 parser with Git and CMake",
+      )
+      |> Command.variant(
+        "InstallXerces",
+        "Build pinned Xerces-C 3.3.0 XML 1.0/1.1 validator with Git and CMake",
+      )
+  }
+}
+
+effect fn text(path: &Path) -> string
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return match Path.view(path) {
+    Option<string>.Some { value } => value
+    Option<string>.None => run Task.abort("Bootstrap paths must be UTF-8")
+  }
+}
+
+effect fn output(bytes: &[u8]) -> string
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return match String.fromUtf8(bytes) {
+    Result<string, InvalidUtf8>.Success { value } => String.trim(value)
+    Result<string, InvalidUtf8>.Failure { .. } => run Task.abort("Git returned non-UTF-8 output")
+  }
+}
+
+impl TaskSet for Tasks {
+  effect fn perform(self: Tasks) -> ()
+    ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+    let xerces = match move self {
+      Tasks.InstallLexbor => false
+      Tasks.InstallXerces => true
+    }
+    let revision = if xerces {
+      XERCES_REVISION
+    } else {
+      LEXBOR_REVISION
+    }
+    let repository = if xerces {
+      "https://github.com/apache/xerces-c.git"
+    } else {
+      "https://github.com/lexbor/lexbor.git"
+    }
+    let bootstrap = run Task.root()
+    let root = match move run Path.parent(&bootstrap) {
+      Option<Path>.Some { value } => move value
+      Option<Path>.None => run Task.abort("Bootstrap package has no repository parent")
+    }
+    let source = run Path.join(
+      &root,
+      if xerces {
+        ".cache/xerces-source"
+      } else {
+        ".cache/lexbor-source"
+      },
+    )
+    let build = run Path.join(
+      &root,
+      if xerces {
+        ".cache/xerces-build"
+      } else {
+        ".cache/lexbor-build"
+      },
+    )
+    let prefix = run Path.join(
+      &root,
+      if xerces {
+        ".cache/xerces"
+      } else {
+        ".cache/lexbor"
+      },
+    )
+    let gitDirectory = run Path.join(&source, ".git")
+    if !run FileSystem.exists(&gitDirectory) {
+      run FileSystem.createDirectoriesRecursively(&source)
+      run Task.exec("git", &["init", run text(&source)])
+      run Task.exec("git", &["-C", run text(&source), "remote", "add", "origin", repository])
+      run Task.exec("git", &["-C", run text(&source), "fetch", "--depth=1", "origin", revision])
+      run Task.exec("git", &["-C", run text(&source), "checkout", "--detach", "FETCH_HEAD"])
+    }
+    let current = run Task.capture("git", &["-C", run text(&source), "rev-parse", "HEAD"])
+    if (run output(Bytes.asSlice(&current))) != revision {
+      run Task.abort(
+        "Native prerequisite checkout is not the pinned revision; remove its .cache source directory to refetch",
+      )
+    }
+    let dirty = run Task.capture(
+      "git",
+      &["-C", run text(&source), "status", "--porcelain", "--untracked-files=all"],
+    )
+    if (run output(Bytes.asSlice(&dirty))) != "" {
+      run Task.abort("Refusing modified native prerequisite source checkout")
+    }
+    let mut installation = run String.copy("-DCMAKE_INSTALL_PREFIX=")
+    run String.append(&mut installation, run text(&prefix))
+    if xerces {
+      let bin = run Path.join(&prefix, "bin")
+      run FileSystem.createDirectoriesRecursively(&bin)
+      let mut outputDirectory = run String.copy("-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=")
+      run String.append(&mut outputDirectory, run text(&bin))
+      let mut releaseDirectory = run String.copy("-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=")
+      run String.append(&mut releaseDirectory, run text(&bin))
+      run Task.exec(
+        "cmake",
+        &[
+          "-S",
+          run text(&source),
+          "-B",
+          run text(&build),
+          "-DCMAKE_BUILD_TYPE=Release",
+          String.view(&installation),
+          String.view(&outputDirectory),
+          String.view(&releaseDirectory),
+          "-DBUILD_SHARED_LIBS=OFF",
+          "-Dnetwork=OFF",
+        ],
+      )
+      run Task.exec(
+        "cmake",
+        &[
+          "--build",
+          run text(&build),
+          "--target",
+          "SAX2Count",
+          "--config",
+          "Release",
+          "--parallel",
+          "2",
+        ],
+      )
+    } else {
+      let shared = if onWindows() {
+        "-DLEXBOR_BUILD_SHARED=ON"
+      } else {
+        "-DLEXBOR_BUILD_SHARED=OFF"
+      }
+      run Task.exec(
+        "cmake",
+        &[
+          "-S",
+          run text(&source),
+          "-B",
+          run text(&build),
+          "-DCMAKE_BUILD_TYPE=Release",
+          String.view(&installation),
+          "-DCMAKE_INSTALL_LIBDIR=lib",
+          shared,
+          "-DLEXBOR_BUILD_STATIC=ON",
+          "-DLEXBOR_BUILD_TESTS=OFF",
+          "-DLEXBOR_BUILD_EXAMPLES=OFF",
+        ],
+      )
+      run Task.exec(
+        "cmake",
+        &["--build", run text(&build), "--config", "Release", "--parallel", "2"],
+      )
+      run Task.exec("cmake", &["--install", run text(&build), "--config", "Release"])
+    }
+  }
+}
+
+pub effect fn main() -> i32
+  ? &mut HostInput {
+  return run Task.main<Tasks>()
+}

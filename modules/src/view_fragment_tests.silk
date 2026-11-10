@@ -174,7 +174,7 @@ test effect fn viewTransformsUseSvgAndCssGrammarsWithoutFlatteningCss3d() -> ()
       Option<ValueId>.Some { value: id } => {
         run Testing.expect(
           match &store.get(id).* {
-            Value.Transform { value: transform } => true
+            Value.Transform { .. } => true
             _ => false
           },
           "transform stored in shared typed value arena",
@@ -185,7 +185,7 @@ test effect fn viewTransformsUseSvgAndCssGrammarsWithoutFlatteningCss3d() -> ()
               TransformValue.List { operations } => {
                 run Testing.expect(
                   match &operations.asSlice()[0] {
-                    Operation.Matrix3 { components } => true
+                    Operation.Matrix3 { .. } => true
                     _ => false
                   },
                   "CSS 3D matrix is retained, not prematurely flattened to affine",
@@ -377,7 +377,7 @@ test effect fn escapedViewSeparatorsAndMalformedMediaPairsUseDifferentRecovery()
   run Testing.expect(escaped.valid, "escaped svgView spaces and semicolons are syntax")
   run Testing.expect(
     match &escaped.view {
-      Option<view_fragment.ViewOverrides>.Some { value } => true
+      Option<view_fragment.ViewOverrides>.Some { .. } => true
       _ => false
     },
     "view and time coexist",
@@ -419,7 +419,7 @@ test effect fn fragmentResourceLimitsAreErrorsRatherThanInvalidFallback() -> ()
   let attempted = run Effect.result(view_fragment.parse(b"long", b"long", &mut store, &limits))
     |> Effect.provideMut<Allocator>(&mut allocator)
   match move attempted {
-    Result<Fragment, CssError | OutOfMemoryError>.Success { value } => {
+    Result<Fragment, CssError | OutOfMemoryError>.Success { .. } => {
       run Testing.expect(false, "input exhaustion must not silently select the root")
     }
     Result<Fragment, CssError | OutOfMemoryError>.Failure { error } => match move error {
@@ -443,7 +443,7 @@ test effect fn fragmentResourceLimitsAreErrorsRatherThanInvalidFallback() -> ()
   )
     |> Effect.provideMut<Allocator>(&mut allocator)
   match move nested {
-    Result<Fragment, CssError | OutOfMemoryError>.Success { value } => {
+    Result<Fragment, CssError | OutOfMemoryError>.Success { .. } => {
       run Testing.expect(false, "nesting exhaustion must not silently select the root")
     }
     Result<Fragment, CssError | OutOfMemoryError>.Failure { error } => match move error {

@@ -54,17 +54,17 @@ fn operation(store: &Store<'_>, op: &Operation, box: Rect) -> Option<Matrix> {
       }
       transforms.fromColumnMajor(&values)
     }
-    Operation.Translate { x, y, z, threeD } => transforms.translation(
+    Operation.Translate { x, y, z, .. } => transforms.translation(
       number(store, x, box.width()),
       number(store, y, box.height()),
       number(store, z, 1.0),
     )
-    Operation.Scale { x, y, z, threeD } => transforms.scale(
+    Operation.Scale { x, y, z, .. } => transforms.scale(
       number(store, x, 1.0),
       number(store, y, 1.0),
       number(store, z, 1.0),
     )
-    Operation.Rotate { x, y, z, angle, threeD } => transforms.rotation(
+    Operation.Rotate { x, y, z, angle, .. } => transforms.rotation(
       number(store, x, 1.0),
       number(store, y, 1.0),
       number(store, z, 1.0),
@@ -172,7 +172,7 @@ pub fn hasPerspective(engine: &Engine<'_>, style: StyleId) -> bool {
   return match &engine.get(style, Property.Perspective) {
     Option<ComputedValue>.Some { value: computed } => match &engine.values.get(computed.value).* {
       Value.Transform { value: transform } => match &transform {
-        TransformValue.Perspective { depth } => true
+        TransformValue.Perspective { .. } => true
         _ => false
       }
       _ => false
@@ -208,11 +208,11 @@ pub fn transformed(engine: &Engine<'_>, style: StyleId) -> bool {
 
 fn threeDimensional(operation: &Operation) -> bool {
   return match &operation.* {
-    Operation.Matrix3 { components } => true
-    Operation.Perspective { depth } => true
-    Operation.Translate { x, y, z, threeD } => threeD
-    Operation.Scale { x, y, z, threeD } => threeD
-    Operation.Rotate { x, y, z, angle, threeD } => threeD
+    Operation.Matrix3 { .. } => true
+    Operation.Perspective { .. } => true
+    Operation.Translate { threeD, .. } => threeD
+    Operation.Scale { threeD, .. } => threeD
+    Operation.Rotate { threeD, .. } => threeD
     _ => false
   }
 }

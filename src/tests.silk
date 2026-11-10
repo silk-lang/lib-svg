@@ -1,0 +1,3 @@
+import bench_tests
+import corpora_tests
+import wasm_parity

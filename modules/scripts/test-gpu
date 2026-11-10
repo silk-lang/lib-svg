@@ -1,6 +1,0 @@
-#!/usr/bin/env node
-import { resolve } from 'node:path';
-import { build, root, run } from '../../scripts/internal.mjs';
-const suites = process.argv.slice(2);
-const defaults = ['painting', 'compositing', 'masking', 'clipping', 'clip-shapes', 'structure', 'color', 'filters', 'images', 'own', 'text', 'animation', 'css', 'malformed'];
-run(build('modules/gpu/tests'), [resolve(root, 'modules/tests/fixtures'), ...(suites.length ? suites : defaults)], { timeout: 900000 });

@@ -1,0 +1,771 @@
+//! Protocol-1 native stage measurements, interleaved engines, exact counters and strict baselines.
+import bench_support as B
+import task_support as Support
+import bench_workloads as Workloads
+import bench_process as Process
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError, FileInfo, DirectoryInfo }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.text.format { ParseError }
+import silk.num.u64
+import silk.num.usize
+import silk.num.f64
+
+pub struct Timing {
+  pub iterations: u64,
+  pub warmup: u64,
+  pub samples: u64,
+  pub timeout: f64,
+  pub callgrind: bool
+}
+
+pub struct Engine {
+  pub label: string<'static>,
+  pub executable: Path
+}
+
+pub struct Invocation {
+  pub result: Value,
+  pub wall: f64
+}
+
+struct Measurement {
+  times: Value,
+  walls: Value,
+  outputs: Value
+}
+
+pub fn modes() -> [string<'static>; 3] {
+  return ["parse", "render", "end-to-end"]
+}
+
+pub fn timer() -> string<'static> {
+  return "native monotonic wall clock; Silk monotonic clock separately records process wall time"
+}
+
+pub effect fn validate(timing: &Timing, engines: &[Engine]) -> ()
+  ! TaskError | FileError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  if timing.iterations < 1 || timing.iterations > 100000 || timing.warmup > 10000
+    || timing.samples < 1
+    || timing.samples > 100 {
+    run Task.abort("iterations must be 1..100000, warmup 0..10000, samples 1..100")
+  }
+  if !f64.isFinite(timing.timeout) || timing.timeout <= 0.0 || timing.timeout > 3600.0 {
+    run Task.abort("timeout must be >0 and <=3600 seconds")
+  }
+  let mut i: usize = 0
+  while i < engines.length {
+    match move run FileSystem.stat(&engines[i].executable) {
+      FileInfo info => {
+        drop info
+      }
+      DirectoryInfo info => {
+        drop info
+        run Task.abort("benchmark executable is a directory; build it explicitly first")
+      }
+    }
+    i = i + 1
+  }
+}
+
+pub effect fn validateResult(result: &Value, timing: &Timing) -> ()
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  if (run B.uint(run B.field(result, "protocol"))) != 1
+    || (run B.uint(run B.field(result, "iterations"))) != timing.iterations
+    || (run B.uint(run B.field(result, "warmup"))) != timing.warmup {
+    run Task.abort("unexpected protocol, iterations or warmup in benchmark output")
+  }
+  let elapsed = run B.uint(run B.field(result, "elapsed_ns"))
+  if elapsed == 0 || elapsed > 9007199254740991 {
+    run Task.abort("no positive safe native stage measurement")
+  }
+  if (run B.real(run B.field(result, "width"))) <= 0.0
+    || (run B.real(run B.field(result, "height"))) <= 0.0 {
+    run Task.abort("no rendered image dimensions")
+  }
+  let checksum = run B.counter(run B.field(result, "checksum"))
+  let consumed = run B.counter(run B.field(result, "consumed"))
+  if consumed != u64.wrappingMultiply(checksum, timing.iterations + timing.warmup) {
+    run Task.abort("outputs changed within an invocation")
+  }
+}
+
+pub effect fn invoke(binary: &Path, mode: string, input: &Path, timing: &Timing) -> Invocation
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let iterations = run B.format("{n}", &.{ n: timing.iterations })
+  let warmup = run B.format("{n}", &.{ n: timing.warmup })
+  let completed = run Process.execute(
+    run B.pathText(binary),
+    &[mode, run B.pathText(input), String.view(&iterations), String.view(&warmup)],
+    timing.timeout,
+    false,
+  )
+  let result = run B.parse(completed.output.asSlice())
+  run validateResult(&result, timing)
+  return Invocation { result: move result, wall: completed.wall }
+}
+
+effect fn words(text: string) -> List<String>
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = String.utf8Bytes(text)
+  let mut values = List<String>.make()
+  let mut i: usize = 0
+  while i < bytes.length {
+    while i < bytes.length && bytes[i] <= 32 {
+      i = i + 1
+    }
+    let start = i
+    while i < bytes.length && bytes[i] > 32 {
+      i = i + 1
+    }
+    if i > start {
+      run values.append(run B.text(run Bytes.copy(Slice.view(bytes, start, i - start))))
+    }
+  }
+  return move values
+}
+
+pub effect fn callgrindIr(text: string) -> u64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut events = List<String>.make()
+  let mut summary = List<String>.make()
+  let mut lines = String.split(text, "\n")
+  while let Option<string>.Some { value: line } = lines.next() {
+    if String.startsWith(line, "events:") {
+      events = run words(line)
+    } else if String.startsWith(line, "summary:") {
+      summary = run words(line)
+    }
+  }
+  if events.length() != summary.length() {
+    run Task.abort("Callgrind output has no complete Ir summary")
+  }
+  let mut i: usize = 1
+  while i < events.length() {
+    if String.view(&events.asSlice()[i]) == "Ir" {
+      let count = u64.parse(String.view(&summary.asSlice()[i]))
+        |> Result<u64, ParseError>.unwrapOr(18446744073709551615)
+      if count > 9007199254740991 {
+        run Task.abort("Callgrind Ir summary is not a safe nonnegative integer")
+      }
+      return count
+    }
+    i = i + 1
+  }
+  run Task.abort("Callgrind output has no complete Ir summary")
+}
+
+pub effect fn requireCallgrind() -> String
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  if Support.operatingSystem() != "linux" {
+    run Task.abort(
+      "--callgrind requires Linux and a working Valgrind/Callgrind installation for this architecture",
+    )
+  }
+  let completed = run Process.execute("valgrind", &["--version"], 20.0, false)
+  return run B.text(move completed.output)
+}
+
+effect fn runIr(binary: &Path, mode: string, input: &Path, timing: &Timing, directory: &Path) -> u64
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let output = run Path.join(directory, "callgrind.out")
+  let argument = run B.format("--callgrind-out-file={path}", &.{ path: run B.pathText(&output) })
+  let iterations = run B.format("{n}", &.{ n: timing.iterations })
+  let warmup = run B.format("{n}", &.{ n: timing.warmup })
+  let completed = run Process.execute(
+    "valgrind",
+    &[
+      "--tool=callgrind",
+      "--error-exitcode=99",
+      String.view(&argument),
+      run B.pathText(binary),
+      mode,
+      run B.pathText(input),
+      String.view(&iterations),
+      String.view(&warmup),
+    ],
+    timing.timeout,
+    false,
+  )
+  let result = run B.parse(completed.output.asSlice())
+  run validateResult(&result, timing)
+  let bytes = run FileSystem.readFile(&output)
+  let text = run B.text(move bytes)
+  return run callgrindIr(String.view(&text))
+}
+
+pub effect fn processIr(binary: &Path, mode: string, input: &Path, timing: &Timing) -> u64
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let parent = run B.path("modules/bench/.cache")
+  run FileSystem.createDirectoriesRecursively(&parent)
+  let directory = run FileSystem.createTemporaryDirectory(&parent, b"callgrind-")
+  let result = run Effect.result(runIr(binary, mode, input, timing, &directory))
+  run FileSystem.removeDirectoryRecursively(&directory)
+  match move result {
+    Result<
+      u64,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Success {
+      value
+    } => {
+      return value
+    }
+    Result<
+      u64,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+}
+
+pub effect fn median(values: &Value) -> f64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let source = run B.items(values)
+  if source.length == 0 {
+    run Task.abort("median requires at least one sample")
+  }
+  let mut sorted = List<f64>.make()
+  let mut i: usize = 0
+  while i < source.length {
+    run sorted.append(run B.real(&source[i]))
+    i = i + 1
+  }
+  i = 1
+  while i < sorted.length() {
+    let mut j = i
+    while j > 0 && sorted.asSlice()[j] < sorted.asSlice()[j - 1] {
+      let previous = sorted.asSlice()[j - 1]
+      let current = sorted.asSlice()[j]
+      sorted.set(j - 1, current)
+      sorted.set(j, previous)
+      j = j - 1
+    }
+    i = i + 1
+  }
+  let middle = sorted.length() / 2
+  return if sorted.length() % 2 != 0 {
+    sorted.asSlice()[middle]
+  } else {
+    (sorted.asSlice()[middle - 1] + sorted.asSlice()[middle]) / 2.0
+  }
+}
+
+pub effect fn environment(engines: &[Engine]) -> Value
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let mut environment = B.object()
+  let release = run Process.version("uname", &["-r"])
+  let platform = run B.format(
+    "{os}-{release}",
+    &.{ os: Support.operatingSystem(), release: String.view(&release) },
+  )
+  run B.set(&mut environment, "platform", run B.stringValue(String.view(&platform)))
+  run B.set(
+    &mut environment,
+    "machine",
+    run B.stringValue(
+      if Support.architecture() == "aarch64" {
+        "arm64"
+      } else if Support.architecture() == "x86_64" {
+        "x64"
+      } else {
+        Support.architecture()
+      },
+    ),
+  )
+  let cpu = run cpuModel()
+  run B.set(&mut environment, "cpu", run B.stringValue(String.view(&cpu)))
+  let cpus = if Support.operatingSystem() == "windows" {
+    run B.variable("NUMBER_OF_PROCESSORS", "")
+  } else if Support.operatingSystem() == "darwin" {
+    run Process.version("sysctl", &["-n", "hw.logicalcpu"])
+  } else {
+    run Process.version("getconf", &["_NPROCESSORS_ONLN"])
+  }
+  let cpuCount = match move u64.parse(String.trim(String.view(&cpus))) {
+    Result<u64, ParseError>.Success { value } => value
+    _ => run Task.abort("cannot read the host logical CPU count")
+  }
+  if cpuCount == 0 {
+    run Task.abort("host reports no logical CPUs")
+  }
+  run B.set(&mut environment, "logical_cpus", B.integer(cpuCount))
+  let mut versions = B.object()
+  let keys = ["silk", "rustc", "cargo", "clang"]
+  let variables = ["SILK", "RUSTC", "CARGO", "SILK_CLANG"]
+  let mut i: usize = 0
+  while i < keys.length {
+    let program = run B.variable(variables[i], keys[i])
+    let version = if keys[i] == "rustc" {
+      run Process.version(String.view(&program), &["--version", "--verbose"])
+    } else {
+      run Process.version(String.view(&program), &["--version"])
+    }
+    run B.set(&mut versions, keys[i], run B.stringValue(String.view(&version)))
+    i = i + 1
+  }
+  run B.set(&mut environment, "tool_versions", move versions)
+  let mut build = B.object()
+  let buildKeys = ["SILK_CLANG", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR"]
+  i = 0
+  while i < buildKeys.length {
+    if let Option<Bytes>.Some { value } = move run HostInput.variableNamed(buildKeys[i]) {
+      let text = run B.text(move value)
+      run B.set(&mut build, buildKeys[i], run B.stringValue(String.view(&text)))
+    }
+    i = i + 1
+  }
+  run B.set(&mut environment, "build_environment", move build)
+  let mut binaries = B.object()
+  i = 0
+  while i < engines.length {
+    let mut binary = B.object()
+    let path = run B.pathText(&engines[i].executable)
+    let hash = run B.fileHash(&engines[i].executable)
+    let version = run Process.version(path, &["--version"])
+    run B.set(&mut binary, "path", run B.stringValue(path))
+    run B.set(&mut binary, "sha256", run B.stringValue(String.view(&hash)))
+    run B.set(&mut binary, "version", run B.stringValue(String.view(&version)))
+    run B.set(&mut binaries, engines[i].label, move binary)
+    i = i + 1
+  }
+  run B.set(&mut environment, "binaries", move binaries)
+  return move environment
+}
+
+effect fn stages() -> Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut stages = B.object()
+  run B.set(
+    &mut stages,
+    "parse",
+    run B.stringValue(
+      "XML + computed style + geometry resolve + Silk record / usvg render-ready retained tree; not raw resolve. Retained result rasterized and consumed outside timing.",
+    ),
+  )
+  run B.set(
+    &mut stages,
+    "render",
+    run B.stringValue(
+      "Reuse retained display list/tree; allocate and zero a fresh destination inside every timed render; checksum and destination destruction outside timing.",
+    ),
+  )
+  run B.set(
+    &mut stages,
+    "end-to-end",
+    run B.stringValue(
+      "Parse + record (Silk) / usvg retained tree + allocate/zero + render + intermediate-tree destruction. File I/O, PNG encoding, checksum and destination destruction excluded.",
+    ),
+  )
+  return move stages
+}
+
+pub effect fn measure(
+  timing: &Timing,
+  engines: &[Engine],
+  requestedModes: &[String],
+  requestedWorkloads: &[String],
+  fetch: bool,
+) -> Value
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  if engines.length != 2 {
+    run Task.abort("benchmark comparisons require two engines")
+  }
+  run validate(timing, engines)
+  let manifestPath = run B.path("modules/bench/workloads.json")
+  let manifestBytes = run FileSystem.readFile(&manifestPath)
+  let manifest = run B.parse(manifestBytes.asSlice())
+  let manifestDirectory = run B.path("modules/bench")
+  let generator = run Path.resolve(
+    &manifestDirectory,
+    run B.str(run B.field(&manifest, "generator")),
+  )
+  let generatorHash = run B.fileHash(&generator)
+  if String.view(&generatorHash) != run B.str(run B.field(&manifest, "generator_sha256")) {
+    run Task.abort("workload generator differs from its tracked manifest hash")
+  }
+  let available = modes()
+  let mut i: usize = 0
+  while i < requestedModes.length {
+    let mode = String.view(&requestedModes[i])
+    if mode != "parse" && mode != "render" && mode != "end-to-end" {
+      run Task.abort("unknown benchmark mode")
+    }
+    i = i + 1
+  }
+  i = 0
+  while i < requestedWorkloads.length {
+    let _spec = run B.field(
+      run B.field(&manifest, "workloads"),
+      String.view(&requestedWorkloads[i]),
+    )
+    i = i + 1
+  }
+  let cache = run B.path("modules/bench/.cache/workloads")
+  let prepared = run Workloads.prepare(&manifest, &cache, fetch, requestedWorkloads)
+  let suite = run B.loadJson("modules/tests/suites.lock.json")
+  let reference = run B.str(
+    run B.field(run B.field(run B.field(&suite, "suites"), "resvg"), "revision"),
+  )
+  let mut env = run environment(engines)
+  i = 0
+  while i < engines.length {
+    if engines[i].label == "rust" {
+      let version = run B.str(
+        run B.field(run B.field(run B.field(&env, "binaries"), "rust"), "version"),
+      )
+      if !String.contains(version, reference) {
+        run Task.abort(
+          "Rust benchmark --version does not identify the exact suites.lock.json resvg pin",
+        )
+      }
+    }
+    i = i + 1
+  }
+  if timing.callgrind {
+    let valgrind = run requireCallgrind()
+    let mut versions = run Json.copy(run B.field(&env, "tool_versions"))
+    run B.set(&mut versions, "valgrind", run B.stringValue(String.trim(String.view(&valgrind))))
+    run B.set(&mut env, "tool_versions", move versions)
+  }
+  let mut config = B.object()
+  run B.set(&mut config, "iterations", B.integer(timing.iterations))
+  run B.set(&mut config, "warmup", B.integer(timing.warmup))
+  run B.set(&mut config, "samples", B.integer(timing.samples))
+  run B.set(&mut config, "callgrind", B.boolean(timing.callgrind))
+  run B.set(
+    &mut config,
+    "pixmap_policy",
+    run B.stringValue("fresh zeroed allocation per render, included in stage time"),
+  )
+  run B.set(
+    &mut config,
+    "sample_unit",
+    run B.stringValue("one complete workload pass; sum per-file native times / iterations"),
+  )
+  run B.set(&mut config, "timer", run B.stringValue(timer()))
+  let mut chosenModes = B.array()
+  if requestedModes.length == 0 {
+    i = 0
+    while i < available.length {
+      run B.push(&mut chosenModes, run B.stringValue(available[i]))
+      i = i + 1
+    }
+  } else {
+    i = 0
+    while i < requestedModes.length {
+      run B.push(&mut chosenModes, run B.stringValue(String.view(&requestedModes[i])))
+      i = i + 1
+    }
+  }
+  run B.set(&mut config, "modes", run Json.copy(&chosenModes))
+  let mut report = B.object()
+  run B.set(&mut report, "protocol", B.integer(1))
+  let timestamp = run Process.execute("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"], 20.0, false)
+  let timestampText = run B.text(move timestamp.output)
+  run B.set(
+    &mut report,
+    "measured_at_utc",
+    run B.stringValue(String.trim(String.view(&timestampText))),
+  )
+  run B.set(&mut report, "environment", move env)
+  run B.set(&mut report, "config", move config)
+  run B.set(&mut report, "stages", run stages())
+  let manifestHash = run B.hash(manifestBytes.asSlice())
+  run B.set(&mut report, "workload_manifest_sha256", run B.stringValue(String.view(&manifestHash)))
+  run B.set(&mut report, "reference_pin", run B.stringValue(reference))
+  if timing.callgrind {
+    run B.set(
+      &mut report,
+      "callgrind_scope",
+      run B.stringValue(
+        "Full separate process invocation, including startup, file I/O, setup, warmup, checksum and untimed parse-result rasterization; Ir is NOT a stage-only counter. Wall-time samples above run without Valgrind.",
+      ),
+    )
+  }
+  let mut descriptions = B.object()
+  let mut engineResults = [B.object(), B.object()]
+  let mut ratios = B.object()
+  let mut checksumEqual = B.object()
+  let workloads = prepared.asSlice()
+  let chosen = run B.items(&chosenModes)
+  let mut w: usize = 0
+  while w < workloads.length {
+    let workload = &workloads[w]
+    let name = String.view(&workload.name)
+    let files = workload.files.asSlice()
+    let mut description = B.object()
+    run B.set(&mut description, "sha256", run B.stringValue(String.view(&workload.sha256)))
+    run B.set(&mut description, "documents", B.integer(usize.toU64(files.length)))
+    run B.set(&mut description, "bytes", B.integer(usize.toU64(workload.bytes)))
+    run B.set(
+      &mut description,
+      "spec",
+      run Json.copy(run B.field(run B.field(&manifest, "workloads"), name)),
+    )
+    run B.set(&mut descriptions, name, move description)
+    let mut m: usize = 0
+    while m < chosen.length {
+      let mode = run B.str(&chosen[m])
+      let key = run B.format("{name}/{mode}", &.{ name: name, mode: mode })
+      let mut measurements = [
+        Measurement { times: B.array(), walls: B.array(), outputs: B.object() },
+        Measurement { times: B.array(), walls: B.array(), outputs: B.object() },
+      ]
+      let mut sample: u64 = 0
+      while sample < timing.samples {
+        let mut turn: usize = 0
+        while turn < 2 {
+          let engine = if sample % 2 == 0 {
+            turn
+          } else {
+            1 - turn
+          }
+          let mut elapsed: f64 = 0.0
+          let mut wall: f64 = 0.0
+          let mut outputs = B.object()
+          let mut f: usize = 0
+          while f < files.length {
+            let invocation = run invoke(&engines[engine].executable, mode, &files[f], timing)
+            elapsed = elapsed + run B.real(run B.field(&invocation.result, "elapsed_ns"))
+            wall = wall + invocation.wall
+            let mut output = B.object()
+            run B.set(
+              &mut output,
+              "checksum",
+              run Json.copy(run B.field(&invocation.result, "checksum")),
+            )
+            run B.set(&mut output, "width", run Json.copy(run B.field(&invocation.result, "width")))
+            run B.set(
+              &mut output,
+              "height",
+              run Json.copy(run B.field(&invocation.result, "height")),
+            )
+            run B.set(&mut outputs, run B.name(&files[f]), move output)
+            f = f + 1
+          }
+          if sample > 0 && !Json.equal(&measurements[engine].outputs, &outputs) {
+            run Task.abort("output checksum or dimensions changed between samples")
+          }
+          measurements[engine].outputs = move outputs
+          run B.push(
+            &mut measurements[engine].times,
+            B.number(elapsed / u64.toF64(timing.iterations)),
+          )
+          run B.push(&mut measurements[engine].walls, B.number(wall))
+          turn = turn + 1
+        }
+        sample = sample + 1
+      }
+      let outputs = run B.entries(&measurements[0].outputs)
+      let mut f: usize = 0
+      while f < outputs.length {
+        let other = run B.field(&measurements[1].outputs, String.view(&outputs[f].key))
+        if !Json.equal(run B.field(&outputs[f].value, "width"), run B.field(other, "width"))
+          || !Json.equal(run B.field(&outputs[f].value, "height"), run B.field(other, "height")) {
+          run Task.abort("output dimensions differ; refusing a ratio for unequal raster workloads")
+        }
+        f = f + 1
+      }
+      let left = run median(&measurements[0].times)
+      let right = run median(&measurements[1].times)
+      run B.set(&mut ratios, String.view(&key), B.number(left / right))
+      run B.set(
+        &mut checksumEqual,
+        String.view(&key),
+        B.boolean(Json.equal(&measurements[0].outputs, &measurements[1].outputs)),
+      )
+      let mut e: usize = 0
+      while e < 2 {
+        let mut measured = B.object()
+        let medianTime = run median(&measurements[e].times)
+        run B.set(&mut measured, "median_ns", B.number(medianTime))
+        run B.set(
+          &mut measured,
+          "process_wall_median_ns",
+          B.number(run median(&measurements[e].walls)),
+        )
+        run B.set(&mut measured, "samples_ns", run Json.copy(&measurements[e].times))
+        run B.set(&mut measured, "process_wall_samples_ns", run Json.copy(&measurements[e].walls))
+        run B.set(&mut measured, "outputs", run Json.copy(&measurements[e].outputs))
+        if timing.callgrind {
+          let mut ir: u64 = 0
+          f = 0
+          while f < files.length {
+            ir = ir + run processIr(&engines[e].executable, mode, &files[f], timing)
+            f = f + 1
+          }
+          run B.set(&mut measured, "callgrind_process_Ir", B.integer(ir))
+        }
+        run B.set(&mut engineResults[e], String.view(&key), move measured)
+        let message = run B.format(
+          "{engine} {key}: {ms:.4} ms/workload (median of {samples}, {iterations} iterations, {warmup} warmup)",
+          &.{
+            engine: engines[e].label,
+            key: String.view(&key),
+            ms: medianTime / 1000000.0,
+            samples: timing.samples,
+            iterations: timing.iterations,
+            warmup: timing.warmup,
+          },
+        )
+        run B.log(String.view(&message))
+        e = e + 1
+      }
+      let message = run B.format(
+        "{key} {left}/{right}={ratio:.4}",
+        &.{
+          key: String.view(&key),
+          left: engines[0].label,
+          right: engines[1].label,
+          ratio: left / right,
+        },
+      )
+      run B.log(String.view(&message))
+      m = m + 1
+    }
+    w = w + 1
+  }
+  let mut results = B.object()
+  run B.set(&mut results, engines[0].label, run Json.copy(&engineResults[0]))
+  run B.set(&mut results, engines[1].label, run Json.copy(&engineResults[1]))
+  run B.set(&mut report, "results", move results)
+  run B.set(&mut report, "workloads", move descriptions)
+  let mut comparison = B.object()
+  let definition = run B.format(
+    "{left}/{right} native median stage time; >1 means {left} slower",
+    &.{ left: engines[0].label, right: engines[1].label },
+  )
+  run B.set(&mut comparison, "ratio_definition", run B.stringValue(String.view(&definition)))
+  run B.set(&mut comparison, "ratios", move ratios)
+  run B.set(&mut comparison, "checksum_equal", move checksumEqual)
+  run B.set(
+    &mut comparison,
+    "checksum_note",
+    run B.stringValue(
+      "FNV-1a over every premultiplied RGBA byte. Numerical rasterization differences are allowed; equality is not a pixel-conformance verdict.",
+    ),
+  )
+  run B.set(&mut report, "comparison", move comparison)
+  return move report
+}
+
+pub effect fn baselineRatios(current: &Value, baseline: &Value) -> Value
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let fields = ["protocol", "config", "workloads", "workload_manifest_sha256", "reference_pin"]
+  let mut i: usize = 0
+  while i < fields.length {
+    let left = run B.field(current, fields[i])
+    let right = run B.field(baseline, fields[i])
+    if !Json.equal(left, right) {
+      run Task.abort(
+        "baseline metadata differs from the current measured workload; explicitly record a new baseline",
+      )
+    }
+    i = i + 1
+  }
+  let mut ratios = B.object()
+  let engines = run B.entries(run B.field(current, "results"))
+  i = 0
+  while i < engines.length {
+    let name = String.view(&engines[i].key)
+    let previous = run B.field(run B.field(baseline, "results"), name)
+    let stages = run B.entries(&engines[i].value)
+    if stages.length != (run B.entries(previous)).length {
+      run Task.abort("baseline stages differ")
+    }
+    let mut values = B.object()
+    let mut j: usize = 0
+    while j < stages.length {
+      let key = String.view(&stages[j].key)
+      let before = run B.real(run B.field(run B.field(previous, key), "median_ns"))
+      if before <= 0.0 {
+        run Task.abort("baseline has nonpositive measured time")
+      }
+      run B.set(
+        &mut values,
+        key,
+        B.number((run B.real(run B.field(&stages[j].value, "median_ns"))) / before),
+      )
+      j = j + 1
+    }
+    run B.set(&mut ratios, name, move values)
+    i = i + 1
+  }
+  return move ratios
+}
+
+effect fn cpuModel() -> String
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  if Support.operatingSystem() == "darwin" {
+    return run Process.version("sysctl", &["-n", "machdep.cpu.brand_string"])
+  }
+  if Support.operatingSystem() == "linux" {
+    let cpuinfo = run B.load("/proc/cpuinfo")
+    let text = run B.text(move cpuinfo)
+    let mut lines = String.split(String.view(&text), "\n")
+    while let Option<string>.Some { value: line } = lines.next() {
+      if String.startsWith(line, "model name") || String.startsWith(line, "Hardware") {
+        if let Option<usize>.Some { value: colon } = String.find(line, ":") {
+          return run String.copy(
+            String.trim(String.slice(line, colon + 1, String.byteLength(line) - colon - 1)),
+          )
+        }
+      }
+    }
+  }
+  if Support.operatingSystem() == "windows" {
+    let result = run Process.execute(
+      "reg",
+      &[
+        "query",
+        "HKLM\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+        "/v",
+        "ProcessorNameString",
+      ],
+      20.0,
+      false,
+    )
+    let text = run B.text(move result.output)
+    if let Option<usize>.Some { value: offset } = String.find(String.view(&text), "REG_SZ") {
+      return run String.copy(
+        String.trim(
+          String.slice(
+            String.view(&text),
+            offset + 6,
+            String.byteLength(String.view(&text)) - offset - 6,
+          ),
+        ),
+      )
+    }
+    run Task.abort("Windows processor registry entry has no model text")
+  }
+  return run Process.version("uname", &["-p"])
+}

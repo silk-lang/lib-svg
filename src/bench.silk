@@ -1,0 +1,413 @@
+//! Native benchmark tasks. Measurements require GNU coreutils timeout/gtimeout;
+//! image generation additionally uses cjpeg, downloads curl, compressed runs gzip,
+//! and reference builds Cargo. Original assets and baselines are never silently replaced.
+import bench_support as B
+import bench_harness as H
+import bench_workloads as Workloads
+import bench_images as Images
+import bench_compressed as Compressed
+import bench_rust as Rust
+import silk.cli.command { Command, CommandLine, Opt }
+import silk.cli.task { Task, TaskError, TaskSet }
+import silk.collections.list { List }
+import silk.io.writer { WriterError }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.text.format { Format, ParseError }
+import silk.core.result { Result }
+import silk.num.f64
+
+pub struct Common {
+  pub iterations: u64,
+  pub warmup: u64,
+  pub samples: u64,
+  pub timeout: String,
+  pub mode: List<String>,
+  pub workload: List<String>,
+  pub fetchWorkloads: bool,
+  pub callgrind: bool,
+  pub output: String,
+}
+
+impl CommandLine for Common {
+  static fn command() -> Command<Common> {
+    return Command<Common>.make("measurement", "Native stage-wall-time protocol")
+      |> Command.option(
+        "iterations",
+        Opt.about("Timed iterations per invocation") |> Opt.default("3"),
+      )
+      |> Command.option("warmup", Opt.about("Untimed warmup iterations") |> Opt.default("1"))
+      |> Command.option("samples", Opt.about("Complete workload passes") |> Opt.default("5"))
+      |> Command.option(
+        "timeout",
+        Opt.about("Native process deadline in seconds") |> Opt.default("300"),
+      )
+      |> Command.option(
+        "mode",
+        Opt.about("Repeatable stage selection")
+          |> Opt.choice("parse")
+          |> Opt.choice("render")
+          |> Opt.choice("end-to-end"),
+      )
+      |> Command.option("workload", Opt.about("Repeatable workload selection"))
+      |> Command.option(
+        "fetchWorkloads",
+        Opt.about("Download missing pinned Tiger (AGPL benchmark-only)"),
+      )
+      |> Command.option(
+        "callgrind",
+        Opt.about("Separate full-process Callgrind Ir measurement; Linux only"),
+      )
+      |> Command.option("output", Opt.about("JSON report file; stdout when omitted"))
+  }
+}
+
+pub struct BenchOptions {
+  pub common: Common,
+  pub silk: String,
+  pub rust: String,
+  pub baseline: String,
+  pub recordBaseline: bool
+}
+
+impl CommandLine for BenchOptions {
+  static fn command() -> Command<BenchOptions> {
+    return Command<BenchOptions>.make("bench", "Compare Silk with the pinned Rust reference")
+      |> Command.flatten("common")
+      |> Command.option("silk", Opt.about("Silk benchmark executable") |> Opt.required)
+      |> Command.option(
+        "rust",
+        Opt.about("Pinned Rust reference executable")
+          |> Opt.default("modules/scripts/rust-bench/target/release/svg-reference-bench"),
+      )
+      |> Command.option(
+        "baseline",
+        Opt.about("Measured baseline JSON") |> Opt.default("modules/bench/baseline.json"),
+      )
+      |> Command.option("recordBaseline", Opt.about("Explicitly record new measured baseline"))
+  }
+}
+
+pub struct AbOptions {
+  pub common: Common,
+  pub oldbinary: String,
+  pub newbinary: String
+}
+
+pub struct ImageOptions {
+  pub generate: String,
+  pub inputs: String,
+  pub silk: String,
+  pub rust: String,
+  pub output: String,
+  pub callgrind: bool,
+  pub iterations: u64,
+  pub warmup: u64,
+  pub samples: u64,
+  pub timeout: String,
+}
+
+impl CommandLine for ImageOptions {
+  static fn command() -> Command<ImageOptions> {
+    return Command<ImageOptions>.make(
+      "images",
+      "Generate image workloads or measure an SVG directory",
+    )
+      |> Command.option("generate", Opt.about("Generate PNG/JPEG workloads into this directory"))
+      |> Command.option("inputs", Opt.about("Directory of SVG workloads"))
+      |> Command.option("silk", Opt.about("Silk benchmark executable"))
+      |> Command.option("rust", Opt.about("Rust reference executable"))
+      |> Command.option("output", Opt.about("JSON report file"))
+      |> Command.option("callgrind", Opt.about("Collect full-process Ir separately"))
+      |> Command.option("iterations", Opt.about("Timed iterations") |> Opt.default("5"))
+      |> Command.option("warmup", Opt.about("Warmup iterations") |> Opt.default("1"))
+      |> Command.option("samples", Opt.about("Interleaved samples") |> Opt.default("3"))
+      |> Command.option("timeout", Opt.about("Deadline in seconds") |> Opt.default("300"))
+  }
+}
+
+pub struct CompressedOptions {
+  pub silk: String,
+  pub rust: String,
+  pub input: String,
+  pub output: String,
+  pub callgrind: bool
+}
+
+impl CommandLine for CompressedOptions {
+  static fn command() -> Command<CompressedOptions> {
+    return Command<CompressedOptions>.make("compressed", "Compare identical plain/gzip/zlib inputs")
+      |> Command.option("silk", Opt.about("Silk benchmark executable") |> Opt.required)
+      |> Command.option("rust", Opt.about("Rust reference executable") |> Opt.required)
+      |> Command.option("input", Opt.about("Uncompressed SVG source") |> Opt.required)
+      |> Command.option("output", Opt.about("JSON report file") |> Opt.required)
+      |> Command.option("callgrind", Opt.about("Separate Silk full-process Ir"))
+  }
+}
+
+pub union BenchCommands {
+  Bench { pub options: BenchOptions },
+  Ab { pub common: Common, pub oldbinary: String, pub newbinary: String },
+  Workloads { pub fetchTiger: bool },
+  Images { pub options: ImageOptions },
+  Compressed { pub options: CompressedOptions },
+  Nested { pub directory: String },
+  Sampling { pub directory: String },
+  SvgOrientation { pub directory: String },
+  RustBuild,
+}
+
+impl CommandLine for BenchCommands {
+  static fn command() -> Command<BenchCommands> {
+    return Command<BenchCommands>.make(
+      "benchmarks",
+      "Native SVG benchmark automation; requires GNU timeout/gtimeout",
+    )
+      |> Command.variant("Bench", "Measure Silk/Rust and compare or record a baseline")
+      |> Command.variant("Ab", "Measure new/old binaries with alternating sample order")
+      |> Command.variant("Workloads", "Regenerate deterministic workloads and authenticate Tiger")
+      |> Command.variant("Images", "Generate grayscale images or measure SVG inputs")
+      |> Command.variant("Compressed", "Measure plain/gzip/zlib decoding and recording")
+      |> Command.variant("Nested", "Generate nested SVG and inline-vector controls")
+      |> Command.variant("Sampling", "Generate pixelated and independently expanded controls")
+      |> Command.variant("SvgOrientation", "Generate SVG rotation and pre-oriented controls")
+      |> Command.variant("RustBuild", "Validate pins and build the locked Rust reference")
+      |> Command.flatten("options")
+      |> Command.flatten("common")
+      |> Command.arg("oldbinary", Opt.about("Previous benchmark executable") |> Opt.required)
+      |> Command.arg("newbinary", Opt.about("New benchmark executable") |> Opt.required)
+      |> Command.option("fetchTiger", Opt.about("Download authenticated AGPL benchmark-only Tiger"))
+      |> Command.arg("directory", Opt.about("Output directory") |> Opt.required)
+  }
+}
+
+pub effect fn timing(
+  iterations: u64,
+  warmup: u64,
+  samples: u64,
+  timeout: string,
+  callgrind: bool,
+) -> H.Timing
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let seconds = Format.f64Value(timeout) |> Result<f64, ParseError>.unwrapOr(-1.0)
+  if !f64.isFinite(seconds) || seconds <= 0.0 || seconds > 3600.0 {
+    run Task.abort("timeout must be >0 and <=3600 seconds")
+  }
+  return H.Timing {
+    iterations: iterations,
+    warmup: warmup,
+    samples: samples,
+    timeout: seconds,
+    callgrind: callgrind,
+  }
+}
+
+pub effect fn bench(options: &BenchOptions) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let common = &options.common
+  let timing = run timing(
+    common.iterations,
+    common.warmup,
+    common.samples,
+    String.view(&common.timeout),
+    common.callgrind,
+  )
+  let baseline = run B.path(String.view(&options.baseline))
+  if String.view(&common.output) != "" {
+    let output = run B.path(String.view(&common.output))
+    if B.sameBytes(output.rawBytes(), baseline.rawBytes()) {
+      run Task.abort("--output cannot overwrite the baseline; use --record-baseline")
+    }
+  }
+  if !options.recordBaseline && !run FileSystem.exists(&baseline) {
+    run Task.abort("baseline missing; first run with --record-baseline to record real measurements")
+  }
+  let previous = if options.recordBaseline {
+    Value.Null
+  } else {
+    run B.loadJson(String.view(&options.baseline))
+  }
+  let engines = [
+    H.Engine { label: "silk", executable: run B.path(String.view(&options.silk)) },
+    H.Engine { label: "rust", executable: run B.path(String.view(&options.rust)) },
+  ]
+  let mut report = run H.measure(
+    &timing,
+    &engines,
+    common.mode.asSlice(),
+    common.workload.asSlice(),
+    common.fetchWorkloads,
+  )
+  if options.recordBaseline {
+    run B.emit(&report, String.view(&options.baseline))
+    let message = run B.format(
+      "Recorded measured baseline: {path}",
+      &.{ path: String.view(&options.baseline) },
+    )
+    run B.log(String.view(&message))
+  } else {
+    let mut comparison = B.object()
+    let ratios = run H.baselineRatios(&report, &previous)
+    let engines = run B.entries(&ratios)
+    let mut e: usize = 0
+    while e < engines.length {
+      let stages = run B.entries(&engines[e].value)
+      let mut s: usize = 0
+      while s < stages.length {
+        let message = run B.format(
+          "baseline {engine} {key}: current/previous={ratio:.4}",
+          &.{
+            engine: String.view(&engines[e].key),
+            key: String.view(&stages[s].key),
+            ratio: run B.real(&stages[s].value),
+          },
+        )
+        run B.log(String.view(&message))
+        s = s + 1
+      }
+      e = e + 1
+    }
+    run B.set(
+      &mut comparison,
+      "ratio_definition",
+      run B.stringValue("current/baseline; >1 is slower"),
+    )
+    run B.set(&mut comparison, "ratios", move ratios)
+    run B.set(
+      &mut comparison,
+      "environment_changed",
+      B.boolean(
+        !Json.equal(run B.field(&report, "environment"), run B.field(&previous, "environment")),
+      ),
+    )
+    run B.set(&mut report, "baseline_comparison", move comparison)
+  }
+  run B.emit(&report, String.view(&common.output))
+}
+
+pub effect fn ab(options: &AbOptions) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let common = &options.common
+  let timing = run timing(
+    common.iterations,
+    common.warmup,
+    common.samples,
+    String.view(&common.timeout),
+    common.callgrind,
+  )
+  if String.view(&common.output) != "" {
+    let output = run B.path(String.view(&common.output))
+    let baseline = run B.path("modules/bench/baseline.json")
+    if B.sameBytes(output.rawBytes(), baseline.rawBytes()) {
+      run Task.abort("ab cannot overwrite baseline.json; use bench --record-baseline")
+    }
+  }
+  let engines = [
+    H.Engine { label: "new", executable: run B.path(String.view(&options.newbinary)) },
+    H.Engine { label: "old", executable: run B.path(String.view(&options.oldbinary)) },
+  ]
+  let report = run H.measure(
+    &timing,
+    &engines,
+    common.mode.asSlice(),
+    common.workload.asSlice(),
+    common.fetchWorkloads,
+  )
+  run B.emit(&report, String.view(&common.output))
+}
+
+pub effect fn perform(command: BenchCommands) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  match move command {
+    BenchCommands.Bench { options } => run bench(&options)
+    BenchCommands.Ab { common, oldbinary, newbinary } => run ab(
+      &AbOptions { common: move common, oldbinary: move oldbinary, newbinary: move newbinary },
+    )
+    BenchCommands.Workloads { fetchTiger } => {
+      let manifest = run B.loadJson("modules/bench/workloads.json")
+      let cache = run B.path("modules/bench/.cache/workloads")
+      let workloads = run Workloads.prepare(&manifest, &cache, fetchTiger, &[])
+      let values = workloads.asSlice()
+      let mut i: usize = 0
+      while i < values.length {
+        let message = run B.format(
+          "{name}: {count} SVG files, {bytes} bytes",
+          &.{
+            name: String.view(&values[i].name),
+            count: values[i].files.length(),
+            bytes: values[i].bytes,
+          },
+        )
+        run B.print(String.view(&message))
+        i = i + 1
+      }
+    }
+    BenchCommands.Images { options } => {
+      if String.view(&options.generate) != "" {
+        let directory = run B.path(String.view(&options.generate))
+        run Images.generateImages(&directory)
+      } else {
+        if String.view(&options.inputs) == "" || String.view(&options.silk) == ""
+          || String.view(&options.rust) == ""
+          || String.view(&options.output) == "" {
+          run Task.abort("measurement requires --inputs, --silk, --rust and --output")
+        }
+        let directory = run B.path(String.view(&options.inputs))
+        let engines = [
+          H.Engine { label: "silk", executable: run B.path(String.view(&options.silk)) },
+          H.Engine { label: "resvg", executable: run B.path(String.view(&options.rust)) },
+        ]
+        let timing = run timing(
+          options.iterations,
+          options.warmup,
+          options.samples,
+          String.view(&options.timeout),
+          options.callgrind,
+        )
+        run Images.measureImages(&directory, &engines, &timing, String.view(&options.output))
+      }
+    }
+    BenchCommands.Compressed { options } => {
+      let input = run B.path(String.view(&options.input))
+      let engines = [
+        H.Engine { label: "silk", executable: run B.path(String.view(&options.silk)) },
+        H.Engine { label: "resvg", executable: run B.path(String.view(&options.rust)) },
+      ]
+      run Compressed.measureCompressed(
+        &engines,
+        &input,
+        String.view(&options.output),
+        options.callgrind,
+      )
+    }
+    BenchCommands.Nested { directory } => {
+      let path = run B.path(String.view(&directory))
+      run Images.generateNested(&path)
+    }
+    BenchCommands.Sampling { directory } => {
+      let path = run B.path(String.view(&directory))
+      run Images.generateSampling(&path)
+    }
+    BenchCommands.SvgOrientation { directory } => {
+      let path = run B.path(String.view(&directory))
+      run Images.generateOrientation(&path)
+    }
+    BenchCommands.RustBuild => run Rust.build()
+  }
+}
+
+impl TaskSet for BenchCommands {
+  effect fn perform(self: BenchCommands) -> ()
+    ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+    run perform(move self)
+  }
+}

@@ -1,5 +1,5 @@
 //! Parses each argument path and prints OK or ERR per file, in order; driven by
-//! scripts/check-xmlconf.mjs against the W3C XML Conformance Test Suite.
+//! `silk task check-xmlconf` against the W3C XML Conformance Test Suite.
 import silk.xml.document { XmlDocument, XmlError }
 import silk.collections.bytes { Bytes }
 import silk.core.effect { Effect }
@@ -33,7 +33,7 @@ effect fn one(index: usize) -> ()
   let data = run FileSystem.readFile(&path) |> Effect.provideMut<FileSystem>(&mut files)
   let result = run Effect.result(XmlDocument.parse(Bytes.asSlice(&data)))
   match &result {
-    Result<XmlDocument, XmlError | OutOfMemoryError>.Success { value } => {
+    Result<XmlDocument, XmlError | OutOfMemoryError>.Success { .. } => {
       run Writer.writeString("\tOK\n")
     }
     _ => {

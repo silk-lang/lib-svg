@@ -424,7 +424,7 @@ test effect fn explicitViewsRetainRootFallbackAndIndependentTransform() -> ()
     run Testing.expect(
       match &selection.transform {
         Option<ValueId>.Some { value } => match &store.get(value).* {
-          Value.Transform { value: transform } => true
+          Value.Transform { .. } => true
           _ => false
         }
         _ => false
@@ -512,7 +512,7 @@ test effect fn fragmentAndXmlTargetResourceLimitsPropagate() -> ()
     let result = run Effect.result(select(&graph, inputs[i], &mut store, &limits))
       |> Effect.provideMut<Allocator>(&mut allocator)
     match move result {
-      Result<Selection, CssError | OutOfMemoryError>.Success { value } => {
+      Result<Selection, CssError | OutOfMemoryError>.Success { .. } => {
         run Testing.expect(false, "limits must not silently select root")
       }
       Result<Selection, CssError | OutOfMemoryError>.Failure { error } => match move error {
@@ -553,7 +553,7 @@ test effect fn urlDecodeInputLimitIsNotInvalidFragmentFallback() -> ()
   let result = run Effect.result(select(&graph, Bytes.asSlice(&encoded), &mut store, &limits))
     |> Effect.provideMut<Allocator>(&mut allocator)
   match move result {
-    Result<Selection, CssError | OutOfMemoryError>.Success { value } => {
+    Result<Selection, CssError | OutOfMemoryError>.Success { .. } => {
       run Testing.expect(false, "URL hard bound must not silently become empty selection")
     }
     Result<Selection, CssError | OutOfMemoryError>.Failure { error } => match move error {

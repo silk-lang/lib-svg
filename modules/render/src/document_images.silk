@@ -85,7 +85,7 @@ pub effect fn prepare(store: &mut Store, host: &Environment<'_, '_>) -> ()
         error
       } => {
         match &error {
-          OutOfMemoryError problem => {
+          OutOfMemoryError _ => {
             fail OutOfMemoryError {}
           }
           StructureError problem => {

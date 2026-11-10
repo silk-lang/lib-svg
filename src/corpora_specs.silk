@@ -1,0 +1,318 @@
+import corpora { CorpusError, CorpusFailure }
+import corpora
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.json.value { Json, Value, JsonNumber }
+import silk.mem.allocator { Allocator }
+import silk.system.filesystem { FileSystem, Path }
+import silk.system.child_process { ChildProcess }
+import silk.text.string { String, Split }
+import silk.num.usize
+
+pub struct Options {
+  pub update: bool,
+  pub offline: bool,
+  pub only: List<String>,
+}
+
+pub fn defaults() -> Options {
+  return Options { update: false, offline: false, only: List<String>.make() }
+}
+
+effect fn add(target: &mut Value, name: string, url: string) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  run corpora.put(&mut target, name, run corpora.stringValue(url))
+}
+
+effect fn chapters(
+  target: &mut Value,
+  prefix: string,
+  base: string,
+  names: string,
+  suffix: string,
+) -> ()
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut parts = String.split(names, " ")
+  while true {
+    match Split.next(&mut parts) {
+      Option<string>.Some { value } => {
+        let mut key = run String.copy(prefix)
+        run String.append(&mut key, value)
+        let mut url = run String.copy(base)
+        run String.append(&mut url, value)
+        run String.append(&mut url, suffix)
+        run add(&mut target, String.view(&key), String.view(&url))
+      }
+      _ => {
+        break
+      }
+    }
+  }
+}
+
+pub effect fn catalog() -> Value
+  ! CorpusFailure
+  ? &mut Allocator {
+  let mut result = corpora.object()
+  let svg11 = "https://www.w3.org/TR/2011/REC-SVG11-20110816/"
+  let svg2 = "https://www.w3.org/TR/2018/CR-SVG2-20181004/"
+  let svg2Ed = "https://svgwg.org/svg2-draft/"
+  let css21 = "https://www.w3.org/TR/2011/REC-CSS2-20110607/"
+  run add(&mut result, "fetch", "https://fetch.spec.whatwg.org/")
+  run add(&mut result, "infra", "https://infra.spec.whatwg.org/")
+  run add(&mut result, "svg11", svg11)
+  run add(&mut result, "svg11-errata", "https://www.w3.org/2011/08/REC-SVG11-20110816-errata")
+  run add(&mut result, "svg2", svg2)
+  run add(&mut result, "svg2-ed", svg2Ed)
+  run add(&mut result, "css21", css21)
+  run chapters(
+    &mut result,
+    "svg11-",
+    svg11,
+    "intro concepts render types struct styling coords paths shapes text painting color pservers masking filters interact linking script animate fonts metadata backward extend svgdom implnote conform access feature changes refs",
+    ".html",
+  )
+  let svg2Names = "intro conform render types struct styling geometry coords paths shapes text embedded painting pservers interact linking animate implnote access changes refs"
+  run chapters(&mut result, "svg2-", svg2, svg2Names, ".html")
+  run chapters(&mut result, "svg2-ed-", svg2Ed, svg2Names, ".html")
+  run chapters(
+    &mut result,
+    "css21-",
+    css21,
+    "intro conform syndata selector cascade media box visuren visudet visufx generate page colors fonts text tables ui grammar sample changes",
+    ".html",
+  )
+  run chapters(
+    &mut result,
+    "",
+    "https://www.w3.org/TR/",
+    "filter-effects-1 css-masking-1 compositing-1 css-transforms-1 css-syntax-3 css-cascade-4 selectors-4 css-namespaces-3 mediaqueries-4 mediaqueries-5 css-conditional-3 css-variables-1 css-values-3 css-values-4 css-color-4 css-images-3 css-fonts-4 css-text-3 css-text-4 cssom css-text-decor-3 css-writing-modes-3 css-inline-3 css-shapes-1 css-animations-1 svg-integration xml xml-names xmlbase xml-stylesheet xlink11 png-3",
+    "/",
+  )
+  run add(&mut result, "css-transforms-2", "https://drafts.csswg.org/css-transforms-2/")
+  run add(&mut result, "css-shadow-1", "https://drafts.csswg.org/css-shadow-1/")
+  run add(&mut result, "css-values-4-ed", "https://drafts.csswg.org/css-values-4/")
+  run add(&mut result, "encoding", "https://encoding.spec.whatwg.org/")
+  run add(&mut result, "unicode-uts46", "https://www.unicode.org/reports/tr46/")
+  run add(
+    &mut result,
+    "css-conditional-3-2022",
+    "https://www.w3.org/TR/2022/CR-css-conditional-3-20220113/",
+  )
+  run add(&mut result, "smil-animation", "https://www.w3.org/TR/2001/REC-smil-animation-20010904/")
+  run add(&mut result, "smil-content", "https://www.w3.org/TR/REC-smil/smil-content.html")
+  run add(&mut result, "media-frags", "https://www.w3.org/TR/2012/REC-media-frags-20120925/")
+  run add(&mut result, "svg-animations-2", "https://svgwg.org/specs/animations/")
+  run chapters(
+    &mut result,
+    "unicode-uax",
+    "https://www.unicode.org/reports/tr",
+    "9 14 24 29 50",
+    "/",
+  )
+  run chapters(
+    &mut result,
+    "rfc",
+    "https://www.rfc-editor.org/rfc/rfc",
+    "2397 1950 1951 1952 3492 5892 5893",
+    ".html",
+  )
+  run add(&mut result, "url", "https://url.spec.whatwg.org/")
+  run add(&mut result, "jpeg-t81", "https://www.w3.org/Graphics/JPEG/itu-t81.pdf")
+  run add(&mut result, "jpeg-jfif", "https://www.w3.org/Graphics/JPEG/jfif3.pdf")
+  run add(
+    &mut result,
+    "icc-embedding",
+    "https://archive.color.org/files/technotes/ICC-Technote-ProfileEmbedding.pdf",
+  )
+  run add(&mut result, "icc-v4", "https://www.color.org/specification/ICC.1-2022-05.pdf")
+  return move result
+}
+
+pub effect fn loadLock(path: &Path, urls: &Value) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut Allocator {
+  if !run FileSystem.exists(path) {
+    run corpora.reject("missing lock; use --update to establish the baseline")
+  }
+  let lock = run corpora.readJson(path)
+  if (corpora.wholeNumber(Json.field(&lock, "format")) |> Option<i64>.unwrapOr(0)) != 1 {
+    run corpora.reject("unsupported specification lock format")
+  }
+  let records = run corpora.field(&lock, "specs")
+  let members = run corpora.entries(records)
+  let catalog = run corpora.entries(urls)
+  if members.length != catalog.length {
+    run corpora.reject("specification catalog differs from lock; review --update")
+  }
+  let mut index: usize = 0
+  while index < catalog.length {
+    let name = String.view(&catalog[index].key)
+    let record = run corpora.field(records, name)
+    let hash = run corpora.text(record, "sha256")
+    if !corpora.validHex(hash, 64) {
+      run corpora.reject("invalid SHA-256 in specification lock")
+    }
+    if (run corpora.text(record, "url")) != (run corpora.text(urls, name)) {
+      run corpora.reject("catalog URL changed; review --update")
+    }
+    if !String.startsWith(run corpora.text(record, "resolved"), "https://") {
+      run corpora.reject("invalid resolved URL in specification lock")
+    }
+    index = index + 1
+  }
+  return run Json.copy(records)
+}
+
+effect fn processOne(
+  name: string,
+  url: string,
+  records: &Value,
+  cache: &Path,
+  curl: &Path,
+  options: &Options,
+) -> Value
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if !options.update {
+    let record = run corpora.field(records, name)
+    let hash = run corpora.text(record, "sha256")
+    let cached = run corpora.contained(cache, hash)
+    if run FileSystem.exists(&cached) {
+      let body = run FileSystem.readFile(&cached)
+      let actual = run corpora.digest(Bytes.asSlice(&body))
+      if String.view(&actual) != hash {
+        run corpora.reject("cached SHA-256 mismatch; remove corrupt cache explicitly")
+      }
+      return run Json.copy(record)
+    }
+    if options.offline {
+      run corpora.reject("missing cache in offline mode")
+    }
+  }
+  let fetched = run corpora.download(url, cache, curl, "0", "90", "read-fonts-svg-specs/1.0")
+  if Bytes.length(&fetched.body) == 0 {
+    run corpora.reject("empty specification document")
+  }
+  let actual = run corpora.digest(Bytes.asSlice(&fetched.body))
+  let mut record = corpora.object()
+  if options.update {
+    run corpora.put(&mut record, "url", run corpora.stringValue(url))
+    run corpora.put(
+      &mut record,
+      "resolved",
+      run corpora.stringValue(String.view(&fetched.resolved)),
+    )
+    run corpora.put(&mut record, "sha256", run corpora.stringValue(String.view(&actual)))
+  } else {
+    let previous = run corpora.field(records, name)
+    if String.view(&actual) != run corpora.text(previous, "sha256") {
+      run corpora.reject("upstream SHA-256 changed; inspect before --update")
+    }
+    record = run Json.copy(previous)
+  }
+  let destination = run corpora.contained(cache, String.view(&actual))
+  run corpora.atomicWrite(&destination, Bytes.asSlice(&fetched.body))
+  return move record
+}
+
+pub effect fn synchronize(
+  lock: &Path,
+  cache: &Path,
+  curl: &Path,
+  urls: &Value,
+  options: &Options,
+) -> usize
+  ! CorpusFailure
+  ? &mut FileSystem | &mut ChildProcess | &mut Allocator {
+  if options.update && options.offline {
+    run corpora.reject("--update cannot be combined with --offline")
+  }
+  if options.update && List<String>.length(&options.only) != 0 {
+    run corpora.reject("--update cannot be combined with --only; review the complete baseline")
+  }
+  let catalogEntries = run corpora.entries(urls)
+  let mut selected = List<String>.make()
+  if List<String>.length(&options.only) == 0 {
+    let mut index: usize = 0
+    while index < catalogEntries.length {
+      run List<String>.append(
+        &mut selected,
+        run String.copy(String.view(&catalogEntries[index].key)),
+      )
+      index = index + 1
+    }
+  } else {
+    let mut index: usize = 0
+    while index < List<String>.length(&options.only) {
+      let name = String.view(&List<String>.asSlice(&options.only)[index])
+      if !corpora.has(urls, name) {
+        run corpora.reject("unknown specification ID")
+      }
+      let mut duplicate = false
+      let mut previous: usize = 0
+      while previous < List<String>.length(&selected) {
+        if String.view(&List<String>.asSlice(&selected)[previous]) == name {
+          duplicate = true
+        }
+        previous = previous + 1
+      }
+      if !duplicate {
+        run List<String>.append(&mut selected, run String.copy(name))
+      }
+      index = index + 1
+    }
+  }
+  run corpora.sortStrings(&mut selected)
+  let mut records = corpora.object()
+  if !options.update {
+    records = run loadLock(lock, urls)
+  }
+  run FileSystem.createDirectoriesRecursively(cache)
+  let mut failures = String.make()
+  let mut index: usize = 0
+  while index < List<String>.length(&selected) {
+    let name = String.view(&List<String>.asSlice(&selected)[index])
+    let attempted = run Effect.result(
+      processOne(name, run corpora.text(urls, name), &records, cache, curl, options),
+    )
+    match move attempted {
+      Result<Value, CorpusFailure>.Success { value } => {
+        run corpora.put(&mut records, name, move value)
+      }
+      Result<Value, CorpusFailure>.Failure { error } => {
+        run String.append(&mut failures, name)
+        run String.append(&mut failures, ": ")
+        match move error {
+          CorpusError failure => {
+            run String.append(&mut failures, String.view(&failure.message))
+          }
+          _ => {
+            run String.append(&mut failures, "specification I/O failure")
+          }
+        }
+        run String.append(&mut failures, "\n")
+      }
+    }
+    index = index + 1
+  }
+  if String.utf8Bytes(String.view(&failures)).length != 0 {
+    fail CorpusError { message: move failures }
+  }
+  if options.update {
+    let mut document = corpora.object()
+    run corpora.put(
+      &mut document,
+      "format",
+      Value.Number { value: JsonNumber.Integer { value: 1 } },
+    )
+    run corpora.put(&mut document, "specs", move records)
+    run corpora.writeJson(lock, &document)
+  }
+  return List<String>.length(&selected)
+}

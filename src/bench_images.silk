@@ -1,0 +1,502 @@
+//! Original image, nested-vector, sampling and orientation benchmark workloads.
+import bench_support as B
+import bench_process as Process
+import bench_harness as H
+import fixtures_common as F
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.json.value { Json, Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { Path, FileSystem, FileError }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.num.usize
+import silk.num.u64
+
+pub effect fn encodingFailed<E>(error: E) -> never
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  drop error
+  run Task.abort("benchmark image/compression encoding failed")
+}
+
+pub effect fn dataUrl(data: &[u8], mime: string) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return run Effect.catchAll(F.dataUrl(data, mime), encodingFailed)
+}
+
+effect fn png(width: usize, height: usize, channels: usize, samples: &[u8]) -> Bytes
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  if (channels != 1 && channels != 3) || samples.length != width * height * channels {
+    run Task.abort("PNG requires packed 8-bit gray or RGB samples")
+  }
+  let stride = width * channels
+  let mut rows = run Bytes.zeroed((stride + 1) * height)
+  let mut y: usize = 0
+  while y < height {
+    let mut x: usize = 0
+    while x < stride {
+      let mut bytes = rows.asMutSlice()
+      bytes[y * (stride + 1) + 1 + x] = samples[y * stride + x]
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return run Effect.catchAll(
+    F.png(
+      width,
+      height,
+      if channels == 1 {
+        0
+      } else {
+        2
+      },
+      rows.asSlice(),
+      &[],
+    ),
+    encodingFailed,
+  )
+}
+
+effect fn writeSvg(
+  directory: &Path,
+  filename: string,
+  width: usize,
+  height: usize,
+  body: string,
+) -> ()
+  ! TaskError | FileError | OutOfMemoryError | WriterError
+  ? &mut Allocator | &mut FileSystem {
+  let svg = run B.format(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\">{body}</svg>\n",
+    &.{ width: width, height: height, body: body },
+  )
+  let file = run Path.join(directory, filename)
+  run FileSystem.writeFileWithParents(&file, String.utf8Bytes(String.view(&svg)))
+}
+
+effect fn imageFiles(directory: &Path, kind: string, data: &[u8]) -> ()
+  ! TaskError | FileError | OutOfMemoryError | WriterError
+  ? &mut Allocator | &mut FileSystem {
+  let mime = run B.format("image/{kind}", &.{ kind: kind })
+  let url = run dataUrl(data, String.view(&mime))
+  let counts: [usize; 2] = [1, 64]
+  let mut c: usize = 0
+  while c < counts.length {
+    let count = counts[c]
+    let mut children = String.make()
+    if count == 1 {
+      children = run B.format("<image href=\"{url}\"/>", &.{ url: String.view(&url) })
+    } else {
+      let mut i: usize = 0
+      while i < 64 {
+        run children.appendOwned(
+          run B.format(
+            "<image x=\"{x}\" y=\"{y}\" width=\"64\" height=\"48\" href=\"{url}\"/>",
+            &.{ x: i % 8 * 64, y: i / 8 * 48, url: String.view(&url) },
+          ),
+        )
+        i = i + 1
+      }
+    }
+    let filename = run B.format("{kind}-{count}.svg", &.{ kind: kind, count: count })
+    run writeSvg(directory, String.view(&filename), 512, 384, String.view(&children))
+    c = c + 1
+  }
+}
+
+effect fn jpeg(directory: &Path, samples: &[u8]) -> Bytes
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let input = run Path.join(directory, "source.pgm")
+  let mut pgm = run Bytes.copy(b"P5\n512 384\n255\n")
+  run pgm.append(samples)
+  run FileSystem.writeFile(&input, pgm.asSlice())
+
+  // libjpeg's defaults are sequential, nonoptimized Huffman coding, as in the former sharp call.
+  let result = run Process.execute(
+    "cjpeg",
+    &["-quality", "90", "-baseline", "-grayscale", run B.pathText(&input)],
+    300.0,
+    false,
+  )
+  return move result.output
+}
+
+pub effect fn generateImages(directory: &Path) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  run FileSystem.createDirectoriesRecursively(directory)
+  let mut samples = run Bytes.zeroed(512 * 384)
+  let mut y: usize = 0
+  while y < 384 {
+    let mut x: usize = 0
+    while x < 512 {
+      let mut bytes = samples.asMutSlice()
+      bytes[y * 512 + x] = usize.toU8(((x / 16 + y / 16) % 16) * 16)
+      x = x + 1
+    }
+    y = y + 1
+  }
+  let png = run png(512, 384, 1, samples.asSlice())
+  run imageFiles(directory, "png", png.asSlice())
+  let temporary = run FileSystem.createTemporaryDirectory(directory, b"jpeg-")
+  let result = run Effect.result(jpeg(&temporary, samples.asSlice()))
+  run FileSystem.removeDirectoryRecursively(&temporary)
+  let jpeg = match move result {
+    Result<
+      Bytes,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Success {
+      value
+    } => move value
+    Result<
+      Bytes,
+      TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+    >.Failure {
+      error
+    } => {
+      fail move error
+    }
+  }
+  run imageFiles(directory, "jpeg", jpeg.asSlice())
+}
+
+effect fn half(value: usize) -> String
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  return run B.format(
+    "{whole}.{fraction}",
+    &.{
+      whole: value / 2,
+      fraction: if value % 2 == 0 {
+        0
+      } else {
+        5
+      },
+    },
+  )
+}
+
+pub effect fn generateNested(directory: &Path) -> ()
+  ! TaskError | FileError | WriterError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  run FileSystem.createDirectoriesRecursively(directory)
+  let url = run dataUrl(
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\" viewBox=\"0 0 8 8\"><rect width=\"4\" height=\"8\" fill=\"red\"/><rect x=\"4\" width=\"4\" height=\"8\" fill=\"blue\"/></svg>",
+    "image/svg+xml",
+  )
+  let names = ["single", "shared", "viewports"]
+  let mut n: usize = 0
+  while n < names.length {
+    let count: usize = if n == 0 {
+      1
+    } else {
+      16
+    }
+    let mut embedded = String.make()
+    let mut inline = String.make()
+    let mut i: usize = 0
+    while i < count {
+      let x = i % 4 * 32
+      let y = i / 4 * 32
+      let width = if n == 2 {
+        8 + i
+      } else {
+        24
+      }
+      let h = run half(width)
+      let offset = run half(x * 2 + width)
+      run embedded.appendOwned(
+        run B.format(
+          "<image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"24\" preserveAspectRatio=\"none\" href=\"{url}\"/>",
+          &.{ x: x, y: y, w: width, url: String.view(&url) },
+        ),
+      )
+      run inline.appendOwned(
+        run B.format(
+          "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"24\" fill=\"red\"/><rect x=\"{offset}\" y=\"{y}\" width=\"{w}\" height=\"24\" fill=\"blue\"/>",
+          &.{ x: x, y: y, w: String.view(&h), offset: String.view(&offset) },
+        ),
+      )
+      i = i + 1
+    }
+    let embeddedName = run B.format("embedded-{name}.svg", &.{ name: names[n] })
+    let inlineName = run B.format("inline-{name}.svg", &.{ name: names[n] })
+    run writeSvg(directory, String.view(&embeddedName), 128, 128, String.view(&embedded))
+    run writeSvg(directory, String.view(&inlineName), 128, 128, String.view(&inline))
+    n = n + 1
+  }
+}
+
+pub effect fn samplingSource(mx: usize, my: usize) -> String
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let width = 16 * mx
+  let height = 16 * my
+  let mut samples = run Bytes.zeroed(width * height * 3)
+  let mut y: usize = 0
+  while y < height {
+    let mut x: usize = 0
+    while x < width {
+      let px = x / mx
+      let py = y / my
+      let offset = (y * width + x) * 3
+      let mut bytes = samples.asMutSlice()
+      bytes[offset] = usize.toU8(px * 17 % 256)
+      bytes[offset + 1] = usize.toU8(py * 17 % 256)
+      bytes[offset + 2] = usize.toU8((px + py) * 31 % 256)
+      x = x + 1
+    }
+    y = y + 1
+  }
+  let bytes = run png(width, height, 3, samples.asSlice())
+  return run dataUrl(bytes.asSlice(), "image/png")
+}
+
+pub effect fn generateSampling(directory: &Path) -> ()
+  ! TaskError | FileError | WriterError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  run FileSystem.createDirectoriesRecursively(directory)
+  let original = run samplingSource(1, 1)
+  let counts: [usize; 2] = [1, 64]
+  let names = ["auto", "pixelated", "expanded-smooth"]
+  let hints = ["auto", "pixelated", "smooth"]
+  let mut c: usize = 0
+  while c < counts.length {
+    let expanded = run samplingSource(
+      if c == 0 {
+        27
+      } else {
+        3
+      },
+      if c == 0 {
+        19
+      } else {
+        3
+      },
+    )
+    let mut n: usize = 0
+    while n < names.length {
+      let url = if n == 2 {
+        String.view(&expanded)
+      } else {
+        String.view(&original)
+      }
+      let mut children = String.make()
+      let mut i: usize = 0
+      while i < counts[c] {
+        run children.appendOwned(
+          run B.format(
+            "<image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"none\" href=\"{url}\" style=\"image-rendering:{hint}\"/>",
+            &.{
+              x: i % 8 * 64,
+              y: i / 8 * 48,
+              w: if c == 0 {
+                "435.2"
+              } else {
+                "51.2"
+              },
+              h: if c == 0 {
+                "307.2"
+              } else {
+                "44.8"
+              },
+              url: url,
+              hint: hints[n],
+            },
+          ),
+        )
+        i = i + 1
+      }
+      let name = run B.format("{name}-{count}.svg", &.{ name: names[n], count: counts[c] })
+      run writeSvg(directory, String.view(&name), 512, 384, String.view(&children))
+      n = n + 1
+    }
+    c = c + 1
+  }
+}
+
+effect fn orientedSource(colors: &[string], width: usize, height: usize) -> String
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  let mut body = String.make()
+  let mut i: usize = 0
+  while i < colors.length {
+    run body.appendOwned(
+      run B.format(
+        "<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"{color}\"/>",
+        &.{ x: i % width, y: i / width, color: colors[i] },
+      ),
+    )
+    i = i + 1
+  }
+  let source = run B.format(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">{body}</svg>",
+    &.{ w: width, h: height, body: String.view(&body) },
+  )
+  return run dataUrl(String.utf8Bytes(String.view(&source)), "image/svg+xml")
+}
+
+pub effect fn generateOrientation(directory: &Path) -> ()
+  ! TaskError | FileError | WriterError | OutOfMemoryError
+  ? &mut Allocator | &mut FileSystem {
+  run FileSystem.createDirectoriesRecursively(directory)
+  let original = run orientedSource(&["red", "lime", "blue", "cyan", "magenta", "yellow"], 2, 3)
+  let oriented = run orientedSource(&["magenta", "blue", "red", "yellow", "cyan", "lime"], 3, 2)
+  let counts: [usize; 2] = [1, 16]
+  let names = ["none", "rotate", "control"]
+  let mut c: usize = 0
+  while c < counts.length {
+    let mut n: usize = 0
+    while n < names.length {
+      let mut body = String.make()
+      let mut i: usize = 0
+      while i < counts[c] {
+        run body.appendOwned(
+          run B.format(
+            "<image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" href=\"{url}\" style=\"image-orientation:{hint}\"/>",
+            &.{
+              x: i % 4 * 128,
+              y: i / 4 * 96,
+              w: if n == 0 {
+                48
+              } else {
+                72
+              },
+              h: if n == 0 {
+                72
+              } else {
+                48
+              },
+              url: if n == 2 {
+                String.view(&oriented)
+              } else {
+                String.view(&original)
+              },
+              hint: if n == 1 {
+                "90deg"
+              } else {
+                "none"
+              },
+            },
+          ),
+        )
+        i = i + 1
+      }
+      let filename = run B.format("{name}-{count}.svg", &.{ name: names[n], count: counts[c] })
+      run writeSvg(directory, String.view(&filename), 512, 384, String.view(&body))
+      n = n + 1
+    }
+    c = c + 1
+  }
+}
+
+pub effect fn measureImages(
+  directory: &Path,
+  engines: &[H.Engine],
+  timing: &H.Timing,
+  output: string,
+) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  run H.validate(timing, engines)
+  if timing.callgrind {
+    let _version = run H.requireCallgrind()
+  }
+  let entries = run FileSystem.listDirectory(directory)
+  let sources = entries.asSlice()
+  let mut report = B.object()
+  run B.set(&mut report, "environment", run H.environment(engines))
+  run B.set(&mut report, "iterations", B.integer(timing.iterations))
+  run B.set(&mut report, "warmup", B.integer(timing.warmup))
+  run B.set(&mut report, "samples", B.integer(timing.samples))
+  run B.set(
+    &mut report,
+    "callgrind_scope",
+    run B.stringValue("full process, including startup, I/O and output checksum"),
+  )
+  let mut rows = B.array()
+  let mut found = false
+  let modes = H.modes()
+  let mut f: usize = 0
+  while f < sources.length {
+    let source = &sources[f]
+    f = f + 1
+    if source.kind.code != 0 || !String.endsWith(run B.name(&source.path), ".svg") {
+      continue
+    }
+    found = true
+    let name = run B.name(&source.path)
+    let hash = run B.fileHash(&source.path)
+    let mut m: usize = 0
+    while m < modes.length {
+      let mut times = [B.array(), B.array()]
+      let mut checksums = [Value.Null, Value.Null]
+      let mut sample: u64 = 0
+      while sample < timing.samples {
+        let mut turn: usize = 0
+        while turn < 2 {
+          let e = if sample % 2 == 0 {
+            turn
+          } else {
+            1 - turn
+          }
+          let invocation = run H.invoke(&engines[e].executable, modes[m], &source.path, timing)
+          let checksum = run B.field(&invocation.result, "checksum")
+          if sample != 0 && !Json.equal(&checksums[e], checksum) {
+            run Task.abort("output changed between samples")
+          }
+          checksums[e] = run Json.copy(checksum)
+          run B.push(
+            &mut times[e],
+            B.number(
+              (run B.real(run B.field(&invocation.result, "elapsed_ns")))
+                / u64.toF64(timing.iterations),
+            ),
+          )
+          turn = turn + 1
+        }
+        sample = sample + 1
+      }
+      let mut e: usize = 0
+      while e < 2 {
+        let mut row = B.object()
+        run B.set(&mut row, "engine", run B.stringValue(engines[e].label))
+        run B.set(&mut row, "input", run B.stringValue(name))
+        run B.set(&mut row, "mode", run B.stringValue(modes[m]))
+        run B.set(&mut row, "input_sha256", run B.stringValue(String.view(&hash)))
+        run B.set(&mut row, "checksum", run Json.copy(&checksums[e]))
+        let median = run H.median(&times[e])
+        run B.set(&mut row, "median_ns", B.number(median))
+        run B.set(&mut row, "samples_ns", run Json.copy(&times[e]))
+        if timing.callgrind {
+          run B.set(
+            &mut row,
+            "process_Ir",
+            B.integer(run H.processIr(&engines[e].executable, modes[m], &source.path, timing)),
+          )
+        }
+        run B.push(&mut rows, move row)
+        let message = run B.format(
+          "{engine} {name}/{mode}: {ms:.4} ms",
+          &.{ engine: engines[e].label, name: name, mode: modes[m], ms: median / 1000000.0 },
+        )
+        run B.print(String.view(&message))
+        e = e + 1
+      }
+      m = m + 1
+    }
+  }
+  if !found {
+    run Task.abort("input directory contains no SVG workloads")
+  }
+  run B.set(&mut report, "rows", move rows)
+  run B.emit(&report, output)
+}

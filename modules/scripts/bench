@@ -1,4 +1,0 @@
-#!/usr/bin/env node
-// Native stage benchmarking; baseline writes require --record-baseline.
-import { main } from '../bench/harness.mjs';
-await main('bench');

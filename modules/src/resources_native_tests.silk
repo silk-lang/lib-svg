@@ -28,7 +28,7 @@ static if (Intrinsic.targetOperatingSystem() == "windows"
       FileSystem.fetch(&mut files.*, address, ResourceKind.StyleSheet),
     )
     match move outcome {
-      Result<Response, ResourceError | OutOfMemoryError>.Success { value } => {
+      Result<Response, ResourceError | OutOfMemoryError>.Success { .. } => {
         run Testing.expect(false, "fetch must fail with its typed policy or IO error")
       }
       Result<Response, ResourceError | OutOfMemoryError>.Failure { error } => match move error {
@@ -47,7 +47,7 @@ static if (Intrinsic.targetOperatingSystem() == "windows"
     ? &mut Allocator {
     let outcome = run Effect.result(FileSystem.make(base, Limits.defaults()))
     match move outcome {
-      Result<FileSystem, ResourceError | OutOfMemoryError>.Success { value } => {
+      Result<FileSystem, ResourceError | OutOfMemoryError>.Success { .. } => {
         run Testing.expect(false, "malformed base must fail before the trapping native constructor")
       }
       Result<FileSystem, ResourceError | OutOfMemoryError>.Failure { error } => match move error {

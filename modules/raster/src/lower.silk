@@ -34,7 +34,7 @@ import silk.num.u8
 import silk.num.u32
 import silk.num.usize
 import canvas { Surface, Canvas, NO_MASK }
-import cpu { Prepared, ClipPlanes, Strokes }
+import cpu { ClipPlanes, Strokes }
 import cpu
 import clip_mask
 import checked

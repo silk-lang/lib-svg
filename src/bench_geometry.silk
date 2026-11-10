@@ -1,0 +1,438 @@
+//! Canonical deterministic benchmark geometry. Exact SVG bytes identify measured work.
+import bench_support as B
+import silk.cli.task { Task, TaskError }
+import silk.collections.list { List }
+import silk.io.writer { WriterError }
+import silk.json.value { Value }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.text.string { String }
+import silk.num.i64
+import silk.num.u64
+import silk.num.u32
+
+pub struct Generated {
+  pub name: String,
+  pub text: String
+}
+
+effect fn config(value: &Value, key: string) -> i64
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return u64.toI64(run B.uint(run B.field(value, key)))
+}
+
+effect fn document(size: i64, body: String) -> String
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  return run B.format(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 {size} {size}\">\n{body}</svg>\n",
+    &.{ size: size, body: String.view(&body) },
+  )
+}
+
+effect fn shape(body: &mut String, value: String) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run body.appendOwned(move value)
+  run body.append("\n")
+}
+
+effect fn literal(body: &mut String, value: string) -> ()
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  run body.append(value)
+  run body.append("\n")
+}
+
+effect fn floating(value: f64) -> String
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  // The original generator wrote integral divisions with an explicit decimal point.
+  let text = run B.format("{value}", &.{ value: value })
+  if !String.contains(String.view(&text), ".") && !String.contains(String.view(&text), "e") {
+    return run B.format("{text}.0", &.{ text: String.view(&text) })
+  }
+  return move text
+}
+
+pub effect fn generate(name: string, cfg: &Value) -> List<Generated>
+  ! TaskError | WriterError | OutOfMemoryError
+  ? &mut Allocator {
+  let size = run config(cfg, "size")
+  let mut files = List<Generated>.make()
+  if name == "iconset" {
+    let count = run config(cfg, "count")
+    let mut state = u64.toU32(run B.uint(run B.field(cfg, "seed")))
+    let mut index: i64 = 0
+    while index < count {
+      state = u32.wrappingAdd(u32.wrappingMultiply(1664525, state), 1013904223)
+      let inset = 2 + index % 5
+      let mut body = String.make()
+      run shape(
+        &mut body,
+        run B.format(
+          "<rect x=\"1\" y=\"1\" width=\"{edge}\" height=\"{edge}\" rx=\"4\" fill=\"#{color:06x}\"/>",
+          &.{ edge: size - 2, color: state & 16777215 },
+        ),
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<circle cx=\"{mid}\" cy=\"{mid}\" r=\"{r}\" fill=\"#ffffff\"/>",
+          &.{ mid: size / 2, r: 5 + index % 6 },
+        ),
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<path d=\"M {inset} {far} L {mid} {inset} L {far} {far} Z\" fill=\"none\" stroke=\"#183048\" stroke-width=\"1\" stroke-linejoin=\"round\"/>",
+          &.{ inset: inset, far: size - inset, mid: size / 2 },
+        ),
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<path d=\"M 4 {y} Q 16 2 28 24\" fill=\"none\" stroke=\"#905020\" stroke-width=\"2\"/>",
+          &.{ y: 8 + index % 8 },
+        ),
+      )
+      run literal(&mut body, "<circle cx=\"10\" cy=\"12\" r=\"2\" fill=\"#204060\"/>")
+      run literal(&mut body, "<circle cx=\"22\" cy=\"12\" r=\"2\" fill=\"#204060\"/>")
+      run files.append(
+        Generated {
+          name: run B.format("icon-{index:03}.svg", &.{ index: index }),
+          text: run document(size, move body),
+        },
+      )
+      index = index + 1
+    }
+    return move files
+  }
+  let mut body = String.make()
+  if name == "stylesheets" {
+    let rows = run config(cfg, "rows")
+    let columns = run config(cfg, "columns")
+    let width = size / columns
+    let height = size / rows
+    let mut rules = String.make()
+    let mut groups = String.make()
+    let mut row: i64 = 0
+    while row < rows {
+      let mut cells = String.make()
+      let mut column: i64 = 0
+      while column < columns {
+        if row != 0 || column != 0 {
+          run rules.append("\n")
+        }
+        run rules.appendOwned(
+          run B.format(
+            ".r{row} > rect.c{column} {{ fill: #{red:02x}{green:02x}{blue:02x}; }}",
+            &.{
+              row: row,
+              column: column,
+              red: 32 + (row * 37 + column * 17) % 192,
+              green: 32 + (row * 13 + column * 43) % 192,
+              blue: 32 + (row * 29 + column * 7) % 192,
+            },
+          ),
+        )
+        run cells.appendOwned(
+          run B.format(
+            "<rect class=\"c{column}\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"/>",
+            &.{ column: column, x: column * width, y: row * height, w: width - 1, h: height - 1 },
+          ),
+        )
+        column = column + 1
+      }
+      run shape(
+        &mut groups,
+        run B.format("<g class=\"r{row}\">{cells}</g>", &.{ row: row, cells: String.view(&cells) }),
+      )
+      row = row + 1
+    }
+    run shape(&mut body, run B.format("<style>{rules}</style>", &.{ rules: String.view(&rules) }))
+    run body.appendOwned(move groups)
+  } else {
+    let grid = run config(cfg, "grid")
+    let step = if name == "paintservers" {
+      (size - 64) / grid
+    } else {
+      size / grid
+    }
+    if name == "instances" {
+      run literal(
+        &mut body,
+        "<defs><symbol id=\"tile\" viewBox=\"0 0 16 16\"><path d=\"M1 1H15V15H1Z\"/><path fill=\"white\" d=\"M4 4H12V6H4Z M4 8H10V10H4Z\"/></symbol><g id=\"badge\"><use href=\"#tile\" width=\"16\" height=\"16\"/></g></defs>",
+      )
+    }
+    if name == "clipping" {
+      run literal(
+        &mut body,
+        "<defs><clipPath id=\"outer\" clipPathUnits=\"objectBoundingBox\"><rect x=\".1\" y=\".1\" width=\".8\" height=\".8\"/></clipPath><clipPath id=\"union\" clipPathUnits=\"objectBoundingBox\" clip-path=\"url(#outer)\"><circle cx=\".35\" cy=\".5\" r=\".35\"/><circle cx=\".65\" cy=\".5\" r=\".35\"/></clipPath></defs>",
+      )
+    }
+    if name == "masking" {
+      run literal(
+        &mut body,
+        "<defs><mask id=\"alpha\" maskContentUnits=\"objectBoundingBox\" mask-type=\"alpha\"><rect width=\"1\" height=\"1\" opacity=\".75\"/></mask><mask id=\"luma\" maskContentUnits=\"objectBoundingBox\"><g mask=\"url(#alpha)\"><circle cx=\".5\" cy=\".5\" r=\".48\" fill=\"#80c040\"/><rect x=\".25\" y=\".25\" width=\".5\" height=\".5\" fill=\"white\"/></g></mask></defs>",
+      )
+    }
+    if name == "filters" {
+      let filters = [
+        "<feGaussianBlur stdDeviation=\"3\"/>",
+        "<feDropShadow dx=\"2\" dy=\"3\" stdDeviation=\"2\" flood-color=\"#102030\"/>",
+        "<feColorMatrix type=\"hueRotate\" values=\"90\"/>",
+        "<feMorphology operator=\"dilate\" radius=\"2\"/>",
+        "<feTurbulence baseFrequency=\"0.08\" numOctaves=\"3\" result=\"t\"/><feComposite in=\"t\" in2=\"SourceAlpha\" operator=\"in\"/>",
+        "<feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"2\" result=\"b\"/><feDiffuseLighting in=\"b\" surfaceScale=\"3\" lighting-color=\"#ffe0b0\"><feDistantLight azimuth=\"225\" elevation=\"45\"/></feDiffuseLighting><feComposite in2=\"SourceGraphic\" operator=\"arithmetic\" k1=\"1\"/>",
+        "<feOffset dx=\"3\" dy=\"3\" result=\"o\"/><feBlend in=\"SourceGraphic\" in2=\"o\" mode=\"multiply\"/>",
+        "<feComponentTransfer><feFuncR type=\"gamma\" exponent=\"0.5\"/><feFuncG type=\"table\" tableValues=\"0 1 0.5\"/></feComponentTransfer>",
+      ]
+      run body.append("<defs>")
+      let mut i: usize = 0
+      while i < filters.length {
+        run body.appendOwned(
+          run B.format("<filter id=\"f{i}\">{filter}</filter>", &.{ i: i, filter: filters[i] }),
+        )
+        i = i + 1
+      }
+      run body.append("</defs>\n")
+    }
+    if name == "compositing" || name == "clipping" || name == "masking" || name == "filters" {
+      run shape(
+        &mut body,
+        run B.format(
+          "<rect width=\"{size}\" height=\"{size}\" fill=\"#315579\"/>",
+          &.{ size: size },
+        ),
+      )
+    }
+    if name == "paintservers" {
+      run literal(
+        &mut body,
+        "<defs><linearGradient id=\"panel\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#b5dbd8\"/><stop offset=\"0.5\" stop-color=\"#548b97\"/><stop offset=\"1\" stop-color=\"#24475d\"/></linearGradient><linearGradient id=\"thread\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"16\" y2=\"16\"><stop offset=\"0\" stop-color=\"#163347\"/><stop offset=\"0.5\" stop-color=\"#418a92\"/><stop offset=\"1\" stop-color=\"#91c4b0\"/></linearGradient><radialGradient id=\"bead\" gradientUnits=\"userSpaceOnUse\" cx=\"8\" cy=\"8\" r=\"6\" fx=\"8\" fy=\"8\" fr=\"0\"><stop offset=\"0\" stop-color=\"#fff1b0\"/><stop offset=\"0.5\" stop-color=\"#d4a45c\"/><stop offset=\"1\" stop-color=\"#80512e\"/></radialGradient><radialGradient id=\"jewel\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" fr=\"0\"><stop offset=\"0\" stop-color=\"#e5f5df\"/><stop offset=\"0.4\" stop-color=\"#7bb9a0\"/><stop offset=\"1\" stop-color=\"#205263\"/></radialGradient><pattern id=\"weave\" patternUnits=\"userSpaceOnUse\" patternContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"16\" height=\"16\"><rect width=\"16\" height=\"16\" fill=\"url(#thread)\"/><path d=\"M0 4H16 M0 12H16\" fill=\"none\" stroke=\"#163347\" stroke-width=\"2\"/><path d=\"M4 0V16 M12 0V16\" fill=\"none\" stroke=\"#91c4b0\" stroke-width=\"1\"/></pattern><pattern id=\"beads\" patternUnits=\"userSpaceOnUse\" patternContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"16\" height=\"16\"><rect width=\"16\" height=\"16\" fill=\"url(#thread)\"/><circle cx=\"8\" cy=\"8\" r=\"6\" fill=\"url(#bead)\"/></pattern></defs>",
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<rect width=\"{size}\" height=\"{size}\" fill=\"#102738\"/>",
+          &.{ size: size },
+        ),
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<rect x=\"16\" y=\"16\" width=\"{edge}\" height=\"{edge}\" rx=\"12\" fill=\"url(#panel)\"/>",
+          &.{ edge: size - 32 },
+        ),
+      )
+      run shape(
+        &mut body,
+        run B.format(
+          "<rect x=\"24\" y=\"24\" width=\"{edge}\" height=\"{edge}\" rx=\"8\" fill=\"#163347\"/>",
+          &.{ edge: size - 48 },
+        ),
+      )
+    }
+    let mut row: i64 = 0
+    while row < grid {
+      let mut column: i64 = 0
+      while column < grid {
+        let left = column * step
+        let top = row * step
+        if name == "largemap" {
+          let colors = ["#ccd9b5", "#d9d0ba", "#b9d3cc"]
+          run shape(
+            &mut body,
+            run B.format(
+              "<path d=\"M {left} {top} L {right} {bent} L {slant} {bottom} L {left} {bottom} Z\" fill=\"{color}\" stroke=\"#596559\" stroke-width=\"1\"/>",
+              &.{
+                left: left + 2,
+                top: top + 2,
+                right: left + step - 2,
+                bent: top + 2 + (column + row) % 4,
+                slant: left + step - 2 - column % 3,
+                bottom: top + step - 2,
+                color: colors[i64.toUsize((column * 7 + row * 11) % 3)],
+              },
+            ),
+          )
+          run shape(
+            &mut body,
+            run B.format(
+              "<path d=\"M {left} {top} h {third} v {third} h {negative} Z\" fill=\"#a39186\"/>",
+              &.{ left: left + 5, top: top + 6, third: step / 3, negative: -((step + 2) / 3) },
+            ),
+          )
+        } else if name == "mixedcurves" {
+          let colors = ["#356a97", "#b65939", "#6b8350"]
+          run shape(
+            &mut body,
+            run B.format(
+              "<g transform=\"translate({left} {top})\"><path d=\"M 2 24 C 3 0 24 0 28 18 Q 18 30 2 24 Z\" fill=\"{color}\" stroke=\"#27313b\" stroke-width=\"1\"/><path d=\"M 3 10 Q 14 30 28 5\" fill=\"none\" stroke=\"#efe6bc\" stroke-width=\"2\" stroke-linecap=\"round\"/></g>",
+              &.{ left: left, top: top, color: colors[i64.toUsize((column + row) % 3)] },
+            ),
+          )
+        } else if name == "instances" {
+          run shape(
+            &mut body,
+            run B.format(
+              "<use href=\"#badge\" x=\"{left}\" y=\"{top}\" fill=\"{color}\"/>",
+              &.{
+                left: left,
+                top: top,
+                color: if (row + column) % 2 != 0 {
+                  "#e67e22"
+                } else {
+                  "#2388dd"
+                },
+              },
+            ),
+          )
+        } else if name == "compositing" {
+          let modes = [
+            "normal",
+            "multiply",
+            "screen",
+            "overlay",
+            "darken",
+            "lighten",
+            "color-dodge",
+            "color-burn",
+            "hard-light",
+            "soft-light",
+            "difference",
+            "exclusion",
+            "hue",
+            "saturation",
+            "color",
+            "luminosity",
+          ]
+          run shape(
+            &mut body,
+            run B.format(
+              "<g style=\"isolation:isolate\" opacity=\"0.8\"><rect x=\"{left}\" y=\"{top}\" width=\"{step}\" height=\"{step}\" fill=\"#cc6633\"/><g style=\"mix-blend-mode:{mode}\"><rect x=\"{x}\" y=\"{y}\" width=\"{step}\" height=\"{step}\" fill=\"#3399cc\"/><circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"#99cc55\"/></g></g>",
+              &.{
+                left: left,
+                top: top,
+                step: step,
+                mode: modes[i64.toUsize((row * grid + column) % 16)],
+                x: left + 2,
+                y: top + 2,
+                cx: left + step / 2,
+                cy: top + step / 2,
+                r: step / 3,
+              },
+            ),
+          )
+        } else if name == "clipping" {
+          run shape(
+            &mut body,
+            run B.format(
+              "<g transform=\"translate({left} {top})\" clip-path=\"url(#union)\"><rect width=\"{step}\" height=\"{step}\" fill=\"#cc6633\"/><rect width=\"{step}\" height=\"{step}\" fill=\"#3399cc\" style=\"clip-path:polygon(0 0,100% 25%,75% 100%,25% 75%)\"/></g>",
+              &.{ left: left, top: top, step: step },
+            ),
+          )
+        } else if name == "masking" {
+          let half = run floating(i64.toF64(step) / 2.0)
+          let third = run floating(i64.toF64(step) / 3.0)
+          run shape(
+            &mut body,
+            run B.format(
+              "<g transform=\"translate({left} {top})\" mask=\"url(#luma)\"><rect width=\"{step}\" height=\"{step}\" fill=\"#cc6633\"/><circle cx=\"{half}\" cy=\"{half}\" r=\"{third}\" fill=\"#3399cc\"/></g>",
+              &.{
+                left: left,
+                top: top,
+                step: step,
+                half: String.view(&half),
+                third: String.view(&third),
+              },
+            ),
+          )
+        } else if name == "filters" {
+          run shape(
+            &mut body,
+            run B.format(
+              "<g filter=\"url(#f{index})\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"#cc6633\"/><circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"#99cc55\"/></g>",
+              &.{
+                index: (row * grid + column) % 8,
+                x: left + step / 6,
+                y: top + step / 6,
+                w: step * 2 / 3,
+                h: step / 2,
+                cx: left + step * 2 / 3,
+                cy: top + step * 2 / 3,
+                r: step / 4,
+              },
+            ),
+          )
+        } else if name == "paintservers" {
+          let edge = step - 8
+          let x = left + 32
+          let y = top + 32
+          let cx = x + edge / 2
+          let cy = y + edge / 2
+          run shape(
+            &mut body,
+            run B.format(
+              "<rect x=\"{x}\" y=\"{y}\" width=\"{edge}\" height=\"{edge}\" rx=\"6\" fill=\"url(#panel)\"/>",
+              &.{ x: x, y: y, edge: edge },
+            ),
+          )
+          run shape(
+            &mut body,
+            run B.format(
+              "<rect x=\"{x}\" y=\"{y}\" width=\"{edge}\" height=\"{edge}\" rx=\"4\" fill=\"url(#weave)\"/>",
+              &.{ x: x + 3, y: y + 3, edge: edge - 6 },
+            ),
+          )
+          run shape(
+            &mut body,
+            run B.format(
+              "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"url(#beads)\" stroke=\"#e2c27a\" stroke-width=\"2\"/>",
+              &.{ cx: cx, cy: cy, r: edge / 3 },
+            ),
+          )
+          run shape(
+            &mut body,
+            run B.format(
+              "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"url(#jewel)\" stroke=\"#163347\" stroke-width=\"1\"/>",
+              &.{ cx: cx, cy: cy, r: edge / 6 },
+            ),
+          )
+        } else {
+          run Task.abort("unknown benchmark geometry generator")
+        }
+        column = column + 1
+      }
+      row = row + 1
+    }
+    if name == "largemap" {
+      let mut i: i64 = 1
+      while i < grid {
+        run shape(
+          &mut body,
+          run B.format(
+            "<path d=\"M 0 {p} H {size} M {p} 0 V {size}\" fill=\"none\" stroke=\"#f5f1df\" stroke-width=\"3\"/>",
+            &.{ p: i * step, size: size },
+          ),
+        )
+        i = i + 1
+      }
+      run shape(
+        &mut body,
+        run B.format(
+          "<path d=\"M 0 {third} C {third} 0 {half} {size} {size} {half}\" fill=\"none\" stroke=\"#5096bb\" stroke-width=\"9\"/>",
+          &.{ third: size / 3, half: size / 2, size: size },
+        ),
+      )
+    }
+  }
+  run files.append(
+    Generated {
+      name: run B.format("{name}.svg", &.{ name: name }),
+      text: run document(size, move body),
+    },
+  )
+  return move files
+}

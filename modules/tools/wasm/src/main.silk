@@ -5,7 +5,8 @@
 //! The image goes back through `host.output(kind, pointer, byteLength)` while it is alive, so
 //! the host must copy it out before returning.
 import host { hostInput, hostOutput }
-import libm
+// Imported only for the C math symbols it exports to the wasm32 runtime.
+import libm as _libm
 import svg_render.lib { RenderOptions, RenderError }
 import svg_render.lib as renderer
 import svg_render.native_environment { NativeHost, NativeHostError }
@@ -15,11 +16,9 @@ import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits }
 import silk.collections.bytes { Bytes }
 import silk.collections.slice { Slice }
 import silk.core.effect { Effect }
-import silk.core.option { Option }
 import silk.core.result { Result }
 import silk.mem.pointer { Pointer }
 import silk.mem.allocator { Allocator, OutOfMemoryError }
-import silk.num.f64
 import silk.num.u8
 import silk.num.u32
 import silk.num.usize
@@ -181,10 +180,10 @@ effect fn renderRequest(
   let mut host = match move hosted {
     Result<NativeHost, NativeHostError | OutOfMemoryError>.Success { value } => move value
     Result<NativeHost, NativeHostError | OutOfMemoryError>.Failure { error } => match &error {
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
-      NativeHostError problem => {
+      NativeHostError _ => {
         return INVALID_FONT
       }
     }
@@ -217,7 +216,7 @@ effect fn renderRequest(
   let image = match move rendered {
     Result<renderer.Pixmap, RenderError | OutOfMemoryError>.Success { value } => move value
     Result<renderer.Pixmap, RenderError | OutOfMemoryError>.Failure { error } => match &error {
-      OutOfMemoryError problem => {
+      OutOfMemoryError _ => {
         fail OutOfMemoryError {}
       }
       RenderError problem => {

@@ -21,11 +21,11 @@ pub effect fn convert(source: &Path) -> VectorPath
   let mut k: usize = 0
   while k < segments.length {
     let count: usize = match &segments[k] {
-      Segment.MoveTo { to } => 1
-      Segment.LineTo { to } => 1
-      Segment.QuadraticTo { control, to } => 2
-      Segment.CubicTo { control1, control2, to } => 3
-      Segment.ArcTo { arc } => 5
+      Segment.MoveTo { .. } => 1
+      Segment.LineTo { .. } => 1
+      Segment.QuadraticTo { .. } => 2
+      Segment.CubicTo { .. } => 3
+      Segment.ArcTo { .. } => 5
       Segment.Close => 0
     }
     points = points + count

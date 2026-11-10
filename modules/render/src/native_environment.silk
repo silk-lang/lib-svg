@@ -146,7 +146,7 @@ effect fn validateFamily(family: &[u8]) -> ()
   }
   let text = String.fromUtf8(family)
   match &text {
-    Result<string, InvalidUtf8>.Success { value } => {}
+    Result<string, InvalidUtf8>.Success { .. } => {}
     _ => {
       fail NativeHostError.InvalidInput
     }
@@ -397,7 +397,7 @@ static if (Intrinsic.targetOperatingSystem() == "windows"
     let exhausted = match &result {
       Result<NativeHost, NativeHostError | OutOfMemoryError>.Failure { error } => match &error {
         NativeHostError problem => problem == NativeHostError.NoUsableFont
-        OutOfMemoryError problem => {
+        OutOfMemoryError _ => {
           fail OutOfMemoryError {}
         }
       }

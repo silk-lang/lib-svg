@@ -3,17 +3,17 @@
 ## The gate
 
 See the [repository prerequisites](../../README.md#prerequisites): pinned Silk,
-LLVM 22.1.8 (`SILK_CLANG` absolute), Node 22+ and `npm ci`. From the repository root:
+LLVM 22.1.8 (`SILK_CLANG` absolute), GNU coreutils, native parser prerequisites and curl. Node 22+ serves wasm runtime integration only. From the repository root:
 
 ```sh
-node modules/scripts/check
-node modules/scripts/test-gpu
-node scripts/check-wasm.mjs
-node scripts/check-xmlconf.mjs --report build/svg/xmlconf.json
+silk task check
+silk task test-gpu
+silk task check-wasm
+silk task check-xmlconf --report build/svg/xmlconf.json
 ```
 
 The first command serially checks every workspace package, formatting and all
-Silk test roots, then Node tooling tests and the release internal render harness.
+Silk test roots, including tooling tests, and the release internal render harness.
 It renders all own fixture manifests and malformed cases, followed by the curated
 resvg subset. Known pixel failures remain failures in the ledger, never successes;
 unexpected changes fail the gate. Reports go under ignored `build/svg/`.
@@ -29,23 +29,23 @@ counted separately; not-well-formed cases whose error is in an unread external
 entity are also excluded. These are the established processor policy, not new
 extraction-specific skips.
 
-`node modules/scripts/check --offline` verifies populated caches. `--skip-fetch`
+`silk task check --offline` verifies populated caches. `--skip-fetch`
 omits IDNA/spec reference fetching and external corpus rendering, but still runs
-all local Silk/Node tests and all own/malformed rendering cases. It is a local
+all local Silk tests and all own/malformed rendering cases. It is a local
 source-only command, not a substitute for the full CI gate. CSS/font generation
 and graphics-only gates belong to their standalone repositories.
 
 ## Specifications and suites
 
 ```sh
-node modules/scripts/fetch-specs.mjs             # verify/fetch all 155 locked documents
-node modules/scripts/fetch-specs.mjs --offline   # verify cached original bytes
-node modules/scripts/fetch-suites               # reviewed curated resvg inputs/resources
-node modules/scripts/reftests --validate        # schema, cache integrity and coverage only
-node modules/scripts/fetch-suites --suite resvg --full
-node modules/scripts/fetch-suites --suite w3c-svg11 --full
-node modules/scripts/fetch-suites --suite wpt --full
-node scripts/conformance.mjs                # render every reviewed external suite and XML
+silk task corpora fetch-specs             # verify/fetch all 155 locked documents
+silk task corpora fetch-specs --offline   # verify cached original bytes
+silk task corpora fetch-suites            # reviewed curated resvg inputs/resources
+silk task corpora reftests --validate     # schema, cache integrity and coverage only
+silk task corpora fetch-suites --suite resvg --full
+silk task corpora fetch-suites --suite w3c-svg11 --full
+silk task corpora fetch-suites --suite wpt --full
+silk task conformance                    # render every reviewed external suite and XML
 ```
 
 Caches live inside `modules/.cache/` and `modules/tests/.cache/`, never in source control.
@@ -67,7 +67,7 @@ missing output fail the runner. `failed_cases` includes known non-passes;
 The adapter executes an explicitly supplied renderer without a shell:
 
 ```sh
-node modules/scripts/reftests \
+silk task corpora reftests \
   --renderer '["/path/to/svg-render-test-harness", "{input}", "--width", "300", "-o", "{output}"]' \
   --expectations /path/to/reviewed-expectations.json \
   --report build/svg/report.json
@@ -75,14 +75,15 @@ node modules/scripts/reftests \
 
 Resvg uses width 300 with its suite fonts and English language. W3C SVG 1.1 uses
 a 480×360 viewport. WPT uses 800×600 over white, its bundled fonts and system
-FreeSans. `scripts/conformance.mjs` supplies these original protocols and keeps
+FreeSans. `silk task conformance` supplies these original protocols and keeps
 resource reads confined to each suite root. The comparison decodes RGBA including
 alpha and dimensions; it never silently resizes results. Multiple WPT matching
 references are alternatives, while every mismatch reference must differ.
 `--diff-dir build/svg/diffs` writes unexpected-failure images. HTML/script/manual
 WPT cases remain explicitly reported.
 
-`npm test` runs repository tooling tests without Silk builds or renderer runs.
-Node PNG/XML/HTML/archive packages are internal tooling dependencies, not Silk
-runtime dependencies. Optional historical Python fixture authoring is outside
-all supported build, verification, benchmark and CI paths.
+`silk test --manifest-path silk.toml --root src/tests.silk` runs repository tooling
+tests without renderer runs. `silk task fixtures NAME` explicitly regenerates
+authoring assets; supported build, verification, benchmark and CI paths consume
+committed fixtures without regenerating them. The JavaScript-facing wasm runtime
+adapter remains JavaScript; orchestration and parity assertions are Silk.

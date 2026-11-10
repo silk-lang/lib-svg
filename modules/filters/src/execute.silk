@@ -3,7 +3,6 @@
 //! primitive subregion, which never exceeds the filter region.
 import program {
   Program,
-  Primitive,
   Operation,
   Input,
   Function,
@@ -340,8 +339,8 @@ fn spaceOf(results: &List<Output>, input: Input, linear: bool) -> bool {
     Input.SourceGraphic => false
     Input.SourceAlpha => false
     Input.Result { index } => results.asSlice()[index].linear
-    Input.Image { index } => false
-    Input.Background { alpha } => false
+    Input.Image { .. } => false
+    Input.Background { .. } => false
     Input.Transparent => linear
   }
 }
@@ -451,7 +450,7 @@ fn validInput(input: Input, before: usize, program: &Program) -> bool {
   return match input {
     Input.Result { index } => index < before
     Input.Image { index } => index < program.images
-    Input.Background { alpha } => program.background
+    Input.Background { .. } => program.background
     _ => true
   }
 }
@@ -610,21 +609,19 @@ pub fn valid(program: &Program) -> bool {
         }
         fine
       }
-      Operation.ColorMatrix { kind, first, count } => validRange(first, count, numbers)
+      Operation.ColorMatrix { first, count, .. } => validRange(first, count, numbers)
       Operation.ComponentTransfer { functions } => validFunction(functions[0], numbers)
         && validFunction(functions[1], numbers)
         && validFunction(functions[2], numbers)
         && validFunction(functions[3], numbers)
       Operation.Offset { dx, dy } => f64.isFinite(dx) && f64.isFinite(dy)
       Operation.Blur { x, y } => f64.isFinite(x) && f64.isFinite(y)
-      Operation.Morphology { operator, x, y } => f64.isFinite(x) && f64.isFinite(y)
-      Operation.Composite { operator, k } => finite(&k)
-      Operation.DropShadow { dx, dy, x, y, color } => f64.isFinite(dx) && f64.isFinite(dy)
+      Operation.Morphology { x, y, .. } => f64.isFinite(x) && f64.isFinite(y)
+      Operation.Composite { k, .. } => finite(&k)
+      Operation.DropShadow { dx, dy, x, y, .. } => f64.isFinite(dx) && f64.isFinite(dy)
         && f64.isFinite(x)
         && f64.isFinite(y)
-      Operation.Turbulence { frequency, octaves, seed, fractal, stitch, origin, unit } => finite(
-        &frequency,
-      )
+      Operation.Turbulence { frequency, octaves, seed, origin, unit, .. } => finite(&frequency)
         && frequency[0] >= 0.0
         && frequency[1] >= 0.0
         && octaves <= MAX_OCTAVES
@@ -641,25 +638,20 @@ pub fn valid(program: &Program) -> bool {
         bias,
         targetX,
         targetY,
-        edgeMode,
-        preserveAlpha,
         unit,
+        ..
       } => orderX > 0 && orderY > 0 && targetX < orderX && targetY < orderY && validUnit(unit)
         && validRange(first, u32.toUsize(orderX) * u32.toUsize(orderY), numbers)
         && f64.isFinite(divisor)
         && divisor != 0.0
         && f64.isFinite(bias)
-      Operation.DisplacementMap { scale, x, y } => finite(&scale)
+      Operation.DisplacementMap { scale, .. } => finite(&scale)
       Operation.Image { index } => index < program.images
-      Operation.Lighting {
-        specular,
+      Operation.Lighting { surfaceScale, constant, exponent, light, unit, .. } => f64.isFinite(
         surfaceScale,
-        constant,
-        exponent,
-        color,
-        light,
-        unit
-      } => f64.isFinite(surfaceScale) && f64.isFinite(constant) && f64.isFinite(exponent)
+      )
+        && f64.isFinite(constant)
+        && f64.isFinite(exponent)
         && validLight(light)
         && validUnit(unit)
       _ => true

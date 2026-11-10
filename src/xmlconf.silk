@@ -1,0 +1,580 @@
+import task_support as Support
+import silk.cli.task { Task, TaskError }
+import silk.collections.bytes { Bytes }
+import silk.collections.list { List }
+import silk.collections.slice { Slice }
+import silk.compress.inflate { DecodeError, Decoder, Format, Limits, Progress, Status }
+import silk.compress.tar { TarError, TarKind, TarMember, TarReader }
+import silk.core.effect { Effect }
+import silk.core.option { Option }
+import silk.core.result { Result }
+import silk.io.writer { WriterError }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.system.child_process { ChildProcess, ProcessError }
+import silk.system.filesystem { FileError, FileSystem, Path }
+import silk.system.host_input { HostInput, HostInputError }
+import silk.text.string { String }
+import silk.xml.document { XmlDocument, XmlError, XmlNodeId }
+import silk.num.usize
+
+const ARCHIVE: string = "build/xmlconf/xmlts20130923.tar.gz"
+
+const CACHE: string = "build/xmlconf"
+
+const SUITE: string = "build/xmlconf/xmlconf"
+
+const DIGEST: string = "9b61db9f5dbffa545f4b8d78422167083a8568c59bd1129f94138f936cf6fc1f"
+
+struct Case {
+  properties: String,
+  id: String,
+  kind: String,
+  file: String,
+  expected: string<'static>,
+  outcome: String,
+}
+
+fn white(byte: u8) -> bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+fn starts(bytes: &[u8], at: usize, token: &[u8]) -> bool {
+  if token.length > bytes.length - at {
+    return false
+  }
+  let mut i: usize = 0
+  while i < token.length {
+    if bytes[at + i] != token[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// Catalog entity declarations are ASCII SYSTEM identifiers, not document content.
+effect fn catalogs(source: string) -> List<String>
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = String.utf8Bytes(source)
+  let mut result = List<String>.make()
+  let mut at: usize = 0
+  while at < bytes.length {
+    if starts(bytes, at, b"<!ENTITY") {
+      let mut end = at + 8
+      while end < bytes.length && bytes[end] != 62 {
+        end = end + 1
+      }
+      let declaration = String.slice(source, at + 8, end - at - 8)
+      if let Option<usize>.Some { value: system } = String.find(declaration, "SYSTEM") {
+        let name = String.trim(String.slice(declaration, 0, system))
+        let rest = String.trim(
+          String.slice(declaration, system + 6, String.utf8Bytes(declaration).length - system - 6),
+        )
+        if String.startsWith(rest, "\"") {
+          let body = String.slice(rest, 1, String.utf8Bytes(rest).length - 1)
+          if let Option<usize>.Some { value: close } = String.find(body, "\"") {
+            run List<String>.append(&mut result, run String.copy(name))
+            run List<String>.append(&mut result, run String.copy(String.slice(body, 0, close)))
+          }
+        }
+      }
+      at = end
+    }
+    at = at + 1
+  }
+  return move result
+}
+
+effect fn cleanCatalog(source: string) -> String
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let bytes = String.utf8Bytes(source)
+  let mut result = run String.copy("<CATALOG>")
+  let mut at: usize = 0
+  let mut copied: usize = 0
+  while at < bytes.length {
+    if starts(bytes, at, b"<?xml") || starts(bytes, at, b"<!DOCTYPE") {
+      run String.append(&mut result, String.slice(source, copied, at - copied))
+      let mut quote: u8 = 0
+      let mut depth: usize = 0
+      while at < bytes.length {
+        let c = bytes[at]
+        at = at + 1
+        if quote != 0 {
+          if c == quote {
+            quote = 0
+          }
+        } else if c == 34 || c == 39 {
+          quote = c
+        } else if c == 91 {
+          depth = depth + 1
+        } else if c == 93 && depth > 0 {
+          depth = depth - 1
+        } else if c == 62 && depth == 0 {
+          break
+        }
+      }
+      copied = at
+    } else {
+      at = at + 1
+    }
+  }
+  run String.append(&mut result, String.slice(source, copied, bytes.length - copied))
+  run String.append(&mut result, "</CATALOG>")
+  return move result
+}
+
+effect fn contained(base: &Path, name: string) -> Path
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  if String.contains(name, "\\") || String.startsWith(name, "/") || String.contains(name, "\0") {
+    run Task.abort("Unsafe XML suite path")
+  }
+  let target = run Path.resolve(base, name)
+  let cache = run Support.path(CACHE)
+  let prefix = run Support.cat(&[run Support.pathText(&cache), "/"])
+  let text = run Support.pathText(&target)
+  if text != (run Support.pathText(&cache)) && !String.startsWith(text, String.view(&prefix)) {
+    run Task.abort("XML suite path escapes cache")
+  }
+  return move target
+}
+
+effect fn inflate(bytes: &[u8]) -> Bytes
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let limits = Limits {
+    maxInputBytes: usize.toU64(bytes.length),
+    maxOutputBytes: 536870912,
+    maxMembers: 128,
+    maxHeaderBytes: 1048576,
+    maxMemoryBytes: 65536,
+  }
+  let mut decoder = match move run Effect.result(Decoder.make(Format.Gzip, move limits)) {
+    Result<Decoder, DecodeError | OutOfMemoryError>.Success { value } => move value
+    Result<Decoder, DecodeError | OutOfMemoryError>.Failure { .. } => run Task.abort(
+      "Cannot initialize XML archive decoder",
+    )
+  }
+  let mut output = Bytes.make()
+  let mut at: usize = 0
+  let mut block: [u8; 65536] = [0; 65536]
+  while true {
+    let progress = match move Decoder.step(
+      &mut decoder,
+      Slice.view<u8>(bytes, at, bytes.length - at),
+      &mut block,
+      true,
+    ) {
+      Result<Progress, DecodeError>.Success { value } => move value
+      Result<Progress, DecodeError>.Failure { .. } => run Task.abort(
+        "Invalid or oversized XML gzip archive",
+      )
+    }
+    run Bytes.append(&mut output, Slice.view<u8>(&block, 0, progress.written))
+    at = at + progress.consumed
+    if progress.status == Status.Finished {
+      break
+    }
+    if progress.consumed == 0 && progress.written == 0 {
+      run Task.abort("Truncated XML gzip archive")
+    }
+  }
+  return move output
+}
+
+effect fn fetch(offline: bool) -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator | &mut FileSystem {
+  let archive = run Support.path(ARCHIVE)
+  let cache = run Support.path(CACHE)
+  run FileSystem.createDirectoriesRecursively(&cache)
+  let mut valid = false
+  if run FileSystem.exists(&archive) {
+    let existing = run FileSystem.readFile(&archive)
+    let actual = run Support.digest(Bytes.asSlice(&existing))
+    valid = String.view(&actual) == DIGEST
+  }
+  if !valid {
+    if offline {
+      run Task.abort("Missing or corrupt pinned XML conformance archive")
+    }
+    run Task.exec(
+      "curl",
+      &[
+        "--fail",
+        "--location",
+        "--output",
+        ARCHIVE,
+        "https://www.w3.org/XML/Test/xmlts20130923.tar.gz",
+      ],
+    )
+  }
+  let bytes = run FileSystem.readFile(&archive)
+  let actual = run Support.digest(Bytes.asSlice(&bytes))
+  if String.view(&actual) != DIGEST {
+    run Task.abort("XML conformance archive SHA-256 mismatch")
+  }
+  let decoded = run inflate(Bytes.asSlice(&bytes))
+  let mut reader = TarReader.open(Bytes.asSlice(&decoded))
+  while true {
+    let next = match move TarReader.next(&mut reader) {
+      Result<Option<TarMember>, TarError>.Success { value } => move value
+      Result<Option<TarMember>, TarError>.Failure { error } => run Task.abort(
+        TarError.describe(error),
+      )
+    }
+    match move next {
+      Option<TarMember>.None => {
+        break
+      }
+      Option<TarMember>.Some { value: member } => {
+        if member.content.length > 134217728 {
+          run Task.abort("Oversized XML suite member")
+        }
+        let prefix = run Support.text(member.prefix)
+        let name = run Support.text(member.name)
+        let full = run Support.cat(
+          &[
+            prefix,
+            if prefix == "" {
+              ""
+            } else {
+              "/"
+            },
+            name,
+          ],
+        )
+        let destination = run contained(&cache, String.view(&full))
+        if member.kind == TarKind.Directory {
+          run FileSystem.createDirectoriesRecursively(&destination)
+        } else if member.kind == TarKind.File {
+          run FileSystem.writeFileWithParents(&destination, member.content)
+        } else {
+          run Task.abort("Unsupported XML suite archive member")
+        }
+      }
+    }
+  }
+}
+
+fn attr<'a>(document: &'a XmlDocument, node: XmlNodeId, name: string) -> string<'a> {
+  return document.attribute(node, "", name) |> Option<string>.unwrapOr("")
+}
+
+fn skip(document: &XmlDocument, node: XmlNodeId) -> usize {
+  let recommendation = attr(document, node, "RECOMMENDATION")
+  if recommendation == "XML1.1" || recommendation == "NS1.1"
+    || attr(document, node, "VERSION") == "1.1" {
+    return 0
+  }
+  let edition = attr(document, node, "EDITION")
+  if edition != "" {
+    let bytes = String.utf8Bytes(edition)
+    let mut fifth = false
+    let mut at: usize = 0
+    while at < bytes.length {
+      if bytes[at] == 53 && (at == 0 || white(bytes[at - 1]))
+        && (at + 1 == bytes.length || white(bytes[at + 1])) {
+        fifth = true
+      }
+      at = at + 1
+    }
+    if !fifth {
+      return 1
+    }
+  }
+  if attr(document, node, "NAMESPACE") == "no" {
+    return 2
+  }
+  let kind = attr(document, node, "TYPE")
+  if kind == "error" {
+    return 3
+  }
+  let entities = attr(document, node, "ENTITIES")
+  if kind == "not-wf" && entities != "" && entities != "none" {
+    return 4
+  }
+  return 5
+}
+
+effect fn collect(
+  document: &XmlDocument,
+  node: XmlNodeId,
+  base: &Path,
+  catalog: string,
+  selected: &mut List<Case>,
+  skipped: &mut [usize],
+) -> ()
+  ! TaskError | FileError | HostInputError | OutOfMemoryError
+  ? &mut HostInput | &mut Allocator {
+  let relative = document.attribute(node, "http://www.w3.org/XML/1998/namespace", "base")
+    |> Option<string>.unwrapOr("")
+  let current = run contained(base, relative)
+  if document.localName(node) == "TEST" {
+    let reason = skip(document, node)
+    if reason < 5 {
+      skipped[reason] = skipped[reason] + 1
+    } else {
+      let attributes = document.attributes(node)
+      let mut properties = String.make()
+      let mut index: usize = 0
+      while index < attributes.length {
+        if index > 0 {
+          run String.append(&mut properties, ",")
+        }
+        let key = run Support.quote(document.attributeQualifiedName(attributes[index]))
+        let value = run Support.quote(document.attributeValue(attributes[index]))
+        run String.append(&mut properties, String.view(&key))
+        run String.append(&mut properties, ":")
+        run String.append(&mut properties, String.view(&value))
+        index = index + 1
+      }
+      let quotedCatalog = run Support.quote(catalog)
+      if attributes.length > 0 {
+        run String.append(&mut properties, ",")
+      }
+      run String.append(&mut properties, "\"catalog\":")
+      run String.append(&mut properties, String.view(&quotedCatalog))
+      let location = run contained(&current, attr(document, node, "URI"))
+      let file = run String.copy(run Support.pathText(&location))
+      let quotedFile = run Support.quote(String.view(&file))
+      run String.append(&mut properties, ",\"file\":")
+      run String.append(&mut properties, String.view(&quotedFile))
+      let kind = attr(document, node, "TYPE")
+      run List<Case>.append(
+        &mut selected.*,
+        Case {
+          properties: move properties,
+          id: run String.copy(attr(document, node, "ID")),
+          kind: run String.copy(kind),
+          file: move file,
+          expected: if kind == "not-wf" {
+            "ERR"
+          } else {
+            "OK"
+          },
+          outcome: String.make(),
+        },
+      )
+    }
+  }
+  let mut child = document.firstChild(node)
+  while let Option<XmlNodeId>.Some { value } = child {
+    run collect(document, value, &current, catalog, &mut selected.*, &mut skipped)
+    child = document.nextSibling(value)
+  }
+}
+
+effect fn words(bytes: &[u8]) -> List<String>
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  let text = run Support.text(bytes)
+  let mut result = List<String>.make()
+  let mut at: usize = 0
+  while at < bytes.length {
+    while at < bytes.length && white(bytes[at]) {
+      at = at + 1
+    }
+    let start = at
+    while at < bytes.length && !white(bytes[at]) {
+      at = at + 1
+    }
+    if at > start {
+      run List<String>.append(&mut result, run String.copy(String.slice(text, start, at - start)))
+    }
+  }
+  return move result
+}
+
+effect fn failedCapture<E>(error: E) -> Bytes
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  drop error
+  return Bytes.make()
+}
+
+pub effect fn check(offline: bool, report: string) -> ()
+  ! TaskError | ProcessError | FileError | HostInputError | OutOfMemoryError | WriterError
+  ? &mut HostInput | &mut Allocator | &mut ChildProcess | &mut FileSystem {
+  let runner = run Support.build("xml-conformance", "svg-xml-conformance", true, false)
+  run fetch(offline)
+  let top = run Support.readText("build/xmlconf/xmlconf/xmlconf.xml")
+  let sources = run catalogs(String.view(&top))
+  let entries = List<String>.asSlice(&sources)
+  let suite = run Support.path(SUITE)
+  let mut selected = List<Case>.make()
+  let mut skipped: [usize; 5] = [0; 5]
+  let mut index: usize = 0
+  while index < entries.length {
+    let catalog = String.view(&entries[index])
+    let file = run contained(&suite, String.view(&entries[index + 1]))
+    let parent = match move run Path.parent(&file) {
+      Option<Path>.Some { value } => move value
+      Option<Path>.None => run Task.abort("Invalid XML catalog path")
+    }
+    let source = run FileSystem.readFile(&file)
+    let cleaned = run cleanCatalog(run Support.text(Bytes.asSlice(&source)))
+    let document = match move run Effect.result(
+      XmlDocument.parse(String.utf8Bytes(String.view(&cleaned))),
+    ) {
+      Result<XmlDocument, XmlError | OutOfMemoryError>.Success { value } => move value
+      Result<XmlDocument, XmlError | OutOfMemoryError>.Failure { .. } => run Task.abort(
+        "Invalid XML conformance catalog",
+      )
+    }
+    run collect(&document, document.root(), &parent, catalog, &mut selected, &mut skipped)
+    index = index + 2
+  }
+  let total = List<Case>.length(&selected)
+  if total == 0 {
+    run Task.abort("XML conformance catalog selected no cases")
+  }
+  let batchSize: usize = if Support.operatingSystem() == "windows" {
+    50
+  } else {
+    200
+  }
+  let mut start: usize = 0
+  while start < total {
+    let end = if total - start < batchSize {
+      total
+    } else {
+      start + batchSize
+    }
+    let mut arguments = List<string>.make()
+    let cases = List<Case>.asSlice(&selected)
+    let mut at = start
+    while at < end {
+      run List<string>.append(&mut arguments, String.view(&cases[at].file))
+      at = at + 1
+    }
+    let output = run Effect.catchAll(
+      Support.captured(String.view(&runner), List<string>.asSlice(&arguments), "600"),
+      failedCapture,
+    )
+    let parsed = run words(Bytes.asSlice(&output))
+    let lines = List<String>.asSlice(&parsed)
+    drop arguments
+    if lines.length == end - start {
+      let items = List<Case>.asMutSlice(&mut selected)
+      at = start
+      while at < end {
+        items[at].outcome = run String.copy(String.view(&lines[at - start]))
+        at = at + 1
+      }
+    } else {
+      at = start
+      while at < end {
+        let items = List<Case>.asMutSlice(&mut selected)
+        let single = run Effect.catchAll(
+          Support.captured(String.view(&runner), &[String.view(&items[at].file)], "60"),
+          failedCapture,
+        )
+        let singleWords = run words(Bytes.asSlice(&single))
+        let values = List<String>.asSlice(&singleWords)
+        let mut outcome = "crash"
+        if values.length != 0 {
+          outcome = String.view(&values[0])
+        }
+        items[at].outcome = run String.copy(outcome)
+        at = at + 1
+      }
+    }
+    start = end
+  }
+  let reasons = &[
+    "xml-1.1",
+    "earlier-edition",
+    "namespace-unaware",
+    "optional-error",
+    "not-wf-in-external-entity",
+  ]
+  let mut json = run String.copy("{\"skipped\":{")
+  let mut count: usize = 0
+  index = 0
+  while index < 5 {
+    if skipped[index] > 0 {
+      if count > 0 {
+        run String.append(&mut json, ",")
+      }
+      let key = run Support.quote(reasons[index])
+      let value = run Support.number(skipped[index])
+      run String.append(&mut json, String.view(&key))
+      run String.append(&mut json, ":")
+      run String.append(&mut json, String.view(&value))
+      count = count + 1
+    }
+    index = index + 1
+  }
+  run String.append(&mut json, "},\"cases\":[")
+  let cases = List<Case>.asSlice(&selected)
+  let mut failures: usize = 0
+  index = 0
+  while index < cases.length {
+    let item = &cases[index]
+    if index > 0 {
+      run String.append(&mut json, ",")
+    }
+    let expected = run Support.quote(item.expected)
+    let outcome = run Support.quote(String.view(&item.outcome))
+    run String.append(&mut json, "{")
+    run String.append(&mut json, String.view(&item.properties))
+    run String.append(&mut json, ",\"expected\":")
+    run String.append(&mut json, String.view(&expected))
+    run String.append(&mut json, ",\"outcome\":")
+    run String.append(&mut json, String.view(&outcome))
+    run String.append(&mut json, "}")
+    if String.view(&item.outcome) != item.expected {
+      failures = failures + 1
+      let message = run Support.cat(
+        &[
+          "FAIL ",
+          String.view(&item.id),
+          " (",
+          String.view(&item.kind),
+          "): expected ",
+          item.expected,
+          ", got ",
+          String.view(&item.outcome),
+          ": ",
+          String.view(&item.file),
+        ],
+      )
+      run Support.printLine(String.view(&message))
+    }
+    index = index + 1
+  }
+  run String.append(&mut json, "]}\n")
+  if report != "" {
+    let destination = run Support.path(report)
+    run FileSystem.writeFileWithParents(&destination, String.utf8Bytes(String.view(&json)))
+  }
+  let passed = run Support.number(total - failures)
+  let all = run Support.number(total)
+  let mut summary = run Support.cat(
+    &[String.view(&passed), "/", String.view(&all), " selected XML cases pass; skipped "],
+  )
+  let order: [usize; 5] = [1, 2, 4, 3, 0]
+  let mut emitted: usize = 0
+  index = 0
+  while index < order.length {
+    let reason = order[index]
+    if skipped[reason] > 0 {
+      if emitted > 0 {
+        run String.append(&mut summary, ", ")
+      }
+      let count = run Support.number(skipped[reason])
+      run String.append(&mut summary, String.view(&count))
+      run String.append(&mut summary, " ")
+      run String.append(&mut summary, reasons[reason])
+      emitted = emitted + 1
+    }
+    index = index + 1
+  }
+  run Support.printLine(String.view(&summary))
+  if failures != 0 {
+    run Task.abort("XML conformance failures; see case diagnostics/report")
+  }
+}

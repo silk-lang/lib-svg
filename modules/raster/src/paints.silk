@@ -2,7 +2,6 @@
 import svg_core.scene { DisplayList, Brush, PaintInstance, GradientGeometry, Color, RenderError }
 import svg_core.scene { SpreadMethod }
 import svg_core.mapping { Mapping }
-import svg_core.mapping
 import vector.paint { Gradient, Stop, Solid, Shader, SPREAD_PAD, SPREAD_REPEAT, SPREAD_REFLECT }
 import vector.paint { ImagePattern, SAMPLE_BILINEAR, SAMPLE_NEAREST, EXTEND_REPEAT, EXTEND_CLAMP }
 import vector.projective { Homography }

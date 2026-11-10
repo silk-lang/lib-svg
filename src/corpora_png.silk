@@ -1,0 +1,416 @@
+// Reference comparison deliberately uses straight samples, never renderer-premultiplied pixels.
+import corpora { CorpusError, CorpusFailure }
+import corpora
+import silk.collections.bytes { Bytes }
+import silk.collections.slice { Slice }
+import silk.compress.checksum { CompressionChecksum }
+import silk.compress.inflate { Decoder, DecodeError, Format, Limits, Progress, Status }
+import silk.core.effect { Effect }
+import silk.core.result { Result }
+import silk.mem.allocator { Allocator, OutOfMemoryError }
+import silk.text.string { String }
+import silk.num.u8
+import silk.num.u32
+import silk.num.usize
+
+pub struct Rgba {
+  pub width: usize,
+  pub height: usize,
+  pub data: Bytes
+}
+
+pub fn read32(data: &[u8], at: usize) -> usize {
+  return u8.toUsize(data[at]) * 16777216 + u8.toUsize(data[at + 1]) * 65536
+    + u8.toUsize(data[at + 2]) * 256
+    + u8.toUsize(data[at + 3])
+}
+
+fn read16(data: &[u8], at: usize) -> usize {
+  return u8.toUsize(data[at]) * 256 + u8.toUsize(data[at + 1])
+}
+
+fn delta(a: usize, b: usize) -> usize {
+  return if a > b {
+    a - b
+  } else {
+    b - a
+  }
+}
+
+fn paeth(a: usize, b: usize, c: usize) -> usize {
+  let da = delta(b, c)
+  let db = delta(a, c)
+  let dc = delta(a + b, c * 2)
+  return if da <= db && da <= dc {
+    a
+  } else if db <= dc {
+    b
+  } else {
+    c
+  }
+}
+
+fn sample(row: &[u8], at: usize, depth: usize) -> usize {
+  if depth == 16 {
+    return read16(row, at * 2)
+  }
+  if depth == 8 {
+    return u8.toUsize(row[at])
+  }
+  let bit = at * depth
+  let shift = 8 - depth - bit % 8
+  let mut divisor: usize = 1
+  let mut index: usize = 0
+  while index < shift {
+    divisor = divisor * 2
+    index = index + 1
+  }
+  let range: usize = if depth == 1 {
+    2
+  } else if depth == 2 {
+    4
+  } else {
+    16
+  }
+  return u8.toUsize(row[bit / 8]) / divisor % range
+}
+
+fn converted(value: usize, depth: usize, gray: bool) -> usize {
+  if depth == 16 {
+    return if gray {
+      if value > 255 {
+        255
+      } else {
+        value
+      }
+    } else {
+      value / 256
+    }
+  }
+  let maximum: usize = if depth == 8 {
+    255
+  } else if depth == 4 {
+    15
+  } else if depth == 2 {
+    3
+  } else {
+    1
+  }
+  return (value * 255 + maximum / 2) / maximum
+}
+
+fn size(length: usize, origin: usize, step: usize) -> usize {
+  return if length <= origin {
+    0
+  } else {
+    (length - origin + step - 1) / step
+  }
+}
+
+pub effect fn decode(data: &[u8]) -> Rgba
+  ! CorpusFailure
+  ? &mut Allocator {
+  if data.length < 33 || data[0] != 137 || data[1] != 80 || data[2] != 78 || data[3] != 71
+    || data[4] != 13
+    || data[5] != 10
+    || data[6] != 26
+    || data[7] != 10
+    || read32(data, 8) != 13
+    || read32(data, 12) != 1229472850 {
+    run corpora.reject("renderer output is not PNG")
+  }
+  let width = read32(data, 16)
+  let height = read32(data, 20)
+  if width == 0 || height == 0 {
+    run corpora.reject("invalid PNG dimensions")
+  }
+  if width > 16000000 || height > 16000000 / width {
+    run corpora.reject("PNG exceeds 16 million pixel comparison limit")
+  }
+  let depth = u8.toUsize(data[24])
+  let color = data[25]
+  let channels: usize = if color == 0 || color == 3 {
+    1
+  } else if color == 2 {
+    3
+  } else if color == 4 {
+    2
+  } else if color == 6 {
+    4
+  } else {
+    0
+  }
+  let validDepth = if color == 0 {
+    depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16
+  } else if color == 3 {
+    depth == 1 || depth == 2 || depth == 4 || depth == 8
+  } else {
+    depth == 8 || depth == 16
+  }
+  if channels == 0 || !validDepth || data[26] != 0 || data[27] != 0 || data[28] > 1 {
+    run corpora.reject("unsupported PNG header")
+  }
+  let interlaced = data[28] == 1
+  let mut compressed = Bytes.make()
+  let mut palette = Slice.view<u8>(data, 0, 0)
+  let mut transparent = Slice.view<u8>(data, 0, 0)
+  let mut position: usize = 8
+  let mut finished = false
+  let mut sawData = false
+  while position + 12 <= data.length {
+    let length = read32(data, position)
+    if length > data.length - position - 12 {
+      run corpora.reject("truncated PNG chunk")
+    }
+    let kind = read32(data, position + 4)
+    let payload = Slice.view<u8>(data, position + 8, length)
+    if u32.toUsize(CompressionChecksum.crc32(Slice.view<u8>(data, position + 4, length + 4)))
+      != read32(data, position + 8 + length) {
+      run corpora.reject("PNG checksum mismatch")
+    }
+    if kind == 1229472850 {
+      if position != 8 {
+        run corpora.reject("duplicate PNG header")
+      }
+    } else if kind == 1347179589 {
+      if length == 0 || length % 3 != 0 || length > 768 || sawData {
+        run corpora.reject("invalid PNG palette")
+      }
+      palette = payload
+    } else if kind == 1951551059 {
+      if sawData {
+        run corpora.reject("late PNG transparency")
+      }
+      if (color == 0 && length != 2) || (color == 2 && length != 6)
+        || (color == 3 && length > palette.length / 3)
+        || color == 4
+        || color == 6 {
+        run corpora.reject("invalid PNG transparency")
+      }
+      transparent = payload
+    } else if kind == 1229209940 {
+      sawData = true
+      run Bytes.append(&mut compressed, payload)
+    } else if kind == 1229278788 {
+      if length != 0 {
+        run corpora.reject("invalid PNG end")
+      }
+      finished = true
+      break
+    } else if data[position + 4] >= 65 && data[position + 4] <= 90 {
+      run corpora.reject("unknown critical PNG chunk")
+    }
+    position = position + length + 12
+  }
+  if !finished || !sawData || (color == 3 && palette.length == 0) {
+    run corpora.reject("incomplete PNG image")
+  }
+  let xs: [usize; 7] = [0, 4, 0, 2, 0, 1, 0]
+  let ys: [usize; 7] = [0, 0, 4, 0, 2, 0, 1]
+  let dxs: [usize; 7] = [8, 8, 4, 4, 2, 2, 1]
+  let dys: [usize; 7] = [8, 8, 8, 4, 4, 2, 2]
+  let passes: usize = if interlaced {
+    7
+  } else {
+    1
+  }
+  let mut rawSize: usize = 0
+  let mut pass: usize = 0
+  while pass < passes {
+    let w = if interlaced {
+      size(width, xs[pass], dxs[pass])
+    } else {
+      width
+    }
+    let h = if interlaced {
+      size(height, ys[pass], dys[pass])
+    } else {
+      height
+    }
+    if w != 0 && h != 0 {
+      rawSize = rawSize + ((w * channels * depth + 7) / 8 + 1) * h
+    }
+    pass = pass + 1
+  }
+  let mut raw = run Bytes.zeroed(rawSize + 1)
+  let limits = Limits {
+    maxInputBytes: usize.toU64(Bytes.length(&compressed)),
+    maxOutputBytes: usize.toU64(rawSize),
+    maxMembers: 1,
+    maxHeaderBytes: 2,
+    maxMemoryBytes: 65536,
+  }
+  let made = run Effect.result(Decoder.make(Format.Zlib, move limits))
+  let mut decoder = match move made {
+    Result<Decoder, DecodeError | OutOfMemoryError>.Success { value } => move value
+    Result<Decoder, DecodeError | OutOfMemoryError>.Failure { error } => {
+      drop error
+      fail CorpusError { message: run String.copy("PNG decoder initialization failed") }
+    }
+  }
+  match Decoder.step(&mut decoder, Bytes.asSlice(&compressed), Bytes.asMutSlice(&mut raw), true) {
+    Result<Progress, DecodeError>.Success { value } => {
+      if value.status != Status.Finished || value.written != rawSize
+        || value.consumed != Bytes.length(&compressed) {
+        run corpora.reject("invalid PNG compressed image size")
+      }
+    }
+    _ => {
+      run corpora.reject("invalid PNG compressed image")
+    }
+  }
+  let mut pixels = run Bytes.zeroed(width * height * 4)
+  let rows = Bytes.asMutSlice(&mut raw)
+  let output = Bytes.asMutSlice(&mut pixels)
+  let bpp = (channels * depth + 7) / 8
+  let mut offset: usize = 0
+  pass = 0
+  while pass < passes {
+    let ox = if interlaced {
+      xs[pass]
+    } else {
+      0
+    }
+    let oy = if interlaced {
+      ys[pass]
+    } else {
+      0
+    }
+    let dx = if interlaced {
+      dxs[pass]
+    } else {
+      1
+    }
+    let dy = if interlaced {
+      dys[pass]
+    } else {
+      1
+    }
+    let w = size(width, ox, dx)
+    let h = size(height, oy, dy)
+    let stride = (w * channels * depth + 7) / 8
+    let mut y: usize = 0
+    while w > 0 && y < h {
+      let start = offset + y * (stride + 1) + 1
+      let filter = rows[start - 1]
+      if filter > 4 {
+        run corpora.reject("invalid PNG filter")
+      }
+      let mut x: usize = 0
+      while x < stride {
+        let a = if x >= bpp {
+          u8.toUsize(rows[start + x - bpp])
+        } else {
+          0
+        }
+        let b = if y > 0 {
+          u8.toUsize(rows[start + x - stride - 1])
+        } else {
+          0
+        }
+        let c = if y > 0 && x >= bpp {
+          u8.toUsize(rows[start + x - stride - 1 - bpp])
+        } else {
+          0
+        }
+        let predictor = if filter == 1 {
+          a
+        } else if filter == 2 {
+          b
+        } else if filter == 3 {
+          (a + b) / 2
+        } else if filter == 4 {
+          paeth(a, b, c)
+        } else {
+          0
+        }
+        rows[start + x] = usize.toU8((u8.toUsize(rows[start + x]) + predictor) % 256)
+        x = x + 1
+      }
+      let row = Slice.view<u8>(&rows, start, stride)
+      x = 0
+      while x < w {
+        let at = x * channels
+        let first = sample(row, at, depth)
+        let mut red = converted(first, depth, color == 0)
+        let mut green = red
+        let mut blue = red
+        let mut alpha: usize = 255
+        if color == 3 {
+          if first >= palette.length / 3 {
+            run corpora.reject("PNG palette index outside palette")
+          }
+          red = u8.toUsize(palette[first * 3])
+          green = u8.toUsize(palette[first * 3 + 1])
+          blue = u8.toUsize(palette[first * 3 + 2])
+          if first < transparent.length {
+            alpha = u8.toUsize(transparent[first])
+          }
+        } else if color == 2 || color == 6 {
+          let second = sample(row, at + 1, depth)
+          let third = sample(row, at + 2, depth)
+          green = converted(second, depth, false)
+          blue = converted(third, depth, false)
+          if color == 6 {
+            alpha = converted(sample(row, at + 3, depth), depth, false)
+          } else if transparent.length == 6 && first == read16(transparent, 0)
+            && second == read16(transparent, 2)
+            && third == read16(transparent, 4) {
+            alpha = 0
+          }
+        } else if color == 4 {
+          alpha = converted(sample(row, at + 1, depth), depth, false)
+        } else if transparent.length == 2 && first == read16(transparent, 0) {
+          alpha = 0
+        }
+        let destination = ((oy + y * dy) * width + ox + x * dx) * 4
+        output[destination] = usize.toU8(red)
+        output[destination + 1] = usize.toU8(green)
+        output[destination + 2] = usize.toU8(blue)
+        output[destination + 3] = usize.toU8(alpha)
+        x = x + 1
+      }
+      y = y + 1
+    }
+    if w > 0 {
+      offset = offset + (stride + 1) * h
+    }
+    pass = pass + 1
+  }
+  drop rows
+  drop output
+  return Rgba { width: width, height: height, data: move pixels }
+}
+
+pub effect fn onWhite(image: &Rgba, width: usize, height: usize) -> Rgba
+  ! OutOfMemoryError
+  ? &mut Allocator {
+  let mut pixels = run Bytes.zeroed(width * height * 4)
+  let output = Bytes.asMutSlice(&mut pixels)
+  let source = Bytes.asSlice(&image.data)
+  let mut index: usize = 0
+  while index < output.length {
+    output[index] = 255
+    index = index + 1
+  }
+  let mut y: usize = 0
+  while y < image.height && y < height {
+    let mut x: usize = 0
+    while x < image.width && x < width {
+      let from = (y * image.width + x) * 4
+      let to = (y * width + x) * 4
+      let alpha = u8.toUsize(source[from + 3])
+      let mut channel: usize = 0
+      while channel < 3 {
+        output[to + channel] = usize.toU8(
+          (u8.toUsize(source[from + channel]) * alpha + 255 * (255 - alpha) + 127) / 255,
+        )
+        channel = channel + 1
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+  drop output
+  return Rgba { width: width, height: height, data: move pixels }
+}

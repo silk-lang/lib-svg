@@ -5,12 +5,15 @@ The SVG renderer built for `wasm32-unknown-unknown`, with a small JavaScript wra
 Build and check from the repository root (linking needs `wasm-ld` on `PATH`):
 
 ```sh
-node modules/scripts/build-wasm   # prints build/llvm/wasm32-unknown-unknown/release/svg-wasm
-node modules/tools/wasm/js/compare.mjs <svg-wasm> <svg-render-test-harness> modules/tests/fixtures/*/manifest.json
+silk task build-wasm   # prints build/llvm/wasm32-unknown-unknown/release/svg-wasm
+silk task check-wasm
 ```
 
-`compare.mjs` renders every fixture with the module and with the native CLI and requires
-identical pixels. CI runs it on each pull request.
+The Silk parity task renders every fixture with the module and with the native CLI
+and requires identical straight-alpha RGBA pixels, dimensions and failure outcomes.
+CI runs it on each pull request. `js/svg.mjs` remains the browser/Node runtime API;
+`js/render.mjs` is a single-render Node host adapter. Neither discovers cases,
+starts native processes nor makes parity assertions; that automation is in Silk.
 
 ## JavaScript
 

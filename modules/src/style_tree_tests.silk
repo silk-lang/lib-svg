@@ -29,7 +29,7 @@ effect fn selected(tree: &Tree<'_>, source: &[u8], wanted: &[&[u8]]) -> ()
         if nodes[i].kind == XmlNodeKind.Element {
           let result = run matchElement(&value, &tokens, tree, i, &mut context)
           let actual = match &result {
-            Option<Specificity>.Some { value: specificity } => true
+            Option<Specificity>.Some { .. } => true
             _ => false
           }
           let id = (XmlDocument.attribute(tree.document, XmlNodeId { index: i }, "", "id")

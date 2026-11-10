@@ -323,7 +323,7 @@ fn hex(byte: u8) -> usize {
 
 fn validUtf8(data: &[u8]) -> bool {
   return match move String.fromUtf8(data) {
-    Result<string, InvalidUtf8>.Success { value } => true
+    Result<string, InvalidUtf8>.Success { .. } => true
     _ => false
   }
 }

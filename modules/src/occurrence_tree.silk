@@ -3,7 +3,7 @@ import silk.text.string { String }
 import structure { Graph, SourceId, OccurrenceId }
 import style_tree { Metadata }
 import style_tree
-import silk.xml.document { XmlDocument, XmlNodeId }
+import silk.xml.document { XmlDocument }
 import svg_css.element { ElementTree, NO_ELEMENT, AttributeText }
 import svg_css.tokens { equal }
 import silk.collections.list { List }

@@ -1,5 +1,4 @@
 //! SVG2 #ImageElement and #IntrinsicSizing: transport validation precedes layout.
-import svg_css.computed { Initials }
 import svg_fonts.database { FontDatabase }
 import document_images
 import svg_core.image_assets { Store, DocumentSource, DocumentMetadata }
@@ -7,7 +6,6 @@ import svg_core.url { Url, UrlError }
 import svg_core.resources { Resolver, DataOnly, Limits as ResourceLimits, Response }
 import svg_core.structure { Options as StructureOptions }
 import svg_core.scene { RenderError }
-import svg_core.svg_intrinsic { NaturalSize }
 import svg_css.media_features { Environment as MediaEnvironment }
 import svg_css.colors { Color, Context as ColorContext }
 import svg_css.tokens { Limits }

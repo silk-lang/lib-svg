@@ -1,5 +1,0 @@
-#!/usr/bin/env node
-// Validate references or compare PNGs with an explicitly supplied renderer.
-import('./svg_reftests.mjs').then(async ({ main }) => {
-  process.exitCode = await main();
-}).catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -1,5 +1,3 @@
-import svg_css.computed { Initials }
-import silk.core.option { Option }
 import svg_core.structure { Options as StructureOptions }
 import svg_fonts.database { FontDatabase }
 import lib { RenderOptions, RenderError, Pixmap as Image }

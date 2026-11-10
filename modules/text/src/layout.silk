@@ -1,7 +1,6 @@
 //! SVG 2 text layout (https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm) for one
 //! `text` element: per-character font selection, shaping, the positioning attributes and
 //! text-anchor, producing positioned glyphs in the element's user space.
-import font_outline.outline { Outlines, Recorder }
 import on_path { OnPath }
 import svg_fonts.database { Fonts, Face, AXIS_WEIGHT, AXIS_WIDTH, AXIS_ITALIC, AXIS_SLANT }
 import svg_fonts.matching { Selection }
@@ -9,7 +8,6 @@ import harfrust.lib {
   Buffer,
   Shaper,
   ShaperData,
-  ConfiguredShaper,
   DefaultFontFuncs,
   Feature,
   Variation,
@@ -22,18 +20,16 @@ import harfrust.lib {
 import read_fonts.lib { FontRef, ReadError, Os2, Post }
 import read_fonts.model.charmap { Charmap }
 import read_fonts.model.metrics { Metrics, LineBox }
-import font_types.lib { F2Dot14, F48Dot16, GlyphId, Tag }
+import font_types.lib { F2Dot14, F48Dot16, Tag }
 import silk.text.unicode { Unicode }
 import silk.text.string { String }
 import silk.text.bidi { BidiWorkspace, ParagraphDirection, analyzeCodepoints, reorder }
 import silk.text.vertical_text { Orientation, OrientationRun, orientations }
 import silk.collections.list { List }
-import silk.collections.slice { Slice }
 import silk.core.option { Option }
 import silk.core.result { Result }
 import silk.core.ownership { Copy }
 import silk.mem.allocator { Allocator, OutOfMemoryError }
-import silk.num.f32
 import silk.num.f64
 import silk.num.i16
 import silk.num.i32
@@ -269,7 +265,7 @@ pub fn fontOf<'a>(database: &'a Fonts<'_>, face: usize) -> Option<FontRef<'a>> {
   let index = database.face(face).index
   return match move FontRef.fromIndex(database.data(face), index) {
     Result<FontRef<'a>, ReadError>.Success { value } => Option<FontRef<'a>>.Some { value: value }
-    Result<FontRef<'a>, ReadError>.Failure { error } => Option<FontRef<'a>>.None
+    Result<FontRef<'a>, ReadError>.Failure { .. } => Option<FontRef<'a>>.None
   }
 }
 
@@ -609,7 +605,7 @@ effect fn shapeRun(
     }
   }
   let shaped = run shapeWithFeatures(&shaper, &mut buffer, List<Feature>.asSlice(&features))
-  if let Result<(), ShapeError>.Failure { error } = move shaped {
+  if let Result<(), ShapeError>.Failure { .. } = move shaped {
     return pen
   }
   let mut advance = pen
@@ -867,7 +863,7 @@ effect fn chunkLevels(
       let inside = List<usize>.length(&open) > 0
         && List<usize>.get(&open, List<usize>.length(&open) - 1) == value
       let top = match spans[value].parent {
-        Option<usize>.Some { value: above } => false
+        Option<usize>.Some { .. } => false
         Option<usize>.None => true
       }
       if inside || top {
@@ -897,10 +893,10 @@ effect fn chunkLevels(
 
 /// Whether the character has an absolute position, which starts a text chunk.
 fn positioned(character: &Character) -> bool {
-  if let Option<f64>.Some { value } = character.x {
+  if let Option<f64>.Some { .. } = character.x {
     return true
   }
-  if let Option<f64>.Some { value } = character.y {
+  if let Option<f64>.Some { .. } = character.y {
     return true
   }
   return false
