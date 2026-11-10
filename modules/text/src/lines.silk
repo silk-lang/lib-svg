@@ -4,7 +4,7 @@ import layout {
   Span,
   Character,
   Line,
-  Writing,
+  WritingMode,
   TextOrientation,
   Baseline,
   Anchor,
@@ -111,7 +111,7 @@ effect fn lineBox(
       }
       let leading = (lineHeight - content) / 2.0
       let baseline = List<f64>.get(&result.drops, span)
-      if spans[0].writing != Writing.HorizontalTb
+      if spans[0].writing != WritingMode.HorizontalTb
         && spans[span].orientation != TextOrientation.Sideways {
         // In vertical typographic mode the box is centred on the central baseline
         // (CSS Writing Modes 3 #vertical-font-features).
@@ -316,9 +316,9 @@ pub effect fn wrap(
       end,
     )
     if line > 0 {
-      if writing == Writing.HorizontalTb {
+      if writing == WritingMode.HorizontalTb {
         y = y + (previous.bottom - box.top)
-      } else if writing == Writing.VerticalRl {
+      } else if writing == WritingMode.VerticalRl {
         x = x - (previous.bottom - box.top)
       } else {
         x = x + (box.bottom - previous.top)

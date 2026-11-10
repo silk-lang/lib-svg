@@ -7,6 +7,8 @@ import document_styles { StyledGraph }
 import structure { Graph, SourceId }
 import image_assets { Asset, DocumentSource }
 import svg_css.values { PaintLayer }
+/// The painting keywords are the shared computed enums of css-properties.
+pub import css_properties.computed { BlendMode, FillRule, LineCap, LineJoin }
 pub import svg_filters.program { Program as FilterProgram }
 import silk.collections.list { List }
 import silk.core.ownership { Copy }
@@ -115,44 +117,6 @@ pub union Brush {
 impl Copy for Brush {}
 
 /// Compositing and Blending Level 1 blend functions.
-pub enum BlendMode {
-  Normal,
-  Multiply,
-  Screen,
-  Overlay,
-  Darken,
-  Lighten,
-  ColorDodge,
-  ColorBurn,
-  HardLight,
-  SoftLight,
-  Difference,
-  Exclusion,
-  Hue,
-  Saturation,
-  Color,
-  Luminosity,
-}
-
-pub enum FillRule {
-  Nonzero,
-  EvenOdd
-}
-
-pub enum LineCap {
-  Butt,
-  Round,
-  Square
-}
-
-pub enum LineJoin {
-  Miter,
-  Round,
-  Bevel,
-  MiterClip,
-  Arcs
-}
-
 /// Used paint values projected from computed CSS; group opacity is not inherited.
 pub struct Style {
   pub color: Color,

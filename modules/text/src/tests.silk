@@ -3,7 +3,7 @@
 import layout {
   Anchor,
   Baseline,
-  Bidi,
+  UnicodeBidi,
   Shift,
   Setting,
   Axis,
@@ -13,7 +13,7 @@ import layout {
   Layout,
   Instance,
   Line,
-  Writing,
+  WritingMode,
   TextOrientation,
   layout
 }
@@ -99,11 +99,11 @@ effect fn span(faces: &[usize], anchor: Anchor) -> Span
     shift: Shift.Length { value: 0.0 },
     parent: Option<usize>.None,
     rtl: false,
-    bidi: Bidi.Normal,
+    bidi: UnicodeBidi.Normal,
     features: List<Setting>.make(),
     variations: List<Axis>.make(),
     lineHeight: Option<f64>.None,
-    writing: Writing.HorizontalTb,
+    writing: WritingMode.HorizontalTb,
     orientation: TextOrientation.Mixed,
   }
 }
@@ -325,7 +325,7 @@ effect fn setsVerticalText() -> ()
   drop run database.add(run read("MPLUS1p-Regular.subset.ttf"))
   let fonts = Fonts.make(&database)
   let mut spans = [run span(&[0], Anchor.Start)]
-  spans[0].writing = Writing.VerticalRl
+  spans[0].writing = WritingMode.VerticalRl
   let mut text = run characters(&[0x304D, 0x3001, 0x41])
   let chars = List<Character>.asMutSlice(&mut text)
   chars[0].x = Option<f64>.Some { value: 50.0 }

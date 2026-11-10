@@ -99,7 +99,9 @@ writes nothing unless parsing, rendering and encoding all succeed. It is not a p
 | `modules/tests` | `svg-tests` | Test inputs, suite pins and reviewed expectations |
 | `modules/bench` | `svg-bench` | Renderer workloads and the resvg comparison |
 
-XML parsing uses installed `silk.xml`; CSS comes from [lib-css](https://github.com/silk-lang/lib-css).
+XML parsing uses installed `silk.xml`; CSS comes from [lib-css](https://github.com/silk-lang/lib-css). Keywords and
+the keyword enums the scene and text layout carry (`FillRule`, `LineCap`, `LineJoin`, `BlendMode`,
+`WritingMode`, `TextOrientation`, `UnicodeBidi`) are the shared ones of lib-css's css-properties.
 Text measurement and font matching come from [lib-fonts](https://github.com/silk-lang/lib-fonts).
 Geometry, codecs and CPU/GPU backends are pinned [lib-graphics](https://github.com/silk-lang/lib-graphics) dependencies.
 

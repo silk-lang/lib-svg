@@ -7,6 +7,7 @@ import svg_css.values
 import svg_css.properties { Property }
 import svg_css.effect_values { EffectValue }
 import svg_css.value_keywords { Keyword }
+import css_properties.keyword_enums
 import svg_css.colors { Color as CssColor, Identity }
 import svg_css.colors
 import svg_geometry.math
@@ -66,23 +67,8 @@ pub effect fn keyword(engine: &Engine<'_>, style: StyleId, property: Property) -
 
 effect fn blendMode(engine: &Engine<'_>, style: StyleId) -> BlendMode
   ! RenderError {
-  return match &(run keyword(engine, style, Property.MixBlendMode)) {
-    Keyword.Normal => BlendMode.Normal
-    Keyword.Multiply => BlendMode.Multiply
-    Keyword.Screen => BlendMode.Screen
-    Keyword.Overlay => BlendMode.Overlay
-    Keyword.Darken => BlendMode.Darken
-    Keyword.Lighten => BlendMode.Lighten
-    Keyword.ColorDodge => BlendMode.ColorDodge
-    Keyword.ColorBurn => BlendMode.ColorBurn
-    Keyword.HardLight => BlendMode.HardLight
-    Keyword.SoftLight => BlendMode.SoftLight
-    Keyword.Difference => BlendMode.Difference
-    Keyword.Exclusion => BlendMode.Exclusion
-    Keyword.Hue => BlendMode.Hue
-    Keyword.Saturation => BlendMode.Saturation
-    Keyword.Color => BlendMode.Color
-    Keyword.Luminosity => BlendMode.Luminosity
+  return match &keyword_enums.blendModeOf(run keyword(engine, style, Property.MixBlendMode)) {
+    Option<BlendMode>.Some { value } => value
     _ => {
       fail RenderError.InvalidGeometry
     }
@@ -234,28 +220,17 @@ pub effect fn project(
       || clips(engine, style),
     strokeWidth: run number(engine, style, Property.StrokeWidth, basis),
     miterLimit: run number(engine, style, Property.StrokeMiterlimit, 1.0),
-    lineCap: if cap == Keyword.Round {
-      LineCap.Round
-    } else if cap == Keyword.Square {
-      LineCap.Square
-    } else {
-      LineCap.Butt
+    lineCap: match &keyword_enums.lineCapOf(cap) {
+      Option<LineCap>.Some { value } => value
+      _ => LineCap.Butt
     },
-    lineJoin: if join == Keyword.Round {
-      LineJoin.Round
-    } else if join == Keyword.Bevel {
-      LineJoin.Bevel
-    } else if join == Keyword.MiterClip {
-      LineJoin.MiterClip
-    } else if join == Keyword.Arcs {
-      LineJoin.Arcs
-    } else {
-      LineJoin.Miter
+    lineJoin: match &keyword_enums.lineJoinOf(join) {
+      Option<LineJoin>.Some { value } => value
+      _ => LineJoin.Miter
     },
-    fillRule: if (run keyword(engine, style, Property.FillRule)) == Keyword.Evenodd {
-      FillRule.EvenOdd
-    } else {
-      FillRule.Nonzero
+    fillRule: match &keyword_enums.fillRuleOf(run keyword(engine, style, Property.FillRule)) {
+      Option<FillRule>.Some { value } => value
+      _ => FillRule.Nonzero
     },
     dashIndex: run dashIndex(engine, style, basis, &mut cache.*, &mut dashes.*),
     dashOffset: run number(engine, style, Property.StrokeDashoffset, basis),
