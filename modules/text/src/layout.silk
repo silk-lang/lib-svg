@@ -1,6 +1,9 @@
 //! SVG 2 text layout (https://www.w3.org/TR/SVG2/text.html#TextLayoutAlgorithm) for one
 //! `text` element: per-character font selection, shaping, the positioning attributes and
 //! text-anchor, producing positioned glyphs in the element's user space.
+/// writing-mode, text-orientation and unicode-bidi are the shared computed enums of
+/// css-properties. SVG text lays out the sideways writing modes as horizontal.
+pub import css_properties.computed { WritingMode, TextOrientation, UnicodeBidi }
 import on_path { OnPath }
 import svg_fonts.database { Fonts, Face, AXIS_WEIGHT, AXIS_WIDTH, AXIS_ITALIC, AXIS_SLANT }
 import svg_fonts.matching { Selection }
@@ -61,7 +64,7 @@ pub struct Span {
   pub parent: Option<usize>,
   /// direction: rtl.
   pub rtl: bool,
-  pub bidi: Bidi,
+  pub bidi: UnicodeBidi,
   /// OpenType features for the span's characters, in order; a later setting of a tag wins.
   pub features: List<Setting>,
   /// font-variation-settings, applied after the axes font matching sets.
@@ -69,23 +72,9 @@ pub struct Span {
   /// line-height in user units; None is `normal`, the first face's line metrics.
   pub lineHeight: Option<f64>,
   /// writing-mode; the text element's sets the layout's.
-  pub writing: Writing,
+  pub writing: WritingMode,
   /// text-orientation, for vertical text.
   pub orientation: TextOrientation,
-}
-
-/// writing-mode (CSS Writing Modes 3), with the SVG 1.1 values already mapped.
-pub enum Writing {
-  HorizontalTb,
-  VerticalRl,
-  VerticalLr,
-}
-
-/// text-orientation (CSS Writing Modes 3 #text-orientation).
-pub enum TextOrientation {
-  Mixed,
-  Upright,
-  Sideways,
 }
 
 /// One variation axis value.
@@ -103,16 +92,6 @@ pub struct Setting {
 }
 
 impl Copy for Setting {}
-
-/// unicode-bidi (CSS Writing Modes 3 #unicode-bidi).
-pub enum Bidi {
-  Normal,
-  Embed,
-  Isolate,
-  Override,
-  IsolateOverride,
-  Plaintext,
-}
 
 /// Baseline types (CSS Inline 3 #baseline-types), horizontal only.
 pub enum Baseline {
@@ -746,8 +725,8 @@ effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
     0x202D
   }
   match span.bidi {
-    Bidi.Normal => {}
-    Bidi.Embed => {
+    UnicodeBidi.Normal => {}
+    UnicodeBidi.Embed => {
       run List<u32>.append(
         &mut out,
         if opening {
@@ -757,7 +736,7 @@ effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
         },
       )
     }
-    Bidi.Isolate => {
+    UnicodeBidi.Isolate => {
       run List<u32>.append(
         &mut out,
         if opening {
@@ -767,7 +746,7 @@ effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
         },
       )
     }
-    Bidi.Override => {
+    UnicodeBidi.BidiOverride => {
       run List<u32>.append(
         &mut out,
         if opening {
@@ -777,7 +756,7 @@ effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
         },
       )
     }
-    Bidi.IsolateOverride => {
+    UnicodeBidi.IsolateOverride => {
       if opening {
         run List<u32>.append(&mut out, isolate)
         run List<u32>.append(&mut out, force)
@@ -786,7 +765,7 @@ effect fn controls(span: &Span, opening: bool, out: &mut List<u32>) -> ()
         run List<u32>.append(&mut out, 0x2069)
       }
     }
-    Bidi.Plaintext => {
+    UnicodeBidi.Plaintext => {
       run List<u32>.append(
         &mut out,
         if opening {
@@ -826,7 +805,7 @@ effect fn chunkLevels(
   ! OutOfMemoryError
   ? &mut Allocator {
   let root = &spans[0]
-  let direction = if root.bidi == Bidi.Plaintext {
+  let direction = if root.bidi == UnicodeBidi.Plaintext {
     ParagraphDirection.Auto
   } else if root.rtl {
     ParagraphDirection.Rtl
@@ -835,7 +814,7 @@ effect fn chunkLevels(
   }
   let mut codepoints = List<u32>.make()
   let mut slots = List<usize>.make()
-  if root.bidi == Bidi.Override || root.bidi == Bidi.IsolateOverride {
+  if root.bidi == UnicodeBidi.BidiOverride || root.bidi == UnicodeBidi.IsolateOverride {
     run List<u32>.append(
       &mut codepoints,
       if root.rtl {
@@ -939,7 +918,7 @@ pub effect fn layout(
   // Vertical text is laid out as horizontal text in a frame turned a quarter clockwise:
   // the inline axis runs down and the line's under side is on the left
   // (CSS Writing Modes 3 #vertical-layout). Text on a path stays horizontal.
-  let vertical = spans[0].writing != Writing.HorizontalTb && paths.length == 0
+  let vertical = spans[0].writing != WritingMode.HorizontalTb && paths.length == 0
   let mut turned = List<Character>.make()
   let mut uprights = List<bool>.make()
   if vertical {

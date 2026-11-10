@@ -2,6 +2,7 @@
 //! characters of a `text` element and its text content children, resolves their fonts and
 //! positioning attributes, and lays them out with `modules/text`. Each element gets its
 //! glyph outlines and glyph cells as user-space paths.
+import css_properties.keyword_enums
 import silk.text.string { String }
 import structure { Graph, OccurrenceId, SourceId }
 import document_styles { StyledGraph }
@@ -26,7 +27,7 @@ import svg_fonts.names
 import svg_text.layout {
   Anchor,
   Baseline,
-  Bidi,
+  UnicodeBidi,
   Setting,
   Axis,
   Shift,
@@ -34,7 +35,7 @@ import svg_text.layout {
   Character,
   TextLength,
   Line,
-  Writing,
+  WritingMode,
   TextOrientation,
   aspect,
   layout
@@ -681,9 +682,9 @@ effect fn orientation(engine: &Engine<'_>, style: StyleId) -> TextOrientation
       }
     }
   }
-  return match &(run used_style.keyword(engine, style, Property.TextOrientation)) {
-    Keyword.Upright => TextOrientation.Upright
-    Keyword.Sideways => TextOrientation.Sideways
+  let keyword = run used_style.keyword(engine, style, Property.TextOrientation)
+  return match &keyword_enums.textOrientationOf(keyword) {
+    Option<TextOrientation>.Some { value } => value
     _ => TextOrientation.Mixed
   }
 }
@@ -724,14 +725,14 @@ effect fn span(
   }
   let mut size = metrics.fontSize
   let writing = match &(run used_style.keyword(engine, style, Property.WritingMode)) {
-    Keyword.VerticalRl => Writing.VerticalRl
-    Keyword.VerticalLr => Writing.VerticalLr
-    _ => Writing.HorizontalTb
+    Keyword.VerticalRl => WritingMode.VerticalRl
+    Keyword.VerticalLr => WritingMode.VerticalLr
+    _ => WritingMode.HorizontalTb
   }
 
   // Vertical text aligns on the central baseline by default (#DominantBaselineProperty
   // keeps `central` for sideways text too).
-  let mut dominant = if parent.isNone() && writing != Writing.HorizontalTb {
+  let mut dominant = if parent.isNone() && writing != WritingMode.HorizontalTb {
     Baseline.Central
   } else {
     inherited
@@ -823,13 +824,11 @@ effect fn span(
     shift: shiftValue(engine, style, metrics.lineHeight),
     parent: parent,
     rtl: (run used_style.keyword(engine, style, Property.Direction)) == Keyword.Rtl,
-    bidi: match &(run used_style.keyword(engine, style, Property.UnicodeBidi)) {
-      Keyword.Embed => Bidi.Embed
-      Keyword.Isolate => Bidi.Isolate
-      Keyword.BidiOverride => Bidi.Override
-      Keyword.IsolateOverride => Bidi.IsolateOverride
-      Keyword.Plaintext => Bidi.Plaintext
-      _ => Bidi.Normal
+    bidi: match &keyword_enums.unicodeBidiOf(
+      run used_style.keyword(engine, style, Property.UnicodeBidi),
+    ) {
+      Option<UnicodeBidi>.Some { value } => value
+      _ => UnicodeBidi.Normal
     },
     features: run features(engine, style, size),
     variations: run axes(engine, style, size),
@@ -1839,7 +1838,7 @@ pub effect fn resolve(
     let root = gather.entries.asSlice()[0].style
 
     // Percentages refer to the viewport's size along the inline axis.
-    let basis = if gather.spans.asSlice()[0].writing == Writing.HorizontalTb {
+    let basis = if gather.spans.asSlice()[0].writing == WritingMode.HorizontalTb {
       width
     } else {
       height
@@ -1860,7 +1859,7 @@ pub effect fn resolve(
   let mut shapes = List<Region>.make()
   let mut holes = List<Region>.make()
   if gather.entries.length() > 0 && gather.paths.length() == 0
-    && gather.spans.asSlice()[0].writing == Writing.HorizontalTb {
+    && gather.spans.asSlice()[0].writing == WritingMode.HorizontalTb {
     let entry = gather.entries.asSlice()[0]
     shapes = run regions(
       graph,

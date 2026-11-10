@@ -10,4 +10,9 @@ const image = renderer.render(readFileSync(inputPath), fontPaths.map(path => rea
 const dimensions = Buffer.alloc(8)
 dimensions.writeUInt32LE(image.width, 0)
 dimensions.writeUInt32LE(image.height, 4)
-writeFileSync(outputPath, Buffer.concat([dimensions, unpremultiply(image.pixels)]))
+// unpremultiply returns a Uint8ClampedArray, which Buffer.concat does not accept.
+const pixels = unpremultiply(image.pixels)
+writeFileSync(
+  outputPath,
+  Buffer.concat([dimensions, Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength)]),
+)

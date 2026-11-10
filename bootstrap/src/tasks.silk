@@ -14,6 +14,20 @@ const LEXBOR_REVISION: string = "7fb22cf5664a331d7c24b113489e566767c9c25a"
 
 const XERCES_REVISION: string = "31b4b3a06105dcd607db9fda9d1883ad7e489bfe"
 
+/// The Xerces-C transcoder each platform has without ICU. Naming it keeps Xerces from picking up
+/// a system ICU, whose headers the pinned Xerces revision does not compile against (ICU 78).
+fn xercesTranscoder() -> string<'static> {
+  static if Intrinsic.targetOperatingSystem() == "windows" {
+    return "-Dtranscoder=windows"
+  } else {
+    static if Intrinsic.targetOperatingSystem() == "macos" {
+      return "-Dtranscoder=macosunicodeconverter"
+    } else {
+      return "-Dtranscoder=gnuiconv"
+    }
+  }
+}
+
 fn onWindows() -> bool {
   static if Intrinsic.targetOperatingSystem() == "windows" {
     return true
@@ -152,6 +166,8 @@ impl TaskSet for Tasks {
           String.view(&releaseDirectory),
           "-DBUILD_SHARED_LIBS=OFF",
           "-Dnetwork=OFF",
+          xercesTranscoder(),
+          "-Dmessage-loader=inmemory",
         ],
       )
       run Task.exec(
