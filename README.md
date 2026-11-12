@@ -49,7 +49,7 @@ belong to the pinned graphics/native packages and arrive through Silk fetching.
 
 ## Prerequisites
 
-- Silk **0.1.0-dev.64+8214c402307b**, LLVM **22.1.8**, with `SILK_CLANG` an absolute
+- Silk **0.1.0-dev.69+366225ca4dc5**, LLVM **22.1.8**, with `SILK_CLANG` an absolute
   path to its Clang executable. Tasks use the compiler selected by `silk task`.
 - Node **22 or newer** for the JavaScript-facing WebAssembly runtime adapter.
   Corpus control, assertions, downloads and reports are Silk code.
