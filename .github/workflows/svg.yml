@@ -31,7 +31,7 @@ jobs:
           key: svg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bootstrap/src/tasks.silk', '**/silk.toml', 'modules/*.lock.json', 'modules/tests/suites.lock.json') }}
       - name: Bootstrap pinned Silk
         run: |
-          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.69+366225ca4dc5 sh
           echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
       # Tasks are compiled programs: provision Clang 22 before any task.
       - name: Bootstrap Linux Clang
@@ -67,7 +67,7 @@ jobs:
           node-version: '22'
       - name: Bootstrap pinned Silk
         run: |
-          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.69+366225ca4dc5 sh
           echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
       - name: Bootstrap Linux Clang
         run: |
@@ -102,7 +102,7 @@ jobs:
           node-version: '22'
       - name: Bootstrap pinned Silk
         run: |
-          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.64+8214c402307b sh
+          curl -fsSL https://raw.githubusercontent.com/silk-lang/silk/8214c402307b/install.sh | SILK_RELEASE=v0.1.0-dev.69+366225ca4dc5 sh
           echo "$HOME/.silk/bin" >> "$GITHUB_PATH"
       - name: Bootstrap Linux Clang
         run: |
