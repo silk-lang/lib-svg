@@ -688,6 +688,12 @@ impl HostInput for TestHost {
     return Option<Bytes>.none()
   }
 
+  effect fn variableNames(self: &mut Self) -> List<Bytes>
+    ! HostInputError | OutOfMemoryError
+    ? &mut Allocator {
+    return List<Bytes>.make()
+  }
+
   effect fn workingDirectory(self: &mut Self) -> Bytes
     ! HostInputError | OutOfMemoryError
     ? &mut Allocator {

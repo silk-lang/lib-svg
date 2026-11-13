@@ -4,7 +4,7 @@ import silk.collections.bytes { Bytes }
 import silk.collections.list { List }
 import silk.collections.slice { Slice }
 import silk.compress.inflate { DecodeError, Decoder, Format, Limits, Progress, Status }
-import silk.compress.tar { TarError, TarKind, TarMember, TarReader }
+import silk.compress.tar { TarError, TarKind, TarProgress, TarReader, TarStatus }
 import silk.core.effect { Effect }
 import silk.core.option { Option }
 import silk.core.result { Result }
@@ -217,44 +217,53 @@ effect fn fetch(offline: bool) -> ()
     run Task.abort("XML conformance archive SHA-256 mismatch")
   }
   let decoded = run inflate(Bytes.asSlice(&bytes))
-  let mut reader = TarReader.open(Bytes.asSlice(&decoded))
+  let data = Bytes.asSlice(&decoded)
+  let mut reader = TarReader.make()
+  let mut offset: usize = 0
   while true {
-    let next = match move TarReader.next(&mut reader) {
-      Result<Option<TarMember>, TarError>.Success { value } => move value
-      Result<Option<TarMember>, TarError>.Failure { error } => run Task.abort(
-        TarError.describe(error),
-      )
+    let progress = run step(&mut reader, data, offset)
+    offset = offset + progress.consumed
+    if progress.status == TarStatus.End {
+      break
     }
-    match move next {
-      Option<TarMember>.None => {
-        break
-      }
-      Option<TarMember>.Some { value: member } => {
-        if member.content.length > 134217728 {
-          run Task.abort("Oversized XML suite member")
-        }
-        let prefix = run Support.text(member.prefix)
-        let name = run Support.text(member.name)
-        let full = run Support.cat(
-          &[
-            prefix,
-            if prefix == "" {
-              ""
-            } else {
-              "/"
-            },
-            name,
-          ],
-        )
-        let destination = run contained(&cache, String.view(&full))
-        if member.kind == TarKind.Directory {
-          run FileSystem.createDirectoriesRecursively(&destination)
-        } else if member.kind == TarKind.File {
-          run FileSystem.writeFileWithParents(&destination, member.content)
+    if progress.status != TarStatus.Member {
+      run Task.abort("Truncated XML suite archive")
+    }
+    let member = TarReader.member(&reader)
+    if member.size > 134217728 {
+      run Task.abort("Oversized XML suite member")
+    }
+    let kind = member.kind
+    let size = member.size
+    let prefix = run Support.text(member.prefix)
+    let name = run Support.text(member.name)
+    let full = run Support.cat(
+      &[
+        prefix,
+        if prefix == "" {
+          ""
         } else {
-          run Task.abort("Unsupported XML suite archive member")
+          "/"
+        },
+        name,
+      ],
+    )
+    let destination = run contained(&cache, String.view(&full))
+    if kind == TarKind.Directory {
+      run FileSystem.createDirectoriesRecursively(&destination)
+    } else if kind == TarKind.File {
+      let mut content = Slice.view<u8>(data, offset, 0)
+      if size > 0 {
+        let body = run step(&mut reader, data, offset)
+        if body.status != TarStatus.Content || TarReader.remaining(&reader) != 0 {
+          run Task.abort("Truncated XML suite member")
         }
+        content = Slice.view<u8>(data, offset, body.consumed)
+        offset = offset + body.consumed
       }
+      run FileSystem.writeFileWithParents(&destination, content)
+    } else {
+      run Task.abort("Unsupported XML suite archive member")
     }
   }
 }
@@ -576,5 +585,15 @@ pub effect fn check(offline: bool, report: string) -> ()
   run Support.printLine(String.view(&summary))
   if failures != 0 {
     run Task.abort("XML conformance failures; see case diagnostics/report")
+  }
+}
+
+// Steps `reader` over the rest of the archive, which is all in memory.
+effect fn step(reader: &mut TarReader, data: &[u8], offset: usize) -> TarProgress
+  ! TaskError | OutOfMemoryError
+  ? &mut Allocator {
+  return match TarReader.step(&mut reader, Slice.view<u8>(data, offset, data.length - offset), true) {
+    Result<TarProgress, TarError>.Success { value } => value
+    Result<TarProgress, TarError>.Failure { error } => run Task.abort(TarError.describe(error))
   }
 }
