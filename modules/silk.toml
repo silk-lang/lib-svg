@@ -7,14 +7,14 @@ kind = "library"
 exports = ["image_assets", "mask_layer_sources", "svg_intrinsic", "scene", "mapping", "resolve", "url", "resources", "resources_native", "style_tree", "stylesheets", "document_styles", "font_metrics", "vector_path", "view_fragment", "view_selection", "conditional", "structure", "occurrence_tree", "animation", "css_animations", "color_profiles"]
 
 [dependencies]
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "27a7df29ac7dec7e2c343ea3845a720e74d6db05", path = "modules/geometry", package = "graphics-geometry" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "7db3871c7ad416e205c6db56780aa0a7c444a5a2", path = "modules/style", package = "css-style" }
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "27a7df29ac7dec7e2c343ea3845a720e74d6db05", path = "modules/codec", package = "graphics-codec" }
-font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "59d9dd10ffc6a93e596073948475924e42087149", path = "modules/types", package = "font-types" }
-read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "59d9dd10ffc6a93e596073948475924e42087149", path = "modules/parse", package = "font-parse" }
-harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "59d9dd10ffc6a93e596073948475924e42087149", path = "modules/shape", package = "font-shape" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "27a7df29ac7dec7e2c343ea3845a720e74d6db05", path = "modules/vector", package = "graphics-vector" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/geometry", package = "graphics-geometry" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "2993add8a00861396bf25af4b3cbb0f7d5a805cc", path = "modules/style", package = "css-style" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/codec", package = "graphics-codec" }
+font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/types", package = "font-types" }
+read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/parse", package = "font-parse" }
+harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/shape", package = "font-shape" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/vector", package = "graphics-vector" }
 svg_filters = { path = "filters", package = "svg-filters" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "59d9dd10ffc6a93e596073948475924e42087149", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/faces", package = "font-faces" }
 svg_text = { path = "text", package = "svg-text" }
-css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "7db3871c7ad416e205c6db56780aa0a7c444a5a2", path = "modules/properties", package = "css-properties" }
+css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "2993add8a00861396bf25af4b3cbb0f7d5a805cc", path = "modules/properties", package = "css-properties" }
