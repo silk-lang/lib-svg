@@ -8,7 +8,7 @@ exports = ["image_assets", "mask_layer_sources", "svg_intrinsic", "scene", "mapp
 
 [dependencies]
 svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/geometry", package = "graphics-geometry" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "2993add8a00861396bf25af4b3cbb0f7d5a805cc", path = "modules/style", package = "css-style" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "fa4b9eb1500bf6dac765a0e6a195de61223247d3", path = "modules/style", package = "css-style" }
 svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/codec", package = "graphics-codec" }
 font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/types", package = "font-types" }
 read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/parse", package = "font-parse" }
@@ -17,4 +17,4 @@ vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab
 svg_filters = { path = "filters", package = "svg-filters" }
 svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "34f12056f7009c29bb55cdec7eef98973e17cf9d", path = "modules/faces", package = "font-faces" }
 svg_text = { path = "text", package = "svg-text" }
-css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "2993add8a00861396bf25af4b3cbb0f7d5a805cc", path = "modules/properties", package = "css-properties" }
+css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "fa4b9eb1500bf6dac765a0e6a195de61223247d3", path = "modules/properties", package = "css-properties" }
