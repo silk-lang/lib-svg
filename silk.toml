@@ -1,13 +1,13 @@
 [package]
 name = "lib-svg-tasks"
 version = "0.1.0"
-silk-version = "0.1.0-dev.72+9c780a04d6ef"
+silk-version = "0.1.0-dev.74+205aea3f5b2e"
 kind = "executable"
 source = "src"
 main = "tasks.silk"
 
 [dependencies]
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/codec", package = "graphics-codec" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "f3be99fcbf6f062c797a6af6b08999501fd3effd", path = "modules/codec", package = "graphics-codec" }
 
 [native]
 link = [
@@ -35,4 +35,4 @@ members = [
   "xml-compatibility",
   "xml-conformance"
 ]
-silk-version = "0.1.0-dev.72+9c780a04d6ef"
+silk-version = "0.1.0-dev.74+205aea3f5b2e"

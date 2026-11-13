@@ -2,13 +2,13 @@
 name = "svg-gpu"
 description = "Draws SVG display lists on the GPU through graphics-gpu-scene"
 version = "0.1.0"
-silk-version = "0.1.0-dev.72+9c780a04d6ef"
+silk-version = "0.1.0-dev.74+205aea3f5b2e"
 kind = "library"
 exports = ["scene"]
 
 [dependencies]
 svg_core = { path = "..", package = "svg" }
 svg_raster = { path = "../raster", package = "svg-raster" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/vector", package = "graphics-vector" }
-gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "2898aab275ba5f0363ec218036f2f1045b36c18b", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
-webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "3877360e21297bf8e56384eac540517d2ca8b3c2", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "f3be99fcbf6f062c797a6af6b08999501fd3effd", path = "modules/vector", package = "graphics-vector" }
+gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "f3be99fcbf6f062c797a6af6b08999501fd3effd", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
+webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "7166a093a36a64be92125f428ed8db5daf211b5b", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
