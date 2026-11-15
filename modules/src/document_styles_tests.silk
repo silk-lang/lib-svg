@@ -438,3 +438,39 @@ test effect fn embeddedDescendantTextAndPresentationWhitelist() -> ()
     "embedded sheets concatenate descendant text; presentation only accepts no-namespace attributes",
   )
 }
+
+import used_style { DashCache }
+import used_style
+import scene { Paint as ScenePaint, RenderError }
+import silk.collections.list { List }
+
+test effect fn inheritedColorMixPaintUsesTheChildForeground() -> ()
+  ! CssError | UrlError | XmlError | ComputedError | RenderError | OutOfMemoryError | AssertionError<'static> {
+  let mut allocator = Allocator.systemAllocatorProvider()
+  let mut resolver = DataOnly.make(ResourceLimits.defaults())
+  let document = run XmlDocument.parse(b"<svg xmlns='http://www.w3.org/2000/svg'><g color='red' fill='color-mix(in srgb, currentcolor, white)'><rect id='child' color='blue'/><rect id='fallback' color='blue' fill='url(#missing) color-mix(in srgb, currentcolor, transparent)'/></g></svg>")
+    |> Effect.provideMut<Allocator>(&mut allocator)
+  let styled = run fixture(&document) |> Effect.provideMut<Resolver>(&mut resolver) |> Effect.provideMut<Allocator>(&mut allocator)
+  let mut cache = DashCache.make()
+  let mut dashes = List<List<f64>>.make()
+  let ids = [b"child", b"fallback"]
+  let mut i: usize = 0
+  while i < ids.length {
+    let styleId = match named(&document, &styled, ids[i]) {
+      Option<StyleId>.Some { value } => value
+      _ => { run Testing.expect(false, "fixture element has computed style")
+        return
+      }
+    }
+    let style = run used_style.project(&styled.catalog.engine, styleId, 100.0, 100.0, &mut cache, &mut dashes)
+      |> Effect.provideMut<Allocator>(&mut allocator)
+    run Testing.expect(match &style.fill {
+      ScenePaint.Solid { color } => {
+        if i == 0 { color.r == 0.5 && color.g == 0.5 && color.b == 1.0 && color.a == 1.0 }
+        else { color.r == 0.0 && color.g == 0.0 && color.b == 1.0 && color.a == 0.5 }
+      }
+      _ => false
+    }, "used fill and paint-server fallback resolve currentcolor on the child")
+    i = i + 1
+  }
+}

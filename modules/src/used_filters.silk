@@ -229,6 +229,7 @@ effect fn colorOf(engine: &Engine<'_>, style: StyleId, property: Property) -> Rg
     }
   }
   let srgb = match &engine.values.get(entry.value).* {
+    Value.ColorMix { expression } => colors.toSrgb(run used_paints.resolveMix(engine, style, expression))
     Value.Color { color: value } => colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
     Value.IccColor { color: value, .. } => {
       colors.toSrgb(used_paints.resolveCurrent(engine, style, value))
