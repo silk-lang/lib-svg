@@ -7,16 +7,7 @@ source = "src"
 main = "tasks.silk"
 
 [dependencies]
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7e3770cb41beaf709272548863f5b020f476765f", path = "modules/codec", package = "graphics-codec" }
-
-[native]
-link = [
-  { static-archive = ".cache/lexbor/lib/liblexbor_static.a", os = ["macos", "linux"] },
-  { search-path = ".cache/lexbor/lib", os = "windows" },
-  { library = "lexbor", mode = "dynamic", os = "windows" },
-  { search-path = ".cache/libarchive/lib", os = "windows" },
-  { library = "archive", mode = "dynamic" },
-]
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "1ba6e77674b908b534db11b9654dd0e7539a8bac", path = "modules/codec", package = "graphics-codec" }
 
 [workspace]
 members = [
