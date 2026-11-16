@@ -11,7 +11,7 @@ svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "1
 svg_core = { path = "..", package = "svg" }
 svg_raster = { path = "../raster", package = "svg-raster" }
 svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "7be3a9f348e3bf51874d7ead899d8192fda402dd", path = "modules/style", package = "css-style" }
-read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/parse", package = "font-parse" }
+read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/parse", package = "font-parse" }
 # CPU output is the backend-owned pixmap; encoding borrows its pixels without a copy.
 vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "1ba6e77674b908b534db11b9654dd0e7539a8bac", path = "modules/vector", package = "graphics-vector" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/faces", package = "font-faces" }

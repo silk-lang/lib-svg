@@ -7,10 +7,10 @@ kind = "library"
 exports = ["lib", "layout", "lines", "areas", "paths", "on_path"]
 
 [dependencies]
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/faces", package = "font-faces" }
-harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/shape", package = "font-shape" }
-read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/parse", package = "font-parse" }
-font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/types", package = "font-types" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/faces", package = "font-faces" }
+harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/shape", package = "font-shape" }
+read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/parse", package = "font-parse" }
+font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/types", package = "font-types" }
 svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "1ba6e77674b908b534db11b9654dd0e7539a8bac", path = "modules/geometry", package = "graphics-geometry" }
-font_outline = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "4313079fe4f2959b6664aae83fff4d388891d1ca", path = "modules/outline", package = "font-outline" }
+font_outline = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "7667e203b385ba0d0d704f88a9cd37b1859148a6", path = "modules/outline", package = "font-outline" }
 css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "7be3a9f348e3bf51874d7ead899d8192fda402dd", path = "modules/properties", package = "css-properties" }
