@@ -14,11 +14,11 @@ import silk.xml.document { XmlDocument }
 import svg_css.computed { Engine, StyleId, ComputedValue }
 import svg_css.dimensions { ExprId, Context }
 import svg_css.dimensions
-import svg_css.values { Value }
+import svg_css.values { Value, ColorId }
 import svg_css.properties { Property }
 import svg_css.value_keywords { Keyword }
 import svg_css.colors
-import svg_css.colors { Identity }
+import svg_css.colors { Identity, Color as CssColor, Context as ColorContext }
 import svg_css.tokens { Limits, CssError, equal }
 import svg_geometry.geometry { Rect, Point, Transform }
 import svg_geometry.transforms { Matrix }
@@ -393,6 +393,20 @@ pub fn resolveCurrent(engine: &Engine<'_>, style: StyleId, color: colors.Color) 
   }
 }
 
+/// Color programs have already resolved system colors at computed-value time. Their remaining
+/// currentcolor leaves use this element's own foreground when projected to a used paint.
+pub effect fn resolveMix(engine: &Engine<'_>, style: StyleId, expression: ColorId) -> colors.Color
+  ! RenderError {
+  let current = resolveCurrent(engine, style, CssColor.current())
+  let context = ColorContext.make(current, [CssColor.current(); 19])
+  return match engine.values.colorProgram(expression).evaluate(&context) {
+    Option<colors.Color>.Some { value } => value
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
+  }
+}
+
 pub effect fn stopColor(engine: &Engine<'_>, style: StyleId) -> Color
   ! RenderError {
   let entry = match &engine.get(style, Property.StopColor) {
@@ -402,6 +416,7 @@ pub effect fn stopColor(engine: &Engine<'_>, style: StyleId) -> Color
     }
   }
   let color = match &engine.values.get(entry.value).* {
+    Value.ColorMix { expression } => colors.toSrgb(run resolveMix(engine, style, expression))
     Value.Color { color: value } => colors.toSrgb(resolveCurrent(engine, style, value))
     Value.IccColor { color: value, .. } => colors.toSrgb(resolveCurrent(engine, style, value))
     _ => {

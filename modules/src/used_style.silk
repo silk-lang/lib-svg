@@ -11,6 +11,7 @@ import css_properties.keyword_enums
 import svg_css.colors { Color as CssColor, Identity }
 import svg_css.colors
 import svg_geometry.math
+import used_paints
 import used_transforms
 import silk.collections.list { List }
 import silk.mem.allocator { Allocator, OutOfMemoryError }
@@ -104,9 +105,15 @@ effect fn paint(engine: &Engine<'_>, style: StyleId, property: Property) -> Pain
   return match &engine.values.get(id).* {
     Value.Paint { paint: value } => match &value {
       CssPaint.None => Paint.None
+      CssPaint.ColorMix { expression } => solid(
+        run used_paints.resolveMix(engine, style, expression),
+      )
       CssPaint.Color { color: absolute } => solid(absolute)
       CssPaint.IccColor { color: absolute, .. } => solid(absolute)
       CssPaint.Server { fallback, .. } => match &fallback {
+        Fallback.ColorMix { expression } => solid(
+          run used_paints.resolveMix(engine, style, expression),
+        )
         Fallback.Color { color: absolute } => solid(absolute)
         Fallback.IccColor { color: absolute, .. } => solid(absolute)
         _ => Paint.None
