@@ -10,7 +10,7 @@ exports = ["lib", "record", "environment", "native_environment"]
 svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7e3770cb41beaf709272548863f5b020f476765f", path = "modules/geometry", package = "graphics-geometry" }
 svg_core = { path = "..", package = "svg" }
 svg_raster = { path = "../raster", package = "svg-raster" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "72d92c785a1d95e8c7ceb88d4260f1fc77c26821", path = "modules/style", package = "css-style" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "78c6b41d1b51ec86fa16678f86452f0ef9a2680e", path = "modules/style", package = "css-style" }
 read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "9c2c5e579164b7f12bfa769cc5d08566ec140856", path = "modules/parse", package = "font-parse" }
 # CPU output is the backend-owned pixmap; encoding borrows its pixels without a copy.
 vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7e3770cb41beaf709272548863f5b020f476765f", path = "modules/vector", package = "graphics-vector" }
