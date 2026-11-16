@@ -4,9 +4,9 @@
 
 ```sh
 silk build --release --manifest-path svg-render-test-harness/silk.toml
-build/llvm/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o output.png
-build/llvm/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o output.png --width 300 --zoom 2
-build/llvm/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o detail.png --fragment '#detail' --mode secure-static
+build/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o output.png
+build/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o output.png --width 300 --zoom 2
+build/aarch64-apple-darwin/release/svg-render-test-harness input.svg -o detail.png --fragment '#detail' --mode secure-static
 ```
 
 Use `aarch64-unknown-linux-gnu` or `x86_64-unknown-linux-gnu` for the corresponding

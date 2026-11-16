@@ -5,7 +5,7 @@ silk-version = "0.1.0-pipeline.1"
 
 [dependencies]
 svg_render = { path = "../modules/render", package = "svg-render" }
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "4a90de327acd6f62d060019ab49dba5490262f69", path = "modules/codec", package = "graphics-codec" }
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "4a90de327acd6f62d060019ab49dba5490262f69", path = "modules/geometry", package = "graphics-geometry" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "d3707f664669b8c9720a6488aa38c111b6e68ccf", path = "modules/codec", package = "graphics-codec" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "d3707f664669b8c9720a6488aa38c111b6e68ccf", path = "modules/geometry", package = "graphics-geometry" }
 svg_core = { path = "../modules", package = "svg" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "c6df88819e2f99ad73051d5254271b5a5cb24e7c", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "2481918180a43fd35b1ab687397613554afb158a", path = "modules/faces", package = "font-faces" }

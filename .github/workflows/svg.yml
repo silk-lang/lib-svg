@@ -118,7 +118,7 @@ jobs:
         run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
       - run: silk build --release --manifest-path modules/bench/silk.toml
       - run: silk task benchmarks rust-build
-      - run: silk task benchmarks bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+      - run: silk task benchmarks bench --silk build/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
