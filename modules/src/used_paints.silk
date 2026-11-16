@@ -401,7 +401,9 @@ pub effect fn resolveMix(engine: &Engine<'_>, style: StyleId, expression: ColorI
   let context = ColorContext.make(current, [CssColor.current(); 19])
   return match engine.values.colorProgram(expression).evaluate(&context) {
     Option<colors.Color>.Some { value } => value
-    _ => { fail RenderError.InvalidGeometry }
+    _ => {
+      fail RenderError.InvalidGeometry
+    }
   }
 }
 
