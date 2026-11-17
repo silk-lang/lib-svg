@@ -257,10 +257,12 @@ pub effect fn build(package: string, name: string, release: bool, wasm: bool) ->
   let mode = if release {
     "release"
   } else {
-    "debug"
+    "dev"
   }
-  let directory = run cat(&["build/llvm/", target, "/", mode])
-  let suffix = if !wasm && operatingSystem() == "windows" {
+  let directory = run cat(&["build/", target, "/", mode])
+  let suffix = if wasm {
+    ".wasm"
+  } else if operatingSystem() == "windows" {
     ".exe"
   } else {
     ""
