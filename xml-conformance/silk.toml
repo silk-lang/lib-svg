@@ -2,4 +2,4 @@
 name = "svg-xml-conformance"
 description = "Internal stdlib XML conformance driver"
 version = "0.1.0"
-silk-version = "0.1.0-dev.85+45b9e51824ca"
+silk-version = "0.1.0-dev.86+c9d19330761b"
