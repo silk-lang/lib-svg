@@ -921,7 +921,9 @@ pub effect fn layerImage(engine: &Engine<'_>, style: StyleId, layer: usize) -> O
             interpolation: interpolation,
           },
         )
-        Image.Radial { repeating, circle, size, position, stops, interpolation } => Option<Image>.some(
+        Image.Radial { repeating, circle, size, position, stops, interpolation } => Option<
+          Image
+        >.some(
           Image.Radial {
             repeating: repeating,
             circle: circle,
@@ -966,7 +968,9 @@ pub effect fn gradient(
         current,
       ),
     )
-    Image.Radial { repeating, circle, size: radialSize, position, stops, .. } => Option<Painted>.some(
+    Image.Radial { repeating, circle, size: radialSize, position, stops, .. } => Option<
+      Painted
+    >.some(
       run radial(
         &mut store.*,
         &mut engine.*,
