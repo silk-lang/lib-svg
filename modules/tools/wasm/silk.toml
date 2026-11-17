@@ -6,4 +6,4 @@ silk-version = "0.1.0-dev.74+205aea3f5b2e"
 [dependencies]
 svg_render = { path = "../../render", package = "svg-render" }
 svg_core = { path = "../..", package = "svg" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "177e6bb9874828eff4ead70793b490c5ed62477c", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "958349e7f37d108dd06a94abadaaeb079ae989ea", path = "modules/faces", package = "font-faces" }

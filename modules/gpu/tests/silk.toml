@@ -7,10 +7,10 @@ silk-version = "0.1.0-dev.74+205aea3f5b2e"
 svg_render = { path = "../../render", package = "svg-render" }
 svg_core = { path = "../..", package = "svg" }
 svg_raster = { path = "../../raster", package = "svg-raster" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "0290e535704e488c1c253dd8aff87ac0e53df6b5", path = "modules/style", package = "css-style" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "177e6bb9874828eff4ead70793b490c5ed62477c", path = "modules/faces", package = "font-faces" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "85e7367361e2cb6be76559934b7fe08d4bc577e2", path = "modules/style", package = "css-style" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "958349e7f37d108dd06a94abadaaeb079ae989ea", path = "modules/faces", package = "font-faces" }
 svg_gpu = { path = "..", package = "svg-gpu" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/vector", package = "graphics-vector" }
-gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "a50e43abbbb0d2747ab3e9e65098a2baca346108", path = "modules/vector", package = "graphics-vector" }
+gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "a50e43abbbb0d2747ab3e9e65098a2baca346108", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
 webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "7166a093a36a64be92125f428ed8db5daf211b5b", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
 webgpu_sys = { git = "https://github.com/silk-lang/lib-native.git", rev = "7166a093a36a64be92125f428ed8db5daf211b5b", path = "modules/gpu/webgpu/sys", package = "gpu-webgpu-sys" }
