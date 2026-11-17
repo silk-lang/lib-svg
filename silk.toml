@@ -7,7 +7,7 @@ source = "src"
 main = "tasks.silk"
 
 [dependencies]
-svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "5493dad76ae44659f854d7abdccd3a00010fd6a3", path = "modules/codec", package = "graphics-codec" }
+svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3090034b96c928208ee4b4875b06e46987e52125", path = "modules/codec", package = "graphics-codec" }
 
 [native]
 link = [
