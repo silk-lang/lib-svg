@@ -1,0 +1,22 @@
+import silk.build.plan { Library, Plan }
+import silk.build.step { sourcePath }
+
+static fn plan() -> Plan {
+  let mut plan = Plan.empty()
+  if Intrinsic.targetOperatingSystem() == "darwin" || Intrinsic.targetOperatingSystem() == "linux" {
+    plan = plan |> Plan.linkArchive(sourcePath(".cache/lexbor/lib/liblexbor_static.a"))
+  }
+  if Intrinsic.targetOperatingSystem() == "windows" {
+    plan = plan |> Plan.searchPath(sourcePath(".cache/lexbor/lib"))
+  }
+  if Intrinsic.targetOperatingSystem() == "windows" {
+    plan = plan |> Plan.linkLibrary("lexbor", Library.dynamicSearch())
+  }
+  if Intrinsic.targetOperatingSystem() == "windows" {
+    plan = plan |> Plan.searchPath(sourcePath(".cache/libarchive/lib"))
+  }
+  plan = plan |> Plan.linkLibrary("archive", Library.dynamicSearch())
+  return plan
+}
+
+pub const PLAN: Plan = plan()

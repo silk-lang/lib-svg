@@ -130,13 +130,13 @@ silk task generate-idna --fetch
 silk task generate-idna --fetch --check
 # Internal command-line rendering; choose your native target's build directory.
 silk build --release --manifest-path svg-render-test-harness/silk.toml
-build/llvm/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o output.png
+build/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o output.png
 # Wasm utility; prints the module path.
 silk task build-wasm
 # Benchmark setup and measurement (not part of the rendering gate).
 silk build --release --manifest-path modules/bench/silk.toml
 silk task benchmarks rust-build
-silk task benchmarks bench --silk build/llvm/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
+silk task benchmarks bench --silk build/x86_64-unknown-linux-gnu/release/svg-bench --fetch-workloads --record-baseline --baseline build/svg/current-baseline.json --output build/svg/bench.json
 silk task benchmarks ab /path/to/old/svg-bench /path/to/new/svg-bench --output build/svg/ab.json
 ```
 

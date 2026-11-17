@@ -79,8 +79,8 @@ cover the environment, processing modes, resource policy and the geometry API.
 
 ```sh
 silk build --release --manifest-path svg-render-test-harness/silk.toml
-build/llvm/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o output.png --width 300
-build/llvm/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o detail.png --fragment '#detail' --mode secure-static
+build/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o output.png --width 300
+build/x86_64-unknown-linux-gnu/release/svg-render-test-harness input.svg -o detail.png --fragment '#detail' --mode secure-static
 ```
 
 The internal harness resolves `data:` URLs and files in the input's directory, and never the network. It

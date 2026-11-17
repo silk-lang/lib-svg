@@ -430,7 +430,7 @@ silk task benchmarks images --generate build/svg/image-bench-inputs
 silk task benchmarks rust-build
 silk build --release --manifest-path modules/bench/silk.toml
 silk task benchmarks images --inputs build/svg/image-bench-inputs \
-  --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
+  --silk build/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --iterations 1 --warmup 0 --samples 3 --callgrind \
   --output build/svg/images-measured.json
@@ -552,7 +552,7 @@ Reproduce the reference comparison:
 ```sh
 silk task benchmarks sampling build/svg/sampling-bench-inputs
 silk task benchmarks images --inputs build/svg/sampling-bench-inputs \
-  --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
+  --silk build/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --samples 3 --iterations 1 --warmup 0 --callgrind \
   --output build/svg/sampling-reference.json
@@ -617,7 +617,7 @@ Raw measurements are in ignored `build/svg/nested-reference.json`.
 ```sh
 silk task benchmarks nested build/svg/nested-inputs
 silk task benchmarks images --inputs build/svg/nested-inputs \
-  --silk build/llvm/aarch64-unknown-linux-gnu/release/svg-bench \
+  --silk build/aarch64-unknown-linux-gnu/release/svg-bench \
   --rust modules/scripts/rust-bench/target/release/svg-reference-bench \
   --samples 3 --iterations 1 --warmup 0 --callgrind \
   --output build/svg/nested-reference.json
