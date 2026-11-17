@@ -7,7 +7,7 @@ silk-version = "0.1.0-dev.74+205aea3f5b2e"
 svg_render = { path = "../../render", package = "svg-render" }
 svg_core = { path = "../..", package = "svg" }
 svg_raster = { path = "../../raster", package = "svg-raster" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "fa3e95660ef1dee8651713ac330a4f3fa1594fe1", path = "modules/style", package = "css-style" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "3673cc97bb5cae281d31a07cabe0f49336826297", path = "modules/style", package = "css-style" }
 svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "b3c1c268a9e370b4b7253704406b903d14b5b0bc", path = "modules/faces", package = "font-faces" }
 svg_gpu = { path = "..", package = "svg-gpu" }
 vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "5493dad76ae44659f854d7abdccd3a00010fd6a3", path = "modules/vector", package = "graphics-vector" }
