@@ -1,9 +1,9 @@
 [package]
 name = "svg-wasm"
 version = "0.1.0"
-silk-version = "0.1.0-pipeline.1"
+silk-version = "0.1.0-dev.85+45b9e51824ca"
 
 [dependencies]
 svg_render = { path = "../../render", package = "svg-render" }
 svg_core = { path = "../..", package = "svg" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "ea3425ff6f35c387e532a7816d43e7fc6bfb1d4f", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "1c4db833b7094dd8a18ad40831e5ad2fbad342d3", path = "modules/faces", package = "font-faces" }

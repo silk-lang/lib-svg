@@ -1,16 +1,16 @@
 [package]
 name = "svg-gpu-tests"
 version = "0.1.0"
-silk-version = "0.1.0-pipeline.1"
+silk-version = "0.1.0-dev.85+45b9e51824ca"
 
 [dependencies]
 svg_render = { path = "../../render", package = "svg-render" }
 svg_core = { path = "../..", package = "svg" }
 svg_raster = { path = "../../raster", package = "svg-raster" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "5b4a597215d23b7067d073f022826eb9747cb255", path = "modules/style", package = "css-style" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "ea3425ff6f35c387e532a7816d43e7fc6bfb1d4f", path = "modules/faces", package = "font-faces" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "49604d99f84b2bb245aad297e92901c58a36b951", path = "modules/style", package = "css-style" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "1c4db833b7094dd8a18ad40831e5ad2fbad342d3", path = "modules/faces", package = "font-faces" }
 svg_gpu = { path = "..", package = "svg-gpu" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "8e37c69b0b1bcbd56a3b0136d48ebe7e8606017e", path = "modules/vector", package = "graphics-vector" }
-gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "8e37c69b0b1bcbd56a3b0136d48ebe7e8606017e", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
-webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "56384899c345b81471ecbb4ae9f9dd79cb8358f7", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
-webgpu_sys = { git = "https://github.com/silk-lang/lib-native.git", rev = "56384899c345b81471ecbb4ae9f9dd79cb8358f7", path = "modules/gpu/webgpu/sys", package = "gpu-webgpu-sys" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7c1ecaa699dd71c015369e9c20624034ce5f97e1", path = "modules/vector", package = "graphics-vector" }
+gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7c1ecaa699dd71c015369e9c20624034ce5f97e1", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
+webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "3e639da37424654c1df9938e83f8c079ccb45052", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
+webgpu_sys = { git = "https://github.com/silk-lang/lib-native.git", rev = "3e639da37424654c1df9938e83f8c079ccb45052", path = "modules/gpu/webgpu/sys", package = "gpu-webgpu-sys" }
