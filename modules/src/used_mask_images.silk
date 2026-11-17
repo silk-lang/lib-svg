@@ -913,16 +913,24 @@ pub effect fn layerImage(engine: &Engine<'_>, style: StyleId, layer: usize) -> O
   return match &item(engine, style, Property.MaskImage, layer) {
     Option<MaskItem>.Some { value } => match &value {
       MaskItem.Image { value: image } => match &image.* {
-        Image.Linear { repeating, direction, stops } => Option<Image>.some(
-          Image.Linear { repeating: repeating, direction: direction, stops: run copyStops(&stops) },
+        Image.Linear { repeating, direction, stops, interpolation } => Option<Image>.some(
+          Image.Linear {
+            repeating: repeating,
+            direction: direction,
+            stops: run copyStops(&stops),
+            interpolation: interpolation,
+          },
         )
-        Image.Radial { repeating, circle, size, position, stops } => Option<Image>.some(
+        Image.Radial { repeating, circle, size, position, stops, interpolation } => Option<
+          Image
+        >.some(
           Image.Radial {
             repeating: repeating,
             circle: circle,
             size: size,
             position: position,
             stops: run copyStops(&stops),
+            interpolation: interpolation,
           },
         )
         _ => Option<Image>.None
@@ -947,7 +955,7 @@ pub effect fn gradient(
   ! RenderError | OutOfMemoryError
   ? &mut Allocator {
   return match &image.* {
-    Image.Linear { repeating, direction, stops } => Option<Painted>.some(
+    Image.Linear { repeating, direction, stops, .. } => Option<Painted>.some(
       run linear(
         &mut store.*,
         &mut engine.*,
@@ -960,7 +968,9 @@ pub effect fn gradient(
         current,
       ),
     )
-    Image.Radial { repeating, circle, size: radialSize, position, stops } => Option<Painted>.some(
+    Image.Radial { repeating, circle, size: radialSize, position, stops, .. } => Option<
+      Painted
+    >.some(
       run radial(
         &mut store.*,
         &mut engine.*,
