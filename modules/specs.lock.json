@@ -237,9 +237,9 @@
       "url": "https://encoding.spec.whatwg.org/"
     },
     "fetch": {
-      "resolved": "https://fetch.spec.whatwg.org/",
-      "sha256": "63b0a018753c330adf1e40417524eb70ea02d4d3e123bcb39b6770f23bad911b",
-      "url": "https://fetch.spec.whatwg.org/"
+      "resolved": "https://fetch.spec.whatwg.org/commit-snapshots/2696300d95bb6ced34e47c5401dd74e1f944eca8/",
+      "sha256": "536e84f236c90c7c15865ea07d361ae3b33d7646cf7215d06f3f990fd5770eae",
+      "url": "https://fetch.spec.whatwg.org/commit-snapshots/2696300d95bb6ced34e47c5401dd74e1f944eca8/"
     },
     "filter-effects-1": {
       "resolved": "https://www.w3.org/TR/filter-effects-1/",
@@ -257,9 +257,9 @@
       "url": "https://www.color.org/specification/ICC.1-2022-05.pdf"
     },
     "infra": {
-      "resolved": "https://infra.spec.whatwg.org/",
-      "sha256": "8d43350a0a36ebf7682cfe4146dcd7afb8d9f94da0d80677dcc0da16e43590d7",
-      "url": "https://infra.spec.whatwg.org/"
+      "resolved": "https://infra.spec.whatwg.org/commit-snapshots/f0c9a81337e50baf827cf48a73d856ea4bd8b3e0/",
+      "sha256": "8fad9c9017dc4289af39d2fa4a4c10ac8129ce9fbabac22fce3128062b37b3fe",
+      "url": "https://infra.spec.whatwg.org/commit-snapshots/f0c9a81337e50baf827cf48a73d856ea4bd8b3e0/"
     },
     "jpeg-jfif": {
       "resolved": "https://www.w3.org/Graphics/JPEG/jfif3.pdf",

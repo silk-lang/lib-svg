@@ -63,8 +63,19 @@ pub effect fn catalog() -> Value
   let svg2 = "https://www.w3.org/TR/2018/CR-SVG2-20181004/"
   let svg2Ed = "https://svgwg.org/svg2-draft/"
   let css21 = "https://www.w3.org/TR/2011/REC-CSS2-20110607/"
-  run add(&mut result, "fetch", "https://fetch.spec.whatwg.org/")
-  run add(&mut result, "infra", "https://infra.spec.whatwg.org/")
+
+  // The checksum gate needs immutable documents, not the changing living-standard URLs.
+  // Snapshot contents are reviewed with their lock entries when updating the corpus.
+  run add(
+    &mut result,
+    "fetch",
+    "https://fetch.spec.whatwg.org/commit-snapshots/2696300d95bb6ced34e47c5401dd74e1f944eca8/",
+  )
+  run add(
+    &mut result,
+    "infra",
+    "https://infra.spec.whatwg.org/commit-snapshots/f0c9a81337e50baf827cf48a73d856ea4bd8b3e0/",
+  )
   run add(&mut result, "svg11", svg11)
   run add(&mut result, "svg11-errata", "https://www.w3.org/2011/08/REC-SVG11-20110816-errata")
   run add(&mut result, "svg2", svg2)
