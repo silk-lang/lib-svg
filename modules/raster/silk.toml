@@ -7,7 +7,7 @@ kind = "library"
 exports = ["canvas", "cpu", "lower"]
 
 [dependencies]
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7b3932632e4c07cca1fff5b4467c72f1e392119b", path = "modules/geometry", package = "graphics-geometry" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/geometry", package = "graphics-geometry" }
 svg_core = { path = "..", package = "svg" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7b3932632e4c07cca1fff5b4467c72f1e392119b", path = "modules/vector", package = "graphics-vector" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/vector", package = "graphics-vector" }
 svg_filters = { path = "../filters", package = "svg-filters" }
