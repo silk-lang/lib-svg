@@ -8,4 +8,4 @@ svg_render = { path = "../modules/render", package = "svg-render" }
 svg_image = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/codec", package = "graphics-codec" }
 svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "62fbfe032c224bca5c679f8b6c2a33a2a5cf6b70", path = "modules/geometry", package = "graphics-geometry" }
 svg_core = { path = "../modules", package = "svg" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "177e6bb9874828eff4ead70793b490c5ed62477c", path = "modules/faces", package = "font-faces" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "f186b9f6148d936ae3fee9fb9467f3124dbef942", path = "modules/faces", package = "font-faces" }
