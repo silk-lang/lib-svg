@@ -13,4 +13,4 @@ read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "b758d9
 font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "b758d92b5c637fc6cc65f5391c4b431e08cc601c", path = "modules/types", package = "font-types" }
 svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "5352021805b6515f069ee41fa6a52f4bf1ec8157", path = "modules/geometry", package = "graphics-geometry" }
 font_outline = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "b758d92b5c637fc6cc65f5391c4b431e08cc601c", path = "modules/outline", package = "font-outline" }
-css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "245bafb2750a1e7cc400a9eacae7e9d7e5544591", path = "modules/properties", package = "css-properties" }
+css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "668e7e225b6c07ccc11edcd1e2a7bde677e6204b", path = "modules/properties", package = "css-properties" }
