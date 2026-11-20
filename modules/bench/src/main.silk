@@ -24,7 +24,7 @@ import silk.system.filesystem { Path, FileSystem, FileError }
 import silk.system.filesystem_machine { MachineFileSystem }
 import silk.system.monotonic_clock { MonotonicClock }
 import silk.system.monotonic_clock_native { OsMonotonicClock }
-import silk.system.system_clock { Instant, SystemClock }
+import silk.time.mark { Mark }
 import silk.io.writer { Writer, WriterError }
 import silk.io.writer_native { StdoutWriter, StderrWriter }
 import silk.text.format { Format, ParseError }
@@ -32,10 +32,10 @@ import silk.num.u8
 import silk.num.u32
 import silk.num.u64
 
-fn nanos(start: &Instant, end: &Instant) -> i64 {
-  return (SystemClock.seconds(end) - SystemClock.seconds(start)) * 1000000000
-    + SystemClock.nanoseconds(end)
-    - SystemClock.nanoseconds(start)
+fn nanos(start: &Mark, end: &Mark) -> i64 {
+  return (end.*.seconds() - start.*.seconds()) * 1000000000
+    + u32.toI64(end.*.subsecondNanoseconds())
+    - u32.toI64(start.*.subsecondNanoseconds())
 }
 
 fn checksum(pixels: &[u8]) -> u64 {
