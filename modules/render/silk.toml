@@ -6,11 +6,11 @@ kind = "library"
 exports = ["lib", "record", "environment", "native_environment"]
 
 [dependencies]
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "0c0b592f53afeb0b8fb2ab0552adf71df0267d0c", path = "modules/geometry", package = "graphics-geometry" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "19746fc2516860bea1eb1e367566bc434b9e335a", path = "modules/geometry", package = "graphics-geometry" }
 svg_core = { path = "..", package = "svg" }
 svg_raster = { path = "../raster", package = "svg-raster" }
-svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "3b88160dbaeac82ab78cf72b00afcf80dd001243", path = "modules/style", package = "css-style" }
-read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "f78c62feabd50b0f8cd444d97ec2f939bf8a9d9a", path = "modules/parse", package = "font-parse" }
+svg_css = { git = "https://github.com/silk-lang/lib-css.git", rev = "a0fd386e6a52554c384ebc8253297eb3761658c8", path = "modules/style", package = "css-style" }
+read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "1a2841827135a75d6769b4d533804177cbe65cd3", path = "modules/parse", package = "font-parse" }
 # CPU output is the backend-owned pixmap; encoding borrows its pixels without a copy.
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "0c0b592f53afeb0b8fb2ab0552adf71df0267d0c", path = "modules/vector", package = "graphics-vector" }
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "f78c62feabd50b0f8cd444d97ec2f939bf8a9d9a", path = "modules/faces", package = "font-faces" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "19746fc2516860bea1eb1e367566bc434b9e335a", path = "modules/vector", package = "graphics-vector" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "1a2841827135a75d6769b4d533804177cbe65cd3", path = "modules/faces", package = "font-faces" }
