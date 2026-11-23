@@ -8,6 +8,6 @@ exports = ["scene"]
 [dependencies]
 svg_core = { path = "..", package = "svg" }
 svg_raster = { path = "../raster", package = "svg-raster" }
-vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7e3b9c4802721e9b7aef521321f65c3297a88be8", path = "modules/vector", package = "graphics-vector" }
-gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "7e3b9c4802721e9b7aef521321f65c3297a88be8", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
+vector = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3950d3b177c59fc875ed0d653fd40c8ca6b45735", path = "modules/vector", package = "graphics-vector" }
+gpu_scene = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "3950d3b177c59fc875ed0d653fd40c8ca6b45735", path = "modules/gpu_scene", package = "graphics-gpu-scene" }
 webgpu = { git = "https://github.com/silk-lang/lib-native.git", rev = "ae5ebb4e9ba32fd7c74b96293b9e5d8bcd7deabc", path = "modules/gpu/webgpu", package = "gpu-webgpu" }
