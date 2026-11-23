@@ -4,7 +4,6 @@ import svg_core.scene { SpreadMethod }
 import svg_core.mapping { Mapping }
 import vector.paint { Gradient, Stop, Solid, Shader, SPREAD_PAD, SPREAD_REPEAT, SPREAD_REFLECT }
 import vector.paint { ImagePattern, SAMPLE_BILINEAR, SAMPLE_NEAREST, EXTEND_REPEAT, EXTEND_CLAMP }
-import vector.projective { Homography }
 import svg_geometry.geometry { Transform }
 import silk.core.option { Option }
 import silk.num.u32
@@ -355,25 +354,25 @@ pub effect fn draw<S: Surface>(
               placed = run placed.compose(&reduction)
             }
           }
-          let matrix = match &placed {
-            Mapping.Affine { value } => Homography.fromAffine(&value)
-            Mapping.Projective { value } => value
-          }
           let pixels = match &expanded {
             Option<usize>.Some { value } => cache.expanded.get(value)
             _ => &cache.images.asSlice()[image]
           }
-          let shader = run ImagePattern.makeProjective(
-            pixels,
-            &matrix,
-            if sampling == ImageSampling.Nearest {
-              SAMPLE_NEAREST
-            } else {
-              SAMPLE_BILINEAR
-            },
-            EXTEND_CLAMP,
-          )
-          run surface.image(coverage, &shader, alpha)
+          let mode = if sampling == ImageSampling.Nearest {
+            SAMPLE_NEAREST
+          } else {
+            SAMPLE_BILINEAR
+          }
+          match &placed {
+            Mapping.Affine { value } => {
+              let shader = ImagePattern.make(pixels, &value, mode, EXTEND_CLAMP)
+              run surface.image(coverage, &shader, alpha)
+            }
+            Mapping.Projective { value } => {
+              let shader = run ImagePattern.makeProjective(pixels, &value, mode, EXTEND_CLAMP)
+              run surface.image(coverage, &shader, alpha)
+            }
+          }
         }
         PaintInstance.Gradient { gradient, transform } => {
           run prepare(&mut cache.*, gradient, list)
@@ -427,20 +426,24 @@ pub effect fn draw<S: Surface>(
             _ => transform
           }
           let matrix = run placed.compose(&pixelToTile)
-          let homography = match &matrix {
-            Mapping.Affine { value } => Homography.fromAffine(&value)
-            Mapping.Projective { value } => value
-          }
 
           // Native bilinear repeat wraps each of the four taps independently;
           // the borrowed image never escapes this call or self-references a cache.
-          let shader = run ImagePattern.makeProjective(
-            image,
-            &homography,
-            SAMPLE_BILINEAR,
-            EXTEND_REPEAT,
-          )
-          run surface.image(coverage, &shader, alpha)
+          match &matrix {
+            Mapping.Affine { value } => {
+              let shader = ImagePattern.make(image, &value, SAMPLE_BILINEAR, EXTEND_REPEAT)
+              run surface.image(coverage, &shader, alpha)
+            }
+            Mapping.Projective { value } => {
+              let shader = run ImagePattern.makeProjective(
+                image,
+                &value,
+                SAMPLE_BILINEAR,
+                EXTEND_REPEAT,
+              )
+              run surface.image(coverage, &shader, alpha)
+            }
+          }
         }
       }
     }
