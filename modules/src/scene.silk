@@ -18,6 +18,10 @@ pub struct RenderOptions {
   /// Zero requests intrinsic sizing; nonzero values override output pixels before zoom.
   pub width: u32,
   pub height: u32,
+  /// Zero uses the root element's own CSS/attribute size; positive values override the
+  /// root `<svg>`'s CSS viewport dimensions in CSS pixels (as inline `width`/`height` would).
+  pub viewportWidth: f64,
+  pub viewportHeight: f64,
   pub zoom: f64,
   pub maxPixels: usize,
   /// The document time in seconds at which animated processing modes sample animations.
@@ -26,7 +30,15 @@ pub struct RenderOptions {
 
 impl RenderOptions {
   pub fn make() -> RenderOptions {
-    return RenderOptions { width: 0, height: 0, zoom: 1.0, maxPixels: 16000000, time: 0.0 }
+    return RenderOptions {
+      width: 0,
+      height: 0,
+      viewportWidth: 0.0,
+      viewportHeight: 0.0,
+      zoom: 1.0,
+      maxPixels: 16000000,
+      time: 0.0,
+    }
   }
 }
 

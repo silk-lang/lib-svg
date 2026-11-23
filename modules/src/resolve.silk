@@ -184,11 +184,21 @@ effect fn sizing(
   initialHeight: f64,
 ) -> Viewport
   ! RenderError {
-  if !f64.isFinite(options.zoom) || options.zoom <= 0.0 {
+  if !f64.isFinite(options.zoom) || options.zoom <= 0.0
+    || !f64.isFinite(options.viewportWidth) || options.viewportWidth < 0.0
+    || !f64.isFinite(options.viewportHeight) || options.viewportHeight < 0.0 {
     fail RenderError.InvalidSize
   }
-  let width = positive(engine.number(root, Property.Width, initialWidth))
-  let height = positive(engine.number(root, Property.Height, initialHeight))
+  let width = if options.viewportWidth > 0.0 {
+    Option<f64>.some(options.viewportWidth)
+  } else {
+    positive(engine.number(root, Property.Width, initialWidth))
+  }
+  let height = if options.viewportHeight > 0.0 {
+    Option<f64>.some(options.viewportHeight)
+  } else {
+    positive(engine.number(root, Property.Height, initialHeight))
+  }
   let ratio = rootRatio(width, height, box)
   let mut w = initialWidth
   let mut h = initialHeight
