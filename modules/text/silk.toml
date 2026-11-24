@@ -6,10 +6,10 @@ kind = "library"
 exports = ["lib", "layout", "lines", "areas", "paths", "on_path"]
 
 [dependencies]
-svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "8429196de1f54d47c946429ad0784853c14709d5", path = "modules/faces", package = "font-faces" }
-harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "8429196de1f54d47c946429ad0784853c14709d5", path = "modules/shape", package = "font-shape" }
-read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "8429196de1f54d47c946429ad0784853c14709d5", path = "modules/parse", package = "font-parse" }
-font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "8429196de1f54d47c946429ad0784853c14709d5", path = "modules/types", package = "font-types" }
-svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "27fe1c042203204009a7d86abc72b3c02fbaaa96", path = "modules/geometry", package = "graphics-geometry" }
-font_outline = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "8429196de1f54d47c946429ad0784853c14709d5", path = "modules/outline", package = "font-outline" }
-css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "2bfeb616ae0e7eb566aad62481be7b42b206042d", path = "modules/properties", package = "css-properties" }
+svg_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "6ac5cf92923c3d2e3993389ec563775b0d3f741c", path = "modules/faces", package = "font-faces" }
+harfrust = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "6ac5cf92923c3d2e3993389ec563775b0d3f741c", path = "modules/shape", package = "font-shape" }
+read_fonts = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "6ac5cf92923c3d2e3993389ec563775b0d3f741c", path = "modules/parse", package = "font-parse" }
+font_types = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "6ac5cf92923c3d2e3993389ec563775b0d3f741c", path = "modules/types", package = "font-types" }
+svg_geometry = { git = "https://github.com/silk-lang/lib-graphics.git", rev = "facc2e7a0ce15bb1eeb8bc9e35c91351f329bb4f", path = "modules/geometry", package = "graphics-geometry" }
+font_outline = { git = "https://github.com/silk-lang/lib-fonts.git", rev = "6ac5cf92923c3d2e3993389ec563775b0d3f741c", path = "modules/outline", package = "font-outline" }
+css_properties = { git = "https://github.com/silk-lang/lib-css.git", rev = "6cb4084cf79e2bbd398a2e2dcbc91b4a6b43a61d", path = "modules/properties", package = "css-properties" }
